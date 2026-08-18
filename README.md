@@ -125,6 +125,35 @@ Every NOT NULL column with a default declares `server_default`, because the bulk
 writes with raw INSERT/COPY rather than the ORM, and Python-side defaults are invisible
 to those.
 
+## Import pipeline
+
+```
+.abx source → convert → validate → paginate → PostgreSQL + data/books/<id>.json
+```
+
+Run against a directory of sources:
+
+```bash
+uv run python scripts/import/import_books.py <source-dir> --limit 100
+```
+
+Properties that matter for the full 18,798-file run:
+
+- **Idempotent**: each book's compact JSON is hashed (`content_sha256`); a re-run skips
+  unchanged sources and re-imports changed ones in place, bumping `content_version`.
+- **Fault-isolated**: one malformed book logs to `import_log` and the run continues;
+  nothing aborts the batch.
+- **Memory-bounded**: books are processed and committed one at a time.
+
+The Shamela `مجموعة` → taxonomy mapping is loaded separately and only needs rebuilding
+when the mapping changes, never per import:
+
+```bash
+uv run python scripts/validate/scan_sources.py <source-dir> --json scan.json
+uv run python scripts/import/build_collection_map.py scan.json -o database/seeds/collection_map.json
+uv run python scripts/import/load_collection_map.py
+```
+
 ## Milestones
 
 | # | Scope | Status |
@@ -132,7 +161,7 @@ to those.
 | 1 | Project skeleton, Compose, migrations, `/api/health` | ✅ done |
 | 2 | Arabic normalizer (SQL + Python), with tests | ✅ done |
 | 3 | Schema: works, books, authors, categories, sections, pages | ✅ done |
-| 4 | Converter + validator + importer, on a small sample | in progress |
-| 5 | `GET /api/books`, `/api/books/{id}`, `/api/books/{id}/download` | |
+| 4 | Converter + validator + importer, on a small sample | ✅ done |
+| 5 | `GET /api/books`, `/api/books/{id}`, `/api/books/{id}/download` | next |
 | 6 | `GET /api/search` — Arabic full-text search | |
 | 7 | Scale testing, then the full 18,000 | |
