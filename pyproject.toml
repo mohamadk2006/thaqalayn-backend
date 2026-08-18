@@ -1,0 +1,35 @@
+[project]
+name = "thaqalayn-backend"
+version = "0.1.0"
+description = "Self-hosted catalog, download, and Arabic full-text search API for the Thaqalayn library"
+# Pinned below 3.14: asyncpg has no wheels for it yet, and building from source on a
+# fresh machine is a bad first-run experience. Revisit once asyncpg ships 3.14 wheels.
+requires-python = ">=3.12,<3.14"
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.28",
+    "ruff>=0.8",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -1,0 +1,27 @@
+# Secrets — never commit
+.env
+
+# The library itself: ~45 GB of converted books and covers.
+data/books/*
+data/covers/*
+!data/books/.gitkeep
+!data/covers/.gitkeep
+
+# Source material
+*.abx
+*.bok
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Tooling
+.DS_Store
+.idea/
+.vscode/

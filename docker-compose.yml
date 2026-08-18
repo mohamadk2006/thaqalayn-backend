@@ -1,0 +1,32 @@
+# PostgreSQL for local development. The same file runs on the VPS — only .env changes.
+#
+# The port is bound to 127.0.0.1 explicitly, not 0.0.0.0: the database must never be
+# reachable from outside the host, on the Mac or on the VPS. The API is the only thing
+# that talks to it, and the API is the only thing exposed publicly.
+services:
+  db:
+    image: postgres:17
+    container_name: thaqalayn-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-thaqalayn}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — copy .env.example to .env}
+      POSTGRES_DB: ${POSTGRES_DB:-thaqalayn}
+      # UTF8 is non-negotiable for Arabic. The ICU provider with an Arabic locale gives
+      # correct collation for ORDER BY on Arabic titles, which libc locales get wrong.
+      # Text *search* deliberately does not depend on this — it uses the 'simple' config
+      # over our own normalized text (see database/sql/arabic_normalize.sql).
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale-provider=icu --icu-locale=ar --locale=C.UTF-8"
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-thaqalayn} -d ${POSTGRES_DB:-thaqalayn}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+volumes:
+  pgdata:
