@@ -67,8 +67,16 @@ class TestSeedData:
         assert codes == ["ar", "fa"]
 
     async def test_subjects_seeded(self, session):
-        count = await session.scalar(select(func.count()).select_from(Subject))
-        assert count == 19
+        """Asserts the slugs, not the count. Clients switch on these strings and the
+        collection mapping references them as foreign keys, so a renamed or dropped slug
+        is a breaking change — whereas adding one is not."""
+        result = await session.execute(select(Subject.id))
+        assert set(result.scalars()) == {
+            "quran", "tafsir", "hadith", "rijal", "aqaid", "usul-fiqh", "fiqh",
+            "rasail-amaliyya", "sira", "tarikh", "tarajim", "adiya", "akhlaq",
+            "falsafa", "lugha", "faharis", "tibb", "qadaya-muasira", "munawwaat",
+            "ulum-ukhra",
+        }
 
 
 class TestGeneratedSearchVector:

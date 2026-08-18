@@ -128,6 +128,9 @@ class ShamelaCollection(Base):
 
     subject_id: Mapped[str | None] = mapped_column(ForeignKey("subjects.id"))
     tradition: Mapped[str | None] = mapped_column(TraditionEnum)
+    # Only meaningful for Sunni fiqh (حنفي/مالكي/شافعي/حنبلي/ظاهري). Free text rather than
+    # an enum until the full corpus confirms the closed set.
+    madhhab: Mapped[str | None] = mapped_column(String(32))
     format: Mapped[str | None] = mapped_column(FormatEnum)
     # Shamela appends '، فارسى' / '، عربى' to many collection names; that suffix is a
     # usable language signal, though the per-file body marker is authoritative.
@@ -152,6 +155,7 @@ class Work(Base):
     author_id: Mapped[int | None] = mapped_column(ForeignKey("authors.id"))
     subject_id: Mapped[str | None] = mapped_column(ForeignKey("subjects.id"))
     tradition: Mapped[str | None] = mapped_column(TraditionEnum)
+    madhhab: Mapped[str | None] = mapped_column(String(32))
     format: Mapped[str | None] = mapped_column(FormatEnum)
     language_code: Mapped[str | None] = mapped_column(ForeignKey("languages.code"))
 
@@ -175,6 +179,7 @@ class Work(Base):
         Index("ix_works_title_norm", "title_norm"),
         Index("ix_works_author", "author_id"),
         Index("ix_works_subject", "subject_id"),
+        Index("ix_works_tradition", "tradition"),
     )
 
 
