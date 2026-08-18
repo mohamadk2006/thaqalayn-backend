@@ -90,7 +90,16 @@ class Author(Base):
     books: Mapped[list[Book]] = relationship(back_populates="author")
 
     __table_args__ = (
-        UniqueConstraint("name_norm", "death_label", name="uq_authors_name_death"),
+        # NULLS NOT DISTINCT: without it, PostgreSQL treats every NULL death_label as
+        # distinct from every other, so ON CONFLICT (name_norm, death_label) silently
+        # fails to match for any author with no recorded death date — creating a fresh
+        # duplicate author (and, downstream, a fresh duplicate work) on every import of
+        # their books. Confirmed with a real test case: an author with no سنة الوفاة
+        # value produced two author rows and two works instead of one of each.
+        UniqueConstraint(
+            "name_norm", "death_label", name="uq_authors_name_death",
+            postgresql_nulls_not_distinct=True,
+        ),
         Index("ix_authors_name_norm", "name_norm"),
     )
 
@@ -175,7 +184,10 @@ class Work(Base):
     books: Mapped[list[Book]] = relationship(back_populates="work", order_by="Book.volume")
 
     __table_args__ = (
-        UniqueConstraint("title_norm", "author_id", name="uq_works_title_author"),
+        UniqueConstraint(
+            "title_norm", "author_id", name="uq_works_title_author",
+            postgresql_nulls_not_distinct=True,
+        ),
         Index("ix_works_title_norm", "title_norm"),
         Index("ix_works_author", "author_id"),
         Index("ix_works_subject", "subject_id"),

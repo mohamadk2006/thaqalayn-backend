@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app import __version__
-from app.api import health
+from app.api import books, health, metadata, works
 from app.config import get_settings
 from app.db import dispose_engine
 
@@ -40,6 +40,9 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(health.router, prefix="/api")
+    app.include_router(works.router, prefix="/api")
+    app.include_router(books.router, prefix="/api")
+    app.include_router(metadata.router, prefix="/api")
     return app
 
 

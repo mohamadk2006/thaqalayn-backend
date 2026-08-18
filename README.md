@@ -125,6 +125,31 @@ Every NOT NULL column with a default declares `server_default`, because the bulk
 writes with raw INSERT/COPY rather than the ORM, and Python-side defaults are invisible
 to those.
 
+## Read API
+
+```
+GET /api/works                    paginated works (title-level; volumes not embedded)
+GET /api/works/{id}               one work + its full volume list
+GET /api/books                    paginated volumes; filter by subject/tradition/language/author/work
+GET /api/books/{id}                one volume, full contract shape
+GET /api/books/{id}/download       the book JSON, as a file
+GET /api/books/{id}/cover          cover image (404 today — no covers exist yet)
+GET /api/authors
+GET /api/categories                the 20 curated subjects (not Shamela's raw مجموعة)
+GET /api/languages
+```
+
+Every list endpoint returns `{ page, limit, total, items }`; `limit` is capped at 200.
+
+`tradition` and `format` are translated at the API boundary from the English slugs
+PostgreSQL stores (`shia`, `book`, …) to the Arabic raw values the iOS client's Swift
+enums use (`شيعي`, `كتاب`, …) — see `TRADITION_DISPLAY`/`FORMAT_DISPLAY` in
+`app/schemas/catalog.py`. `subjectId` stays an English slug on both sides.
+
+The download endpoint resolves `content_path` against `BOOKS_ROOT` and rejects anything
+that would resolve outside it — verified directly by writing a `content_path` designed to
+escape the root and confirming the request is refused rather than served.
+
 ## Import pipeline
 
 ```
@@ -162,6 +187,6 @@ uv run python scripts/import/load_collection_map.py
 | 2 | Arabic normalizer (SQL + Python), with tests | ✅ done |
 | 3 | Schema: works, books, authors, categories, sections, pages | ✅ done |
 | 4 | Converter + validator + importer, on a small sample | ✅ done |
-| 5 | `GET /api/books`, `/api/books/{id}`, `/api/books/{id}/download` | next |
-| 6 | `GET /api/search` — Arabic full-text search | |
+| 5 | `GET /api/books`, `/api/books/{id}`, `/api/books/{id}/download` | ✅ done |
+| 6 | `GET /api/search` — Arabic full-text search | next |
 | 7 | Scale testing, then the full 18,000 | |

@@ -69,18 +69,28 @@ async def _get_or_create_author(session: AsyncSession, name: str, death: str | N
 
 
 async def _get_or_create_work(
-    session: AsyncSession, title: str, author_id: int | None, collection: dict | None
+    session: AsyncSession, title: str, author_id: int | None, collection: dict | None,
+    language: str,
 ) -> int:
-    """Group volumes into a work by (normalized title, author). The collection row already
-    carries the taxonomy, so a work inherits subject/tradition/etc. from the first volume
-    that names its collection."""
+    """Group volumes into a work by (normalized title, author). The collection row
+    already carries the taxonomy, so a work inherits subject/tradition/etc. from the
+    first volume that names its collection.
+
+    `language` is the *book's own* resolved language (body marker, falling back to the
+    collection hint only if that's absent — see the caller) — not the collection hint
+    alone. The collection hint is populated on only 2 of 530 collections, so relying on
+    it exclusively would leave nearly every work's language NULL. ON CONFLICT updates it
+    too: a work's volumes should agree on language, and the most recently imported volume
+    is as good a source of truth as any for that.
+    """
     return await session.scalar(
         text("""
             INSERT INTO works (title, title_norm, author_id, subject_id, tradition,
                                madhhab, format, language_code)
             VALUES (:title, :norm, :author, :subject, cast(:tradition as tradition),
                     :madhhab, cast(:format as book_format), :lang)
-            ON CONFLICT (title_norm, author_id) DO UPDATE SET title = EXCLUDED.title
+            ON CONFLICT (title_norm, author_id) DO UPDATE SET
+                title = EXCLUDED.title, language_code = EXCLUDED.language_code
             RETURNING id
         """),
         {
@@ -89,7 +99,7 @@ async def _get_or_create_work(
             "tradition": (collection or {}).get("tradition"),
             "madhhab": (collection or {}).get("madhhab"),
             "format": (collection or {}).get("format"),
-            "lang": (collection or {}).get("language_hint"),
+            "lang": language,
         },
     )
 
@@ -164,14 +174,18 @@ async def import_one(
         md = manifest["metadata"]
         collection = await _lookup_collection(session, md.get("collection"))
         author_id = await _get_or_create_author(session, manifest["author"], md.get("death"))
-        work_id = await _get_or_create_work(session, manifest["title"], author_id, collection)
 
         # Language: the per-file body marker is authoritative; fall back to the collection
-        # hint; default Arabic.
+        # hint; default Arabic. Resolved before work creation so the work (not just the
+        # book) gets a language, since the collection hint alone covers almost nothing.
         lang = "fa" if "فارسي" in manifest["title"] or "فارسى" in manifest["title"] else None
         if lang is None and collection:
             lang = collection.get("language_hint")
         lang = lang or "ar"
+
+        work_id = await _get_or_create_work(
+            session, manifest["title"], author_id, collection, lang
+        )
 
         stage = "book"
         pages = paginate(content)
