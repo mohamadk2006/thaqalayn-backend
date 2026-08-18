@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import shutil
 import sys
 import uuid
 from datetime import UTC, datetime
@@ -280,6 +281,14 @@ async def main() -> int:
     parser.add_argument("--ids", help="comma-separated list of specific book ids")
     parser.add_argument("--books-root", type=Path, help="override BOOKS_ROOT")
     parser.add_argument("--force", action="store_true", help="re-import even if unchanged")
+    parser.add_argument(
+        "--min-free-gb", type=float, default=3.0,
+        help="stop cleanly if free disk space on BOOKS_ROOT's filesystem drops below "
+             "this many GB (default 3.0) -- a full run's storage cost is close to the "
+             "estimated free space it will run against, so this is what turns an "
+             "unattended out-of-disk failure into a clean, resumable stop instead of an "
+             "unpredictable one partway through a write.",
+    )
     args = parser.parse_args()
 
     books_root = args.books_root or get_settings().books_root
@@ -304,6 +313,7 @@ async def main() -> int:
 
     counts = {"ok": 0, "skipped": 0, "failed": 0}
     started = datetime.now(UTC)
+    stopped_early = False
     sm = get_sessionmaker()
     async with sm() as session:
         for n, source in enumerate(sources, 1):
@@ -315,11 +325,29 @@ async def main() -> int:
                       f"skipped={counts['skipped']} failed={counts['failed']}  "
                       f"({n / elapsed:.1f}/s)")
 
+                # Every book so far is already committed individually, so stopping here
+                # loses nothing -- a later re-run with the same source directory skips
+                # every already-imported book via content_sha256 and simply continues
+                # from wherever this run left off.
+                usage_target = books_root if books_root.exists() else books_root.parent
+                free_gb = shutil.disk_usage(usage_target).free / 1e9
+                if free_gb < args.min_free_gb:
+                    print(
+                        f"\nstopping: only {free_gb:.1f} GB free on BOOKS_ROOT's "
+                        f"filesystem (< --min-free-gb {args.min_free_gb}). "
+                        f"{n}/{len(sources)} files processed so far are safely committed "
+                        f"-- free up space and re-run the same command to resume."
+                    )
+                    stopped_early = True
+                    break
+
     await dispose_engine()
     print(
         f"\ndone: {counts['ok']} imported, {counts['skipped']} skipped, "
         f"{counts['failed']} failed"
     )
+    if stopped_early:
+        return 2
     return 1 if counts["failed"] else 0
 
 
