@@ -19,3 +19,35 @@ from app.db import dispose_engine
 async def _dispose_engine_between_tests():
     yield
     await dispose_engine()
+
+
+@pytest.fixture
+async def session():
+    """A session whose work is always rolled back.
+
+    Schema tests write real rows — works, books, pages — and must not leave them behind
+    for the next test or for whoever is looking at the development database. Binding the
+    session to an outer transaction that is unconditionally rolled back gives each test a
+    clean database without the cost of recreating the schema per test.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.db import get_engine
+
+    connection = await get_engine().connect()
+    transaction = await connection.begin()
+    # join_transaction_mode="create_savepoint" makes the session operate inside a
+    # SAVEPOINT rather than the outer transaction directly. Without it, a test that
+    # deliberately triggers an IntegrityError and rolls back would unwind the fixture's
+    # own transaction, leaving teardown to warn about a deassociated transaction.
+    async_session = AsyncSession(
+        bind=connection,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+    try:
+        yield async_session
+    finally:
+        await async_session.close()
+        await transaction.rollback()
+        await connection.close()

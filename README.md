@@ -110,14 +110,29 @@ embeds its own snapshot of the SQL, so history stays accurate as the file evolve
 The container publishes its port on `127.0.0.1` only. PostgreSQL is never reachable from
 outside the host, on the Mac or on the VPS — the API is the only public surface.
 
+## Schema notes
+
+`books` is a **volume**; `works` is a **title**. Shamela splits multi-volume works into
+one file per جزء, so the 18,798 usable sources collapse to 9,045 works — بحار الأنوار
+alone is 110 files. A book is what gets downloaded, a work is what gets browsed.
+
+The search unit is the **page**, not the paragraph: ~6M rows instead of ~76M for the same
+text, matching what a pre-download result needs to say (book, section, page, snippet).
+Only original text is stored — the normalized form exists solely inside the generated
+`search_tsv` column.
+
+Every NOT NULL column with a default declares `server_default`, because the bulk importer
+writes with raw INSERT/COPY rather than the ORM, and Python-side defaults are invisible
+to those.
+
 ## Milestones
 
 | # | Scope | Status |
 |---|---|---|
 | 1 | Project skeleton, Compose, migrations, `/api/health` | ✅ done |
 | 2 | Arabic normalizer (SQL + Python), with tests | ✅ done |
-| 3 | Schema: works, books, authors, categories, sections, pages | next |
-| 4 | Converter + validator + importer, on a small sample | |
+| 3 | Schema: works, books, authors, categories, sections, pages | ✅ done |
+| 4 | Converter + validator + importer, on a small sample | next |
 | 5 | `GET /api/books`, `/api/books/{id}`, `/api/books/{id}/download` | |
 | 6 | `GET /api/search` — Arabic full-text search | |
 | 7 | Scale testing, then the full 18,000 | |
