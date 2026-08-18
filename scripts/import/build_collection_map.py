@@ -104,7 +104,13 @@ def classify(raw: str) -> dict:
     else:
         tradition = "shared"
 
-    subject = next((s for pattern, s in SUBJECT_RULES if re.search(pattern, normalized)), None)
+    matched_subject = next(
+        (s for pattern, s in SUBJECT_RULES if re.search(pattern, normalized)), None
+    )
+    # No rule matched: default to منوعات (miscellany) rather than leaving it NULL, per an
+    # explicit decision that the long tail isn't worth hand-curating. needs_review stays
+    # True so these remain findable if that decision is ever revisited.
+    subject = matched_subject or "munawwaat"
     fmt = next((f for pattern, f in FORMAT_RULES if re.search(pattern, normalized)), "book")
 
     return {
@@ -115,8 +121,9 @@ def classify(raw: str) -> dict:
         "madhhab": madhhab,
         "format": fmt,
         "language_hint": language,
-        # "review" means a human should look, not that it is necessarily wrong.
-        "needs_review": subject is None or (fmt == "manuscript"),
+        # "review" means a human should look, not that it is necessarily wrong: either the
+        # subject was a defaulted fallback, or the format guess was manuscript.
+        "needs_review": matched_subject is None or (fmt == "manuscript"),
     }
 
 
@@ -136,8 +143,8 @@ def main() -> int:
         entries.append(entry)
 
     total_books = sum(counts.values())
-    unmapped = [e for e in entries if e["subject"] is None]
-    review = [e for e in entries if e["needs_review"]]
+    unmapped = [e for e in entries if e["needs_review"]]
+    review = unmapped
     mapped_books = total_books - sum(e["book_count"] for e in unmapped)
 
     args.out.write_text(json.dumps(entries, ensure_ascii=False, indent=1), encoding="utf-8")

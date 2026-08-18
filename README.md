@@ -132,7 +132,7 @@ to those.
 | 1 | Project skeleton, Compose, migrations, `/api/health` | ✅ done |
 | 2 | Arabic normalizer (SQL + Python), with tests | ✅ done |
 | 3 | Schema: works, books, authors, categories, sections, pages | ✅ done |
-| 4 | Converter + validator + importer, on a small sample | next |
+| 4 | Converter + validator + importer, on a small sample | in progress |
 | 5 | `GET /api/books`, `/api/books/{id}`, `/api/books/{id}/download` | |
 | 6 | `GET /api/search` — Arabic full-text search | |
 | 7 | Scale testing, then the full 18,000 | |
