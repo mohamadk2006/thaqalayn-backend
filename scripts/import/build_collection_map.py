@@ -36,13 +36,17 @@ from app.services.arabic import normalize  # noqa: E402
 # carry two suffixes ("، عربي ، فارسي"), so this is applied repeatedly, not once.
 LANGUAGE_SUFFIX = re.compile(r"\s*[،,]\s*(فارسي|عربي)\s*$")
 
-# Sunni schools of law. Presence of any of these implies tradition=sunni.
+# Schools of law whose name alone is enough to fix both tradition and madhhab. Zaydi
+# fiqh follows its own school just as the five Sunni ones do -- omitting it left every
+# Zaydi book with tradition=zaydi but madhhab=None, an inconsistency with how every
+# other school is represented.
 MADHAHIB = {
     "حنفي": "حنفي",
     "مالكي": "مالكي",
     "شافعي": "شافعي",
     "حنبلي": "حنبلي",
     "ظاهري": "ظاهري",
+    "زيدي": "زيدي",
 }
 
 # (regex on normalized text, subject slug). FIRST MATCH WINS — order is meaningful.
@@ -55,6 +59,10 @@ SUBJECT_RULES: list[tuple[str, str]] = [
     # definite article sits between the two words and a two-word substring never matches.
     (r"فتاوي|رسائل عمليه|احكام",                       "rasail-amaliyya"),
     (r"فرق",                                           "aqaid"),
+    # Before the generic fiqh rule: "مصادر الحديث ... ( قسم الفقه )" is a hadith
+    # collection organized by fiqh topic, not a fiqh treatise -- confirmed by checking
+    # every raw collection containing both words (419 books total across 4 variants).
+    (r"حديث.*قسم.*فقه",                                "hadith"),
     (r"مذهب|فقه|فقهيه|فقهي",                          "fiqh"),
     (r"تفسير|علوم القران|القران الكريم",               "tafsir"),
     (r"حديث",                                         "hadith"),
@@ -96,10 +104,17 @@ def classify(raw: str) -> dict:
     # Tradition. Madhhab names imply Sunni even without the word السنه appearing.
     madhhab = next((v for k, v in MADHAHIB.items() if k in normalized), None)
     if "زيدي" in normalized:
-        tradition = "zaydi"
+        tradition = "zaydi"  # checked first: زيدي is now also in MADHAHIB, but must
+                              # never fall through to the sunni branch below
     elif madhhab or re.search(r"السنه|السني|السنيين|المذاهب السنيه", normalized):
         tradition = "sunni"
-    elif re.search(r"الشيعه|الشيعيه|الاماميه|المراجع|المستبصرين", normalized):
+    # "ائمه" (الأئمة/والأئمة): decided explicitly rather than guessed -- sīra collections
+    # framed as "the Prophet AND the Imams" are Imami-specific wording, not shared by
+    # Sunni sources. Checked every collection containing this word before adding it: one
+    # already-sunni-tagged compound label is unaffected since the sunni branch above
+    # already wins for it. "معصوم" (al-Ma'sumin, the Fourteen Infallibles) is exclusively
+    # Twelver Shia doctrine -- checked, only 3 books, both unambiguous.
+    elif re.search(r"الشيعه|الشيعيه|الاماميه|المراجع|المستبصرين|ائمه|معصوم", normalized):
         tradition = "shia"
     else:
         tradition = "shared"
