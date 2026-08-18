@@ -159,6 +159,10 @@ class TestWorks:
         assert body["volumeCount"] == 2
         volumes = {v["bookId"]: v["volume"] for v in body["volumes"]}
         assert volumes == {BOOK_B1: 1, BOOK_B2: 2}
+        # Regression: get_work's volumes loop once forgot to fill in subjectTitle after
+        # batch-loading it, leaving it null in every volume despite subjectId being set.
+        for volume in body["volumes"]:
+            assert volume["subjectTitle"] is not None
 
     async def test_work_filters_survive_pagination(self, imported: AsyncClient):
         response = await imported.get("/api/works", params={"tradition": "sunni"})

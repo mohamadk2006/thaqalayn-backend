@@ -155,14 +155,21 @@ async def get_work(session: AsyncSession, work_id: int) -> WorkDetailOut | None:
         )
     ).scalars().all()
 
-    subject_titles = await _subject_titles(session, {work.subject_id} if work.subject_id else set())
+    subject_titles = await _subject_titles(
+        session, {work.subject_id} if work.subject_id else set()
+    )
     collections = await _book_collection_raw(session, [b.id for b in books])
     work_collection = next(iter(collections.values()), None)
 
-    volumes = [
-        _book_out(b, work.title, collections.get(b.id))
-        for b in books
-    ]
+    volumes = []
+    for b in books:
+        out = _book_out(b, work.title, collections.get(b.id))
+        # _book_out leaves subjectTitle unset by design (it's filled in by the caller
+        # once subjects are batch-loaded) — list_books/get_book already do this; this
+        # loop was the one caller that forgot to, leaving every volume's subjectTitle
+        # null despite subjectId being populated right next to it.
+        out.subjectTitle = subject_titles.get(out.subjectId)
+        volumes.append(out)
     total_bytes = sum(b.content_bytes or 0 for b in books)
 
     return WorkDetailOut(
