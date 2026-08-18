@@ -83,7 +83,29 @@ this wrong).
 Full-text **search** deliberately does not depend on that locale. It uses the `simple`
 text search configuration over text passed through a project-owned Arabic normalizer, so
 that matching behaviour is explicit and testable rather than inherited from whatever
-locale data the host happens to ship. See `database/sql/` (Milestone 2).
+locale data the host happens to ship. See `database/sql/arabic_normalize.sql`.
+
+## Arabic normalization
+
+`arabic_normalize(text)` in PostgreSQL and `app.services.arabic.normalize()` in Python
+are the same function written twice. The search index is built by the SQL one and
+queried through the Python one, so they must agree byte-for-byte — a divergence would
+produce silently wrong search results rather than an error.
+
+`tests/test_arabic_parity.py` enforces agreement across 422 strings of real corpus text
+covering every rule: diacriticized text, non-NFC text, Persian letterforms, alef and
+ta-marbuta variants, plus titles and author names.
+
+The rules, in order: NFC compose → strip tashkeel/tatweel/zero-width/bidi → fold
+`أإآٱ→ا`, `ى→ي`, `ة→ه`, Persian `ک→ك` `ی→ي` `ھۀ→ه` → fold Arabic-Indic and Persian
+digits to ASCII → lowercase → collapse whitespace.
+
+Normalization is for **matching only**. Original text keeps its full tashkeel and is
+what gets stored, served, and displayed; the source books are never modified.
+
+When changing the rules, edit `database/sql/arabic_normalize.sql` and
+`app/services/arabic.py` together, then generate a new Alembic revision. Each revision
+embeds its own snapshot of the SQL, so history stays accurate as the file evolves.
 
 The container publishes its port on `127.0.0.1` only. PostgreSQL is never reachable from
 outside the host, on the Mac or on the VPS — the API is the only public surface.
@@ -93,8 +115,8 @@ outside the host, on the Mac or on the VPS — the API is the only public surfac
 | # | Scope | Status |
 |---|---|---|
 | 1 | Project skeleton, Compose, migrations, `/api/health` | ✅ done |
-| 2 | Arabic normalizer (SQL + Python), with tests | next |
-| 3 | Schema: works, books, authors, categories, sections, pages | |
+| 2 | Arabic normalizer (SQL + Python), with tests | ✅ done |
+| 3 | Schema: works, books, authors, categories, sections, pages | next |
 | 4 | Converter + validator + importer, on a small sample | |
 | 5 | `GET /api/books`, `/api/books/{id}`, `/api/books/{id}/download` | |
 | 6 | `GET /api/search` — Arabic full-text search | |
