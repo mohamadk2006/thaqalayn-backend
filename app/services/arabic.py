@@ -95,3 +95,82 @@ def normalize(text: str) -> str:
     text = text.translate(_TRANSLATION)
     text = text.lower()
     return _WHITESPACE_RE.sub(" ", text).strip()
+
+
+# ── Inverse mapping, for locating matches in the ORIGINAL (undiacritized-search-but-
+# fully-diacritized-display) text ──────────────────────────────────────────────────
+#
+# The GIN index and phraseto_tsquery() find *which pages* match against normalized
+# text — that part is settled and fast. But a search result has to show the user a
+# snippet of the real page, with full tashkeel, not the stripped/folded text the index
+# is built from (ts_headline() would return exactly that stripped text, since it has no
+# way to see the original). So snippet extraction runs as a second, separate step: take
+# the already-matched page's original text and locate the same match directly in it.
+#
+# _REVERSE_FOLDING inverts _LETTER_FOLDING: for each normalized letter, every original
+# spelling that folds to it. Building a regex from this — one alternation group per
+# letter of the query, with an optional tashkeel/tatweel run allowed between every pair
+# — matches any original-text spelling that would normalize to the query, without
+# needing a character-by-character position map between normalized and original text
+# (which NFC composition and mark-stripping make non-trivial to maintain).
+_REVERSE_FOLDING: dict[str, str] = {}
+for _original, _norm in _LETTER_FOLDING.items():
+    _REVERSE_FOLDING.setdefault(_norm, set()).add(_original)
+for _norm in list(_REVERSE_FOLDING):
+    _REVERSE_FOLDING[_norm].add(_norm)  # the normalized form is always itself a valid original
+
+_REVERSE_DIGITS: dict[str, str] = {}
+for _original, _digit in _DIGIT_FOLDING.items():
+    _REVERSE_DIGITS.setdefault(_digit, set()).add(_original)
+for _digit in list(_REVERSE_DIGITS):
+    _REVERSE_DIGITS[_digit].add(_digit)
+
+_MARK_GAP = f"[{_TASHKEEL}{_TATWEEL}{_INVISIBLES}]*"
+
+
+def build_match_pattern(normalized_query: str) -> re.Pattern[str]:
+    """Build a regex that finds `normalized_query` (already NFC + folded + lowercased,
+    i.e. the output of `normalize()`) directly in ORIGINAL, undiacritized-in-neither-
+    direction source text.
+
+    One alternation group per significant character (covering every original spelling
+    that folds to it), with an optional run of marks allowed between each — so
+    `normalize("الامام")` matches "اَلْإِمَامُ" in the real, displayed page text at
+    whatever exact position it occurs, without ever normalizing (and thereby losing
+    the tashkeel of) that displayed text itself.
+
+    Multi-word queries are joined on whitespace with a flexible-whitespace separator,
+    matching how `normalize()` collapses whitespace runs before the SQL side ever sees
+    the query — so a query that matched as a phrase via phraseto_tsquery finds the same
+    phrase here.
+    """
+    words = normalized_query.split(" ")
+    word_patterns = []
+    for word in words:
+        char_patterns = []
+        for ch in word:
+            if ch in _REVERSE_FOLDING:
+                options = "".join(sorted(_REVERSE_FOLDING[ch]))
+                char_patterns.append(f"[{re.escape(options)}]")
+            elif ch in _REVERSE_DIGITS:
+                options = "".join(sorted(_REVERSE_DIGITS[ch]))
+                char_patterns.append(f"[{re.escape(options)}]")
+            else:
+                char_patterns.append(re.escape(ch))
+        word_patterns.append(_MARK_GAP.join(char_patterns))
+    # Between words: at least one whitespace/mark character, collapsed by normalize()
+    # from what could be any run of real whitespace in the original.
+    pattern = rf"[\s{_TASHKEEL}{_TATWEEL}]+".join(word_patterns)
+    return re.compile(pattern)
+
+
+def find_original_match(original_text: str, normalized_query: str) -> re.Match[str] | None:
+    """Locate `normalized_query`'s first occurrence in `original_text`, returning a
+    Match over the ORIGINAL string's own coordinates (so callers can slice `original_text`
+    directly for a snippet). None if the SQL/GIN side's tokenization diverged enough from
+    this regex that no direct match is found — callers should fall back to showing the
+    start of the page rather than fail the whole search result.
+    """
+    if not normalized_query.strip():
+        return None
+    return build_match_pattern(normalized_query).search(original_text)

@@ -26,8 +26,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import json
+import re
 import shutil
 import sys
 import uuid
@@ -50,8 +52,24 @@ from app.services.paging import paginate, paginate_sections  # noqa: E402
 
 
 def _hijri_year(death_label: str) -> int | None:
-    digits = "".join(ch for ch in death_label if ch.isdigit())
-    return int(digits) if digits else None
+    """Extract a single representative year from a سنة الوفاة label.
+
+    Was concatenating every digit in the string into one number, which is correct only
+    for a plain single year. Many real labels are compound -- either a range for one
+    person's uncertain death ("142 - 276" -> both years get concatenated into a
+    meaningless 142276), or several distinct scholars combined into one "author" entry
+    ("1281 - 1312 - 1327 - 1292" -- four different people's death years, concatenated
+    into a 16-digit number that overflows Postgres's int32 and crashes the import
+    outright). Confirmed by auditing the already-imported table: dozens of rows carried
+    garbage values from exactly this concatenation, not just the one that crashed.
+
+    Extracting the first standalone digit run instead gives a defensible single year for
+    both cases -- the first date of a range, or the first scholar of a compound entry --
+    while `death_label` itself keeps the full original text regardless, so nothing about
+    the compound/range nature of the source is ever lost, only this one derived column.
+    """
+    match = re.search(r"\d+", death_label)
+    return int(match.group()) if match else None
 
 
 async def _get_or_create_author(session: AsyncSession, name: str, death: str | None) -> int | None:
@@ -237,16 +255,30 @@ async def import_one(
         await session.execute(text("DELETE FROM pages WHERE book_id = :id"), {"id": bid})
         await session.execute(text("DELETE FROM sections WHERE book_id = :id"), {"id": bid})
 
+        section_rows = paginate_sections(content)
         ord_to_section_id: dict[int, int] = {}
-        for sec in paginate_sections(content):
-            section_id = await session.scalar(
-                text("""INSERT INTO sections (book_id, ord, title, title_norm,
-                                              page_start, page_end)
-                        VALUES (:bid, :ord, :title, :norm, :ps, :pe) RETURNING id"""),
-                {"bid": bid, "ord": sec.ord, "title": sec.title,
-                 "norm": normalize(sec.title), "ps": sec.page_start, "pe": sec.page_end},
+        if section_rows:
+            values_sql = ", ".join(f"(:bid, :ord{i}, :title{i}, :norm{i}, :ps{i}, :pe{i})"
+                                    for i in range(len(section_rows)))
+            params: dict = {"bid": bid}
+            for i, sec in enumerate(section_rows):
+                params.update({
+                    f"ord{i}": sec.ord, f"title{i}": sec.title,
+                    f"norm{i}": normalize(sec.title),
+                    f"ps{i}": sec.page_start, f"pe{i}": sec.page_end,
+                })
+            # A single INSERT ... RETURNING for the whole book's sections. PostgreSQL
+            # returns rows in the same order the VALUES list was given, so this can be
+            # zipped directly against section_rows without needing `ord` echoed back.
+            result = await session.execute(
+                text(f"""INSERT INTO sections (book_id, ord, title, title_norm,
+                                                page_start, page_end)
+                        VALUES {values_sql} RETURNING id"""),
+                params,
             )
-            ord_to_section_id[sec.ord] = section_id
+            ord_to_section_id = {
+                sec.ord: row[0] for sec, row in zip(section_rows, result.fetchall(), strict=True)
+            }
 
         stage = "pages"
         if pages:
@@ -274,6 +306,36 @@ async def import_one(
         return "failed"
 
 
+async def _worker(
+    queue: asyncio.Queue[Path],
+    counts: dict[str, int],
+    counts_lock: asyncio.Lock,
+    stop_event: asyncio.Event,
+    run_id: str,
+    books_root: Path,
+    force: bool,
+) -> None:
+    """One concurrent worker: its own session (an AsyncSession is not safe to share
+    across concurrent coroutines), pulling files off a shared queue until it's empty or
+    `stop_event` is set. Profiling the single-threaded version showed the process at 7.5%
+    CPU throughout the run -- almost entirely idle, waiting on network round trips to
+    Postgres -- which is exactly the situation concurrent workers fix: while one waits on
+    a round trip, another can be doing useful work."""
+    sm = get_sessionmaker()
+    async with sm() as session:
+        while not stop_event.is_set():
+            try:
+                source = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            try:
+                result = await import_one(session, source, run_id, books_root, force)
+            finally:
+                queue.task_done()
+            async with counts_lock:
+                counts[result] += 1
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source_dir", type=Path)
@@ -281,6 +343,14 @@ async def main() -> int:
     parser.add_argument("--ids", help="comma-separated list of specific book ids")
     parser.add_argument("--books-root", type=Path, help="override BOOKS_ROOT")
     parser.add_argument("--force", action="store_true", help="re-import even if unchanged")
+    parser.add_argument(
+        "--concurrency", type=int, default=6,
+        help="number of books to import concurrently (default 6). The importer is "
+             "I/O-bound on database round trips, not CPU-bound, so several books' "
+             "worth of DB work can overlap productively. Each worker holds its own "
+             "connection; SQLAlchemy's default pool (5 + 10 overflow = 15) comfortably "
+             "covers the default concurrency without extra configuration.",
+    )
     parser.add_argument(
         "--min-free-gb", type=float, default=3.0,
         help="stop cleanly if free disk space on BOOKS_ROOT's filesystem drops below "
@@ -309,37 +379,68 @@ async def main() -> int:
         return 1
 
     run_id = f"{datetime.now(UTC):%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:8]}"
-    print(f"run {run_id}: {len(sources)} files → {books_root}")
+    print(f"run {run_id}: {len(sources)} files → {books_root} "
+          f"(concurrency={args.concurrency})")
+
+    queue: asyncio.Queue[Path] = asyncio.Queue()
+    for source in sources:
+        queue.put_nowait(source)
 
     counts = {"ok": 0, "skipped": 0, "failed": 0}
+    counts_lock = asyncio.Lock()
+    stop_event = asyncio.Event()
     started = datetime.now(UTC)
-    stopped_early = False
-    sm = get_sessionmaker()
-    async with sm() as session:
-        for n, source in enumerate(sources, 1):
-            result = await import_one(session, source, run_id, books_root, args.force)
-            counts[result] += 1
-            if n % 50 == 0 or n == len(sources):
-                elapsed = (datetime.now(UTC) - started).total_seconds()
-                print(f"  {n}/{len(sources)}  ok={counts['ok']} "
-                      f"skipped={counts['skipped']} failed={counts['failed']}  "
-                      f"({n / elapsed:.1f}/s)")
 
-                # Every book so far is already committed individually, so stopping here
-                # loses nothing -- a later re-run with the same source directory skips
-                # every already-imported book via content_sha256 and simply continues
-                # from wherever this run left off.
-                usage_target = books_root if books_root.exists() else books_root.parent
-                free_gb = shutil.disk_usage(usage_target).free / 1e9
-                if free_gb < args.min_free_gb:
-                    print(
-                        f"\nstopping: only {free_gb:.1f} GB free on BOOKS_ROOT's "
-                        f"filesystem (< --min-free-gb {args.min_free_gb}). "
-                        f"{n}/{len(sources)} files processed so far are safely committed "
-                        f"-- free up space and re-run the same command to resume."
-                    )
-                    stopped_early = True
-                    break
+    async def monitor() -> None:
+        """Polls progress and disk space independently of the workers, since with
+        concurrent workers there's no single loop iteration to hang a periodic check
+        off of anymore."""
+        usage_target = books_root if books_root.exists() else books_root.parent
+        while not stop_event.is_set():
+            await asyncio.sleep(15)
+            async with counts_lock:
+                n = counts["ok"] + counts["skipped"] + counts["failed"]
+                snapshot = dict(counts)
+            if n == 0:
+                continue
+            elapsed = (datetime.now(UTC) - started).total_seconds()
+            print(f"  {n}/{len(sources)}  ok={snapshot['ok']} "
+                  f"skipped={snapshot['skipped']} failed={snapshot['failed']}  "
+                  f"({n / elapsed:.1f}/s)")
+
+            # Every completed book is already committed individually, so stopping here
+            # loses nothing -- a later re-run with the same source directory skips every
+            # already-imported book via content_sha256 and simply continues from
+            # wherever this run left off.
+            free_gb = shutil.disk_usage(usage_target).free / 1e9
+            if free_gb < args.min_free_gb:
+                print(
+                    f"\nstopping: only {free_gb:.1f} GB free on BOOKS_ROOT's "
+                    f"filesystem (< --min-free-gb {args.min_free_gb}). "
+                    f"{n}/{len(sources)} files processed so far are safely committed "
+                    f"-- free up space and re-run the same command to resume."
+                )
+                stop_event.set()
+            if n >= len(sources):
+                stop_event.set()
+
+    monitor_task = asyncio.create_task(monitor())
+    workers = [
+        asyncio.create_task(
+            _worker(queue, counts, counts_lock, stop_event, run_id, books_root, args.force)
+        )
+        for _ in range(args.concurrency)
+    ]
+    await asyncio.gather(*workers)
+    # Cancel rather than await: the monitor sleeps in 15s increments, so simply setting
+    # stop_event and awaiting it would stall shutdown for up to 15s after every book is
+    # already done -- pure dead time, since its own progress/disk-space check has
+    # nothing left to usefully do once the queue is empty.
+    monitor_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await monitor_task
+
+    stopped_early = (counts["ok"] + counts["skipped"] + counts["failed"]) < len(sources)
 
     await dispose_engine()
     print(

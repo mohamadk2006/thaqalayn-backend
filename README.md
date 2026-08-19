@@ -150,6 +150,47 @@ The download endpoint resolves `content_path` against `BOOKS_ROOT` and rejects a
 that would resolve outside it — verified directly by writing a `content_path` designed to
 escape the root and confirming the request is refused rather than served.
 
+## Search
+
+```
+GET /api/search?q=...&page=&limit=&subject=&tradition=&language=&author=&work=
+```
+
+Same paginated envelope and filters as `/api/books`. Matching runs against the
+GIN-indexed, normalized `search_tsv` column — fast and already proven correct against
+real diacritized text (Milestone 2). Each hit:
+
+```json
+{
+  "bookId": "…", "workId": "…", "workTitle": "…", "title": "…", "author": "…",
+  "volume": null, "subjectId": "…", "subjectTitle": "…", "sectionTitle": "…",
+  "page": 159, "snippet": "…", "matchStart": 52, "matchEnd": 65, "score": 3.7
+}
+```
+
+`ts_headline()` was not an option for the snippet: it runs against `search_tsv`'s own
+*normalized* source, so it would return tashkeel-stripped text. Instead,
+`app/services/arabic.py::find_original_match()` builds a regex — one alternation group
+per query letter, covering every original spelling that folds to it (the *inverse* of
+`normalize()`), with optional tashkeel/tatweel allowed between each — and searches the
+matched page's real, original text directly. `matchStart`/`matchEnd` are character
+offsets into `snippet` itself, verified pixel-exact against real corpus text.
+
+**Performance, measured honestly on this dev machine** (Docker on a 16 GB Mac, `pages`
+is 39 GB): a realistic phrase search is fast, warm or cold (under 1s). An extremely
+common single word matching >5% of the whole library (real example: "الصلاة", 562K of
+7.5M pages) stays inherently expensive — no index or query design avoids reading that
+many rows, and this machine can't cache a 39 GB table in its own available RAM. Fixed
+what was actually a misconfiguration along the way (`shared_buffers` 128MB→2GB,
+`work_mem` 4MB→64MB — the latter alone ended a GIN "lossy bitmap" fallback that was
+discarding ~1M false-candidate rows per broad query) and confirmed those fixes hold: an
+18x speedup on realistic warm queries, a 2.5x speedup on the worst-case broad query.
+
+This is also why the VPS should be sized with real RAM headroom (16–32 GB, not the
+4–8 GB a write-only import workload alone would suggest) — search read performance is
+directly memory-bound, and a dedicated Linux host with native disk I/O should do
+meaningfully better than this constrained dev setup even before the RAM difference.
+
 ## Import pipeline
 
 ```
@@ -188,5 +229,5 @@ uv run python scripts/import/load_collection_map.py
 | 3 | Schema: works, books, authors, categories, sections, pages | ✅ done |
 | 4 | Converter + validator + importer, on a small sample | ✅ done |
 | 5 | `GET /api/books`, `/api/books/{id}`, `/api/books/{id}/download` | ✅ done |
-| 6 | `GET /api/search` — Arabic full-text search | next |
-| 7 | Scale testing, then the full 18,000 | |
+| 6 | `GET /api/search` — Arabic full-text search | ✅ done |
+| 7 | Scale testing, then the full 18,000 | full import done; formal scale report pending |
