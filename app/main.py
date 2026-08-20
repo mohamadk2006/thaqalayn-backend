@@ -8,6 +8,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from starlette.middleware.gzip import GZipMiddleware
 
 from app import __version__
 from app.api import books, health, metadata, search, works
@@ -39,6 +40,15 @@ def create_app() -> FastAPI:
         description="Catalog, download, and Arabic full-text search for the Thaqalayn library.",
         lifespan=lifespan,
     )
+    # Gzip transport for responses over 1KB — book downloads are the target (Arabic
+    # text compresses 70-80%+), but this also shrinks large catalog/search pages for
+    # free. TEMPORARY: when Nginx goes in front on the VPS (the HTTPS/Nginx
+    # milestone), decide whether Nginx's own `gzip on` replaces this middleware or
+    # whether both stay — double compression isn't broken (gzip won't recompress an
+    # already-gzip Content-Encoding), just pointless CPU. Remove this if Nginx takes
+    # over the job.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
+
     app.include_router(health.router, prefix="/api")
     app.include_router(works.router, prefix="/api")
     app.include_router(books.router, prefix="/api")
