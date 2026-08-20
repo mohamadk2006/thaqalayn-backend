@@ -130,30 +130,56 @@ to those.
 ```
 GET /api/works                    paginated works (title-level; volumes not embedded)
 GET /api/works/{id}               one work + its full volume list
-GET /api/books                    paginated volumes; filter by subject/tradition/language/author/work
+GET /api/books                    paginated volumes; filter by subject/language/author/work
 GET /api/books/{id}                one volume, full contract shape
 GET /api/books/{id}/download       the book JSON, as a file
 GET /api/books/{id}/cover          cover image (404 today — no covers exist yet)
 GET /api/authors
-GET /api/categories                the 20 curated subjects (not Shamela's raw مجموعة)
+GET /api/categories                Shamela's own 39 published categories (see Categories below)
 GET /api/languages
 ```
 
 Every list endpoint returns `{ page, limit, total, items }`; `limit` is capped at 200.
 
-`tradition` and `format` are translated at the API boundary from the English slugs
-PostgreSQL stores (`shia`, `book`, …) to the Arabic raw values the iOS client's Swift
-enums use (`شيعي`, `كتاب`, …) — see `TRADITION_DISPLAY`/`FORMAT_DISPLAY` in
-`app/schemas/catalog.py`. `subjectId` stays an English slug on both sides.
+`subjectId` is an English slug on both sides (e.g. `fiqh-hanbali`); `subjectTitle` carries
+the Arabic display name. There is no separate tradition/madhhab/format field — see
+Categories below for why.
 
 The download endpoint resolves `content_path` against `BOOKS_ROOT` and rejects anything
 that would resolve outside it — verified directly by writing a `content_path` designed to
 escape the root and confirming the request is refused rather than served.
 
+## Categories
+
+`GET /api/categories` returns Shamela's own published 39-category list — given directly
+as ground truth, not a scheme this project invented (an earlier iteration used 20
+self-invented subjects plus separate tradition/madhhab/format columns; that scheme was
+replaced). Most of what tradition/madhhab/format used to capture is already encoded in
+which of the 39 a work falls under — e.g. `فقه المذهب الحنبلي` already says fiqh +
+hanbali, `مصادر العقائد عند السنيين` already says aqaid + sunni — so a single subject
+slug is now the only classification dimension.
+
+The sources carry **530 distinct raw `< مجموعة >` strings** for those 39 categories:
+orthographic variants (عربى vs عربي), separator variants (parentheses vs. a dash vs.
+"قسم"), appended language suffixes, and stacked/compound values. `subject_id` is derived
+from the raw string by `scripts/import/build_collection_map.py` — ordered, most-specific
+regex rules, checked against every one of the 530 real values, not written from a guess.
+
+**A 40th slug, `other` (أخرى), catches ~11.8% of the library (~2,183 books, 1,080
+works)** that isn't really "other" thematically — it's the tradition-ambiguous residual.
+Every one of the 39 hadith/tafsir/aqaid/rijal categories is tradition-specific (سنة vs.
+شيعة), and a raw string like a bare `مصادر الحديث` genuinely doesn't say which. Rather
+than guess a tradition with no evidence behind it, or leave `subject_id` `NULL`, these
+are routed to `other` — a real, browsable, non-NULL category, per an explicit decision
+to prefer a labeled catch-all. Revising the mapping (including ever splitting `other`
+further, if a real signal turns up) is always a re-run of `build_collection_map.py` →
+`load_collection_map.py` → `resync_taxonomy.py`, never a re-import — the same pattern
+used for every taxonomy fix so far.
+
 ## Search
 
 ```
-GET /api/search?q=...&page=&limit=&subject=&tradition=&language=&author=&work=
+GET /api/search?q=...&page=&limit=&subject=&language=&author=&work=
 ```
 
 Same paginated envelope and filters as `/api/books`. Matching runs against the
@@ -230,4 +256,4 @@ uv run python scripts/import/load_collection_map.py
 | 4 | Converter + validator + importer, on a small sample | ✅ done |
 | 5 | `GET /api/books`, `/api/books/{id}`, `/api/books/{id}/download` | ✅ done |
 | 6 | `GET /api/search` — Arabic full-text search | ✅ done |
-| 7 | Scale testing, then the full 18,000 | full import done; formal scale report pending |
+| 7 | Scale testing, then the full 18,000 | ✅ done — see [docs/milestone-7-scale-report.md](docs/milestone-7-scale-report.md) |

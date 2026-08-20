@@ -17,14 +17,13 @@ async def list_works(
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
     subject: str | None = None,
-    tradition: str | None = Query(None, pattern="^(shia|sunni|zaydi|shared)$"),
     language: str | None = None,
     author: int | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> PageEnvelope[WorkOut]:
     items, total = await catalog_service.list_works(
         session, page=page, limit=limit,
-        subject_id=subject, tradition=tradition, language=language, author_id=author,
+        subject_id=subject, language=language, author_id=author,
     )
     return PageEnvelope(page=page, limit=limit, total=total, items=items)
 

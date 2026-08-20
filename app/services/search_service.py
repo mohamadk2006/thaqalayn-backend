@@ -78,7 +78,6 @@ async def search(
     page: int,
     limit: int,
     subject_id: str | None = None,
-    tradition: str | None = None,
     language: str | None = None,
     author_id: int | None = None,
     work_id: int | None = None,
@@ -96,9 +95,6 @@ async def search(
     if subject_id:
         conditions.append("w.subject_id = :subject_id")
         params["subject_id"] = subject_id
-    if tradition:
-        conditions.append("w.tradition = cast(:tradition as tradition)")
-        params["tradition"] = tradition
     if language:
         conditions.append("b.language_code = :language")
         params["language"] = language

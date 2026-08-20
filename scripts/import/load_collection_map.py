@@ -26,16 +26,12 @@ from app.db import dispose_engine, get_sessionmaker  # noqa: E402
 
 UPSERT = text("""
     INSERT INTO shamela_collections
-        (raw, normalized, subject_id, tradition, madhhab, format, language_hint, book_count)
+        (raw, normalized, subject_id, language_hint, book_count)
     VALUES
-        (:raw, :normalized, :subject, cast(:tradition as tradition), :madhhab,
-         cast(:format as book_format), :language_hint, :book_count)
+        (:raw, :normalized, :subject, :language_hint, :book_count)
     ON CONFLICT (raw) DO UPDATE SET
         normalized    = EXCLUDED.normalized,
         subject_id    = EXCLUDED.subject_id,
-        tradition     = EXCLUDED.tradition,
-        madhhab       = EXCLUDED.madhhab,
-        format        = EXCLUDED.format,
         language_hint = EXCLUDED.language_hint,
         book_count    = EXCLUDED.book_count
 """)
@@ -57,9 +53,6 @@ async def main() -> int:
                     "raw": e["raw"],
                     "normalized": e["normalized"],
                     "subject": e["subject"],
-                    "tradition": e["tradition"],
-                    "madhhab": e["madhhab"],
-                    "format": e["format"],
                     "language_hint": e["language_hint"],
                     "book_count": e["book_count"],
                 }

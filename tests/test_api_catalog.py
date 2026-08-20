@@ -114,28 +114,24 @@ class TestBooksList:
         assert body["limit"] == 2
         assert len(body["items"]) <= 2
 
-    async def test_filters_by_tradition(self, imported: AsyncClient):
-        """Narrowed with `work` on top of `tradition`, deliberately -- the dev database
-        is a live, actively-growing import (thousands of real sunni books alongside
-        these two synthetic ones), so an unscoped tradition=sunni page can legitimately
-        not contain these two IDs on page 1. Combining with `work` makes the assertion
-        exact regardless of how much other real data exists."""
+    async def test_filters_by_subject(self, imported: AsyncClient):
+        """Narrowed with `work` on top of `subject`, deliberately -- the dev database
+        is a live, actively-growing import (thousands of real fiqh-hanafi books
+        alongside these two synthetic ones), so an unscoped subject=fiqh-hanafi page
+        can legitimately not contain these two IDs on page 1. Combining with `work`
+        makes the assertion exact regardless of how much other real data exists."""
         work_id = (await imported.get(f"/api/books/{BOOK_B1}")).json()["workId"]
 
         response = await imported.get(
-            "/api/books", params={"tradition": "sunni", "work": work_id}
+            "/api/books", params={"subject": "fiqh-hanafi", "work": work_id}
         )
         book_ids = {item["bookId"] for item in response.json()["items"]}
         assert book_ids == {BOOK_B1, BOOK_B2}
 
         response = await imported.get(
-            "/api/books", params={"tradition": "shia", "work": work_id}
+            "/api/books", params={"subject": "tafsir-shia", "work": work_id}
         )
-        assert response.json()["items"] == []  # this work is sunni, not shia
-
-    async def test_invalid_tradition_is_rejected(self, imported: AsyncClient):
-        response = await imported.get("/api/books", params={"tradition": "nonsense"})
-        assert response.status_code == 422
+        assert response.json()["items"] == []  # this work is fiqh-hanafi, not tafsir-shia
 
     async def test_limit_is_bounded(self, imported: AsyncClient):
         response = await imported.get("/api/books", params={"limit": 1000})
@@ -149,8 +145,7 @@ class TestBookDetail:
         body = response.json()
         assert body["bookId"] == BOOK_A
         assert body["title"] == "كتاب الاختبار الأول"
-        assert body["subjectId"] == "tafsir"
-        assert body["tradition"] == "شيعي"  # Arabic raw value, matching the Swift enum
+        assert body["subjectId"] == "tafsir-shia"
         assert body["volume"] is None  # no جزء tag on this source
 
     async def test_unknown_id_is_404(self, imported: AsyncClient):
@@ -177,13 +172,14 @@ class TestWorks:
             assert volume["subjectTitle"] is not None
 
     async def test_work_filters_survive_pagination(self, imported: AsyncClient):
-        """Same fixture-vs-live-database issue as test_filters_by_tradition: with the
-        import running, the dev database now holds thousands of real sunni works, so
-        the list endpoint's own tradition=sunni page 1 is no longer a reliable place to
-        find these two synthetic ones. Combining with `author` (a name unique to this
-        fixture) makes the assertion exact regardless of how much other data exists --
-        and, unlike calling the detail endpoint directly, this still genuinely tests the
-        LIST endpoint's filter mechanics rather than sidestepping them."""
+        """Same fixture-vs-live-database issue as test_filters_by_subject: with the
+        import running, the dev database now holds thousands of real fiqh-hanafi
+        works, so the list endpoint's own subject=fiqh-hanafi page 1 is no longer a
+        reliable place to find these two synthetic ones. Combining with `author` (a
+        name unique to this fixture) makes the assertion exact regardless of how much
+        other data exists -- and, unlike calling the detail endpoint directly, this
+        still genuinely tests the LIST endpoint's filter mechanics rather than
+        sidestepping them."""
         async with get_sessionmaker()() as session:
             author_id = await session.scalar(
                 text("SELECT id FROM authors WHERE name_norm = 'مؤلف اخر'")
@@ -191,13 +187,13 @@ class TestWorks:
         assert author_id is not None
 
         response = await imported.get(
-            "/api/works", params={"tradition": "sunni", "author": author_id}
+            "/api/works", params={"subject": "fiqh-hanafi", "author": author_id}
         )
         titles = {w["title"] for w in response.json()["items"]}
         assert titles == {"كتاب الاختبار الثاني"}
 
         response = await imported.get(
-            "/api/works", params={"tradition": "shia", "author": author_id}
+            "/api/works", params={"subject": "tafsir-shia", "author": author_id}
         )
         assert response.json()["items"] == []
 
@@ -247,7 +243,7 @@ class TestMetadata:
     async def test_categories_lists_all_subjects(self, imported: AsyncClient):
         response = await imported.get("/api/categories")
         assert response.status_code == 200
-        assert len(response.json()) == 20  # 19 seeded + ulum-ukhra
+        assert len(response.json()) == 40  # Shamela's own 39, plus our "other" catch-all
 
     async def test_languages(self, imported: AsyncClient):
         response = await imported.get("/api/languages")

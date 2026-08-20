@@ -19,7 +19,6 @@ async def search(
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
     subject: str | None = None,
-    tradition: str | None = Query(None, pattern="^(shia|sunni|zaydi|shared)$"),
     language: str | None = None,
     author: int | None = None,
     work: int | None = None,
@@ -27,7 +26,7 @@ async def search(
 ) -> PageEnvelope[SearchHit]:
     items, total = await search_service.search(
         session, query=q, page=page, limit=limit,
-        subject_id=subject, tradition=tradition, language=language,
+        subject_id=subject, language=language,
         author_id=author, work_id=work,
     )
     return PageEnvelope(page=page, limit=limit, total=total, items=items)

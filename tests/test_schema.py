@@ -69,13 +69,21 @@ class TestSeedData:
     async def test_subjects_seeded(self, session):
         """Asserts the slugs, not the count. Clients switch on these strings and the
         collection mapping references them as foreign keys, so a renamed or dropped slug
-        is a breaking change — whereas adding one is not."""
+        is a breaking change — whereas adding one is not. These 39 are Shamela's own
+        published category list, not a scheme this project invented."""
         result = await session.execute(select(Subject.id))
         assert set(result.scalars()) == {
-            "quran", "tafsir", "hadith", "rijal", "aqaid", "usul-fiqh", "fiqh",
-            "rasail-amaliyya", "sira", "tarikh", "tarajim", "adiya", "akhlaq",
-            "falsafa", "lugha", "faharis", "tibb", "qadaya-muasira", "munawwaat",
-            "ulum-ukhra",
+            "aqaid-sunni", "aqaid-shia", "rijal-sunni", "rijal-shia", "sira",
+            "fiqh-mustaqilla", "mustalahat-fiqhiyya", "makhtutat", "tarikh-jughrafia",
+            "tafsir-sunni", "tafsir-shia", "hadith-sunni-amm", "hadith-sunni-fiqh",
+            "hadith-shia-amm", "hadith-shia-fiqh", "fiqh-hanbali", "fiqh-hanafi",
+            "fiqh-zaydi", "fiqh-shafii", "fiqh-zahiri", "fiqh-maliki",
+            "qadaya-muasira", "majallat-munawwaat", "mantiq-falsafa",
+            "dalil-muallafat", "dawawin-shir", "ulum-ukhra", "ulum-lugha",
+            "fiqh-shia-fatawa", "fiqh-shia-qabl-thamin", "fiqh-shia-bad-thamin",
+            "usul-fiqh-shia", "usul-fiqh-sunni", "akhlaq-irfan", "adiya-ziyarat",
+            "ansab-tarajim", "tibb", "firaq-madhahib", "quran-ulum",
+            "other",
         }
 
 

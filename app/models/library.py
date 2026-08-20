@@ -32,7 +32,6 @@ from sqlalchemy import (
     CheckConstraint,
     Computed,
     DateTime,
-    Enum,
     ForeignKey,
     Index,
     Integer,
@@ -45,23 +44,6 @@ from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
-
-# ── Controlled vocabularies ──────────────────────────────────────────────────────
-# Native PostgreSQL enums rather than free text: these are small, stable sets that the
-# API exposes as filters, and a typo in an import script should fail loudly rather than
-# silently create a category nobody can browse to.
-
-TraditionEnum = Enum(
-    "shia", "sunni", "zaydi", "shared",
-    name="tradition",
-    create_type=True,
-)
-
-FormatEnum = Enum(
-    "book", "manuscript", "journal", "diwan", "dictionary", "index",
-    name="book_format",
-    create_type=True,
-)
 
 
 class Language(Base):
@@ -105,8 +87,13 @@ class Author(Base):
 
 
 class Subject(Base):
-    """Our curated taxonomy — the browsable one. Distinct from the raw Shamela collection
-    string, which is preserved separately on ShamelaCollection."""
+    """Shamela's own published 39-category list — not a scheme we invented. Distinct
+    from the raw Shamela collection string, which is preserved separately on
+    ShamelaCollection. This is the single classification dimension: there is no
+    separate tradition/madhhab/format any more, because most of that distinction is
+    already encoded directly in which of the 39 a book falls under (e.g. فقه المذهب
+    الحنبلي already says fiqh + hanbali; مصادر العقائد عند السنيين already says
+    aqaid + sunni)."""
 
     __tablename__ = "subjects"
 
@@ -118,12 +105,14 @@ class Subject(Base):
 
 
 class ShamelaCollection(Base):
-    """One row per distinct `< مجموعة >` string in the sources, mapped to our taxonomy.
+    """One row per distinct `< مجموعة >` string in the sources, mapped to a subject.
 
-    The scan found **530 distinct raw values**, not the ~39 a curated screenshot suggests.
-    They carry orthographic variants (عربى vs عربي), separator variants, appended language
-    suffixes, and compound values. Normalizing collapses them to 344, with a long tail of
-    162 groups holding only 236 books between them.
+    The scan found **530 distinct raw values** for the 39 real categories: orthographic
+    variants (عربى vs عربي), separator variants (parentheses vs. a dash vs. "قسم"),
+    appended language suffixes, and compound/stacked values. subject_id is NULL where
+    the raw string genuinely doesn't say enough (e.g. a bare "مصادر الحديث" with no
+    سنة/شيعة marker, when every one of the 39 hadith categories is tradition-specific)
+    — left unclassified rather than guessed, per an explicit decision.
 
     Keeping the raw string verbatim means a mapping mistake is always recoverable without
     re-importing, and `normalized` is what the importer actually joins on.
@@ -136,11 +125,6 @@ class ShamelaCollection(Base):
     normalized: Mapped[str] = mapped_column(Text, nullable=False)
 
     subject_id: Mapped[str | None] = mapped_column(ForeignKey("subjects.id"))
-    tradition: Mapped[str | None] = mapped_column(TraditionEnum)
-    # Only meaningful for Sunni fiqh (حنفي/مالكي/شافعي/حنبلي/ظاهري). Free text rather than
-    # an enum until the full corpus confirms the closed set.
-    madhhab: Mapped[str | None] = mapped_column(String(32))
-    format: Mapped[str | None] = mapped_column(FormatEnum)
     # Shamela appends '، فارسى' / '، عربى' to many collection names; that suffix is a
     # usable language signal, though the per-file body marker is authoritative.
     language_hint: Mapped[str | None] = mapped_column(ForeignKey("languages.code"))
@@ -163,9 +147,6 @@ class Work(Base):
 
     author_id: Mapped[int | None] = mapped_column(ForeignKey("authors.id"))
     subject_id: Mapped[str | None] = mapped_column(ForeignKey("subjects.id"))
-    tradition: Mapped[str | None] = mapped_column(TraditionEnum)
-    madhhab: Mapped[str | None] = mapped_column(String(32))
-    format: Mapped[str | None] = mapped_column(FormatEnum)
     language_code: Mapped[str | None] = mapped_column(ForeignKey("languages.code"))
 
     volume_count: Mapped[int] = mapped_column(
@@ -191,7 +172,6 @@ class Work(Base):
         Index("ix_works_title_norm", "title_norm"),
         Index("ix_works_author", "author_id"),
         Index("ix_works_subject", "subject_id"),
-        Index("ix_works_tradition", "tradition"),
     )
 
 

@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""Re-sync works' subject/tradition/madhhab/format/language from shamela_collections.
+"""Re-sync works' subject_id from shamela_collections.
 
-Exists specifically so that revising the collection→taxonomy mapping never requires
-re-importing book content. A work's taxonomy fields are set once, at import time, from
-whatever the collection mapping said then; if the mapping is corrected afterward (as
-happened here -- three real classification bugs found by checking it against the real
-Shamela category list), every work imported *before* the fix is stuck with the old,
-wrong values until something re-derives them.
+Exists specifically so that revising the collection→subject mapping never requires
+re-importing book content. A work's subject_id is set once, at import time, from
+whatever the collection mapping said then; if the mapping is corrected afterward, every
+work imported *before* the fix is stuck with the old, wrong value until something
+re-derives it.
 
-This is that something. It never touches books, pages, or content_path -- only the
-five taxonomy columns on works, re-derived from each work's own books' collection_id.
-Idempotent and safe to run any time, including while an import is in progress: it only
-reads collection_id off books that already exist, and only writes to works.
+This is that something. It never touches books, pages, or content_path -- only
+works.subject_id, re-derived from each work's own books' collection_id. Idempotent and
+safe to run any time, including while an import is in progress: it only reads
+collection_id off books that already exist, and only writes to works.
 
 Usage:
     python scripts/import/resync_taxonomy.py [--dry-run]
@@ -31,7 +30,7 @@ from sqlalchemy import text  # noqa: E402
 from app.db import dispose_engine, get_sessionmaker  # noqa: E402
 
 # One representative book per work (the lowest id, matching _work_collection_raw's own
-# convention in catalog_service.py) supplies the taxonomy -- volumes of one work should
+# convention in catalog_service.py) supplies the subject -- volumes of one work should
 # always share a collection, so which one is picked rarely matters in practice.
 RESYNC_SQL = text("""
     WITH representative_book AS (
@@ -41,19 +40,11 @@ RESYNC_SQL = text("""
         ORDER BY work_id, id
     )
     UPDATE works w
-    SET subject_id = sc.subject_id,
-        tradition  = sc.tradition,
-        madhhab    = sc.madhhab,
-        format     = sc.format
+    SET subject_id = sc.subject_id
     FROM representative_book rb
     JOIN shamela_collections sc ON sc.id = rb.collection_id
     WHERE w.id = rb.work_id
-      AND (
-          w.subject_id IS DISTINCT FROM sc.subject_id
-          OR w.tradition IS DISTINCT FROM sc.tradition
-          OR w.madhhab IS DISTINCT FROM sc.madhhab
-          OR w.format IS DISTINCT FROM sc.format
-      )
+      AND w.subject_id IS DISTINCT FROM sc.subject_id
     RETURNING w.id
 """)
 
@@ -69,9 +60,6 @@ COUNT_SQL = text("""
     JOIN representative_book rb ON rb.work_id = w.id
     JOIN shamela_collections sc ON sc.id = rb.collection_id
     WHERE w.subject_id IS DISTINCT FROM sc.subject_id
-       OR w.tradition IS DISTINCT FROM sc.tradition
-       OR w.madhhab IS DISTINCT FROM sc.madhhab
-       OR w.format IS DISTINCT FROM sc.format
 """)
 
 

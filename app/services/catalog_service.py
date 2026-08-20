@@ -14,8 +14,6 @@ from sqlalchemy.orm import joinedload
 
 from app.models import Author, Book, Language, Subject, Work
 from app.schemas.catalog import (
-    FORMAT_DISPLAY,
-    TRADITION_DISPLAY,
     AuthorOut,
     BookOut,
     LanguageOut,
@@ -37,12 +35,6 @@ def _book_out(book: Book, work_title: str, collection_raw: str | None) -> BookOu
         description=book.description,
         subjectId=book.work.subject_id if book.work else None,
         subjectTitle=None,  # filled by caller when the subject is joined/loaded
-        tradition=(
-            TRADITION_DISPLAY.get(book.work.tradition)
-            if book.work and book.work.tradition else None
-        ),
-        madhhab=book.work.madhhab if book.work else None,
-        format=FORMAT_DISPLAY.get(book.work.format) if book.work and book.work.format else None,
         language=book.language_code,
         publisher=book.publisher,
         shamelaCollection=collection_raw,
@@ -64,9 +56,6 @@ def _work_out(work: Work, volume_count: int, total_bytes: int, subject_title: st
         authorDeath=work.author.death_label if work.author else None,
         subjectId=work.subject_id,
         subjectTitle=subject_title,
-        tradition=TRADITION_DISPLAY.get(work.tradition) if work.tradition else None,
-        madhhab=work.madhhab,
-        format=FORMAT_DISPLAY.get(work.format) if work.format else None,
         language=work.language_code,
         volumeCount=volume_count,
         totalSizeBytes=total_bytes,
@@ -80,7 +69,6 @@ async def list_works(
     page: int,
     limit: int,
     subject_id: str | None = None,
-    tradition: str | None = None,
     language: str | None = None,
     author_id: int | None = None,
 ) -> tuple[list[WorkOut], int]:
@@ -113,8 +101,6 @@ async def list_works(
     )
     if subject_id:
         query = query.where(Work.subject_id == subject_id)
-    if tradition:
-        query = query.where(Work.tradition == tradition)
     if language:
         query = query.where(Work.language_code == language)
     if author_id:
@@ -186,7 +172,6 @@ async def list_books(
     page: int,
     limit: int,
     subject_id: str | None = None,
-    tradition: str | None = None,
     language: str | None = None,
     author_id: int | None = None,
     work_id: int | None = None,
@@ -207,8 +192,6 @@ async def list_books(
     )
     if subject_id:
         query = query.where(Work.subject_id == subject_id)
-    if tradition:
-        query = query.where(Work.tradition == tradition)
 
     total = await session.scalar(select(func.count()).select_from(query.subquery()))
     rows = (

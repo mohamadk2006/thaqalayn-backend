@@ -5,12 +5,10 @@ across three documents (the initial backend brief, and Amendments 1–2 on categ
 works/volumes). Renaming a field here is a breaking change on that side — check the
 brief before changing anything under BookOut or WorkOut.
 
-Two deliberate translations happen at the boundary, both because the promised Swift
-enums use Arabic raw values while the database stores English slugs (English is what
-SQL WHERE clauses and indexes want to work with):
-
-    tradition:  'shia' | 'sunni' | 'zaydi' | 'shared'  →  شيعي | سني | زيدي | عام
-    format:     'book' | 'manuscript' | ...            →  كتاب | مخطوط | ...
+subjectId/subjectTitle now carry Shamela's own 39-category classification (see
+app.models.library.Subject) — tradition/madhhab/format were removed as separate fields:
+most of that distinction is already encoded directly in which of the 39 a work falls
+under, and the project owner asked for the 39 to be the single source of truth instead.
 
 bookId/workId are emitted as strings, matching the `let bookId: String` already in the
 iOS CatalogBook type, even though both are integers internally (the Shamela filename ID).
@@ -20,11 +18,6 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-TRADITION_DISPLAY = {"shia": "شيعي", "sunni": "سني", "zaydi": "زيدي", "shared": "عام"}
-FORMAT_DISPLAY = {
-    "book": "كتاب", "manuscript": "مخطوط", "journal": "مجلة",
-    "diwan": "ديوان", "dictionary": "معجم", "index": "فهرس",
-}
 
 class PageEnvelope[T](BaseModel):
     """Shared pagination shape for every list endpoint, per the API contract:
@@ -69,9 +62,6 @@ class BookOut(BaseModel):
     description: str | None
     subjectId: str | None
     subjectTitle: str | None
-    tradition: str | None
-    madhhab: str | None
-    format: str | None
     language: str | None
     publisher: str | None
     shamelaCollection: str | None
@@ -95,9 +85,6 @@ class WorkOut(BaseModel):
     authorDeath: str | None
     subjectId: str | None
     subjectTitle: str | None
-    tradition: str | None
-    madhhab: str | None
-    format: str | None
     language: str | None
     volumeCount: int
     totalSizeBytes: int

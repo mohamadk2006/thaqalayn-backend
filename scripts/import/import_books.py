@@ -92,8 +92,8 @@ async def _get_or_create_work(
     language: str,
 ) -> int:
     """Group volumes into a work by (normalized title, author). The collection row
-    already carries the taxonomy, so a work inherits subject/tradition/etc. from the
-    first volume that names its collection.
+    already carries the subject, so a work inherits it from the first volume that
+    names its collection.
 
     `language` is the *book's own* resolved language (body marker, falling back to the
     collection hint only if that's absent — see the caller) — not the collection hint
@@ -104,10 +104,8 @@ async def _get_or_create_work(
     """
     return await session.scalar(
         text("""
-            INSERT INTO works (title, title_norm, author_id, subject_id, tradition,
-                               madhhab, format, language_code)
-            VALUES (:title, :norm, :author, :subject, cast(:tradition as tradition),
-                    :madhhab, cast(:format as book_format), :lang)
+            INSERT INTO works (title, title_norm, author_id, subject_id, language_code)
+            VALUES (:title, :norm, :author, :subject, :lang)
             ON CONFLICT (title_norm, author_id) DO UPDATE SET
                 title = EXCLUDED.title, language_code = EXCLUDED.language_code
             RETURNING id
@@ -115,9 +113,6 @@ async def _get_or_create_work(
         {
             "title": title, "norm": normalize(title), "author": author_id,
             "subject": (collection or {}).get("subject_id"),
-            "tradition": (collection or {}).get("tradition"),
-            "madhhab": (collection or {}).get("madhhab"),
-            "format": (collection or {}).get("format"),
             "lang": language,
         },
     )
@@ -127,14 +122,13 @@ async def _lookup_collection(session: AsyncSession, raw: str | None) -> dict | N
     if not raw:
         return None
     row = (await session.execute(
-        text("""SELECT id, subject_id, tradition::text, madhhab, format::text, language_hint
+        text("""SELECT id, subject_id, language_hint
                 FROM shamela_collections WHERE raw = :raw"""),
         {"raw": raw},
     )).first()
     if row is None:
         return None
-    return {"id": row[0], "subject_id": row[1], "tradition": row[2],
-            "madhhab": row[3], "format": row[4], "language_hint": row[5]}
+    return {"id": row[0], "subject_id": row[1], "language_hint": row[2]}
 
 
 async def _existing_hash(session: AsyncSession, book_id: int) -> str | None:

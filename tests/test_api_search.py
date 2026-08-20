@@ -67,10 +67,10 @@ async def imported(tmp_path: Path):
     async with get_sessionmaker()() as session:
         await session.execute(text("DELETE FROM books WHERE id = :i"), {"i": int(BOOK_ID)})
         await session.execute(
-            text("DELETE FROM works WHERE title_norm = 'كتاب اختبار البحث الثالث'")
+            text("DELETE FROM works WHERE title_norm = 'كتاب اختبار البحث'")
         )
         await session.execute(
-            text("DELETE FROM authors WHERE name_norm = 'مولف الاختبار الثالث'")
+            text("DELETE FROM authors WHERE name_norm = 'مؤلف الاختبار الثالث'")
         )
         await session.commit()
 
@@ -107,7 +107,7 @@ class TestSearchFindsUndiacriticizedQuery:
         assert hit["author"] == "مؤلف الاختبار الثالث"
         assert hit["page"] == 1
         assert hit["sectionTitle"] == "باب في فضل الإمام"
-        assert hit["subjectId"] == "hadith"
+        assert hit["subjectId"] == "hadith-shia-amm"
         assert hit["score"] > 0
 
     async def test_snippet_preserves_original_tashkeel(self, imported: AsyncClient):
@@ -159,7 +159,7 @@ class TestPaginationAndFilters:
         work_id = await _work_id(imported)
         response = await imported.get(
             "/api/search",
-            params={"q": "الامام الصادق", "work": work_id, "subject": "hadith"},
+            params={"q": "الامام الصادق", "work": work_id, "subject": "hadith-shia-amm"},
         )
         assert any(h["bookId"] == BOOK_ID for h in response.json()["items"])
 
