@@ -77,6 +77,42 @@ class TestConversion:
         assert (manifest["pageFirst"], manifest["pageLast"]) == (5, 6)
         assert manifest["paragraphCount"] == 3
 
+    def test_quran_link_tag_is_stripped_inline(self, tmp_path: Path):
+        """Shamela wraps every quoted verse in a cross-reference tag meant for its own
+        desktop app's clickable links -- `< ارتباط = SSSSAAA... > verse < / ارتباط = ... >`.
+        Left unstripped, this leaks as literal markup into what the reader sees. Only the
+        tag goes; the verse text and the following [ سورة : آية ] reference (already
+        plain text in the source, never tagged) stay exactly where they were."""
+        text = SYNTHETIC.replace(
+            "النص الثالث في الصفحة السادسة.",
+            "قال تعالى < ارتباط = 0001059024 > هُوَ اللَّهُ الْخالِقُ < / ارتباط = 0001059024 > "
+            "[ الحشر : 24 ] .",
+        )
+        path = tmp_path / "997.abx"
+        path.write_text(text, encoding="utf-8")
+        content, _ = conv.convert(path, "997")
+        paras = [p for c in content["chapters"] for s in c["sections"] for p in s["paragraphs"]]
+        assert "ارتباط" not in paras[-1]["text"]
+        assert paras[-1]["text"] == "قال تعالى هُوَ اللَّهُ الْخالِقُ [ الحشر : 24 ] ."
+
+    def test_quran_link_tag_spanning_lines_is_stripped(self, tmp_path: Path):
+        """The same tag pair can straddle a line break -- an Arabic verse followed by
+        its translation on the next line before the tag closes. Both fragments must
+        still come through as clean, separate paragraphs with no leftover markup."""
+        text = SYNTHETIC.replace(
+            "النص الثالث في الصفحة السادسة.",
+            "< ارتباط = 0001059024 > هُوَ اللَّهُ الْخالِقُ\n"
+            "he is God the creator < / ارتباط = 0001059024 >",
+        )
+        path = tmp_path / "996.abx"
+        path.write_text(text, encoding="utf-8")
+        content, _ = conv.convert(path, "996")
+        paras = [p for c in content["chapters"] for s in c["sections"] for p in s["paragraphs"]]
+        texts = [p["text"] for p in paras]
+        assert "ارتباط" not in " ".join(texts)
+        assert "هُوَ اللَّهُ الْخالِقُ" in texts
+        assert "he is God the creator" in texts
+
     def test_empty_volume_tag_yields_none(self, tmp_path: Path):
         text = SYNTHETIC.replace("< جزء > 3 < / جزء >", "< جزء > < / جزء >")
         path = tmp_path / "998.abx"

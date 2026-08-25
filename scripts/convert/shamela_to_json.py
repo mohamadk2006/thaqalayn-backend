@@ -39,6 +39,19 @@ HEADING_CLOSE = "< / فهرس الموضوعات >"
 BODY_MARKER = "< الكتاب >"
 BRACKETED_LINE_RE = re.compile(r"^<.*>$")
 
+# Shamela wraps every quoted Qur'an verse inline in the running prose with a cross-
+# reference tag: `< ارتباط = SSSSAAA... > verse text < / ارتباط = SSSSAAA... >` — the
+# number encodes sura/ayah for Shamela's own desktop app (clickable links), not
+# anything the reader needs to see. Two numeric prefixes exist in the real corpus
+# (0001 and 0003, ~13,344 of 18,831 source files — over 70%), both decode the same
+# way (e.g. 0001059024 -> سورة 059 آية 024). The pair can straddle multiple lines (an
+# Arabic verse followed by its Persian translation before the tag closes), so this is
+# stripped from the whole file's text in one pass rather than line-by-line — regex
+# substitution on the joined string handles a pair spanning a newline exactly the same
+# as a pair on one line. Only the markup is removed; the verse's own text is real book
+# content and stays exactly where it was, unquoted brackets and all.
+QURAN_LINK_TAG_RE = re.compile(r" ?<\s*/?\s*ارتباط\s*=\s*\d+\s*> ?")
+
 # The Shamela metadata tags worth carrying forward, with the manifest key each maps to.
 # Tags outside this set are still captured verbatim under metadata["raw"], so nothing is
 # lost, but these are the ones the importer promotes to real columns.
@@ -70,7 +83,8 @@ def _decode(path: Path) -> list[str]:
     fall back to lossy decoding, which would silently corrupt Arabic text."""
     for encoding in ("utf-8", "utf-8-sig", "cp1256"):
         try:
-            return path.read_text(encoding=encoding).splitlines()
+            text = path.read_text(encoding=encoding)
+            return QURAN_LINK_TAG_RE.sub(" ", text).splitlines()
         except UnicodeDecodeError:
             continue
     raise ConversionError("undecodable text (tried utf-8, utf-8-sig, cp1256)")
