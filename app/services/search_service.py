@@ -80,6 +80,7 @@ async def search(
     subject_ids: list[str] | None = None,
     languages: list[str] | None = None,
     author_ids: list[int] | None = None,
+    author_names: list[str] | None = None,
     work_id: int | None = None,
 ) -> tuple[list[SearchHit], int]:
     normalized_query = normalize(query)
@@ -107,6 +108,13 @@ async def search(
         conditions.append("b.author_id IN :author_ids")
         params["author_ids"] = author_ids
         expanding.append("author_ids")
+    if author_names:
+        # The app tracks authors by name only (no ID concept), so match on the same
+        # name_norm the authors table was written with -- normalize() here must be the
+        # identical fold used to populate that column, or every row would miss.
+        conditions.append("a.name_norm IN :author_names")
+        params["author_names"] = [normalize(name) for name in author_names]
+        expanding.append("author_names")
     if work_id:
         conditions.append("b.work_id = :work_id")
         params["work_id"] = work_id

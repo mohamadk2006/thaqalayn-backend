@@ -21,12 +21,15 @@ async def search(
     subject: list[str] | None = Query(None, description="One or more subject category IDs"),
     language: list[str] | None = Query(None, description="One or more language codes"),
     author: list[int] | None = Query(None, description="One or more author IDs"),
+    authorName: list[str] | None = Query(
+        None, description="One or more author names (use when the ID isn't known)"
+    ),
     work: int | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> PageEnvelope[SearchHit]:
     items, total = await search_service.search(
         session, query=q, page=page, limit=limit,
         subject_ids=subject, languages=language,
-        author_ids=author, work_id=work,
+        author_ids=author, author_names=authorName, work_id=work,
     )
     return PageEnvelope(page=page, limit=limit, total=total, items=items)
