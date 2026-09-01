@@ -7,6 +7,9 @@ data/covers/*
 !data/books/.gitkeep
 !data/covers/.gitkeep
 
+# Local DB backup dumps — large binaries, never belong in git.
+data/backups/
+
 # Source material
 *.abx
 *.bok

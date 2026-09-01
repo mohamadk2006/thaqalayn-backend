@@ -13,7 +13,7 @@ changes -- the router and schema stay as they are.
 
 from __future__ import annotations
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.search import SearchHit
@@ -77,30 +77,36 @@ async def search(
     query: str,
     page: int,
     limit: int,
-    subject_id: str | None = None,
-    language: str | None = None,
-    author_id: int | None = None,
+    subject_ids: list[str] | None = None,
+    languages: list[str] | None = None,
+    author_ids: list[int] | None = None,
     work_id: int | None = None,
 ) -> tuple[list[SearchHit], int]:
     normalized_query = normalize(query)
     if not normalized_query:
         return [], 0
 
+    # AND across filter kinds (subject/language/author), OR within each -- a book must
+    # match at least one selected value per kind, but all kinds that were given.
     conditions = []
     params: dict = {
         "normalized_query": normalized_query,
         "limit": limit,
         "offset": (page - 1) * limit,
     }
-    if subject_id:
-        conditions.append("w.subject_id = :subject_id")
-        params["subject_id"] = subject_id
-    if language:
-        conditions.append("b.language_code = :language")
-        params["language"] = language
-    if author_id:
-        conditions.append("b.author_id = :author_id")
-        params["author_id"] = author_id
+    expanding: list[str] = []
+    if subject_ids:
+        conditions.append("w.subject_id IN :subject_ids")
+        params["subject_ids"] = subject_ids
+        expanding.append("subject_ids")
+    if languages:
+        conditions.append("b.language_code IN :languages")
+        params["languages"] = languages
+        expanding.append("languages")
+    if author_ids:
+        conditions.append("b.author_id IN :author_ids")
+        params["author_ids"] = author_ids
+        expanding.append("author_ids")
     if work_id:
         conditions.append("b.work_id = :work_id")
         params["work_id"] = work_id
@@ -110,7 +116,11 @@ async def search(
         sql += " AND " + " AND ".join(conditions)
     sql += " ORDER BY score DESC LIMIT :limit OFFSET :offset"
 
-    rows = (await session.execute(text(sql), params)).all()
+    stmt = text(sql)
+    if expanding:
+        stmt = stmt.bindparams(*(bindparam(name, expanding=True) for name in expanding))
+
+    rows = (await session.execute(stmt, params)).all()
     if not rows:
         return [], 0
 
