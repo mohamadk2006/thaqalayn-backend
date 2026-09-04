@@ -267,7 +267,7 @@ async def _subject_options(session: AsyncSession, selected: str | None) -> str:
     )
 
 
-@router.get("/books/{book_id}", response_class=HTMLResponse)
+@router.get("/books/{book_id:int}", response_class=HTMLResponse)
 async def book_edit_form(
     book_id: int,
     saved: bool = False,
@@ -311,7 +311,7 @@ async def book_edit_form(
     return _render(f"تعديل #{book_id}", body)
 
 
-@router.post("/books/{book_id}")
+@router.post("/books/{book_id:int}")
 async def book_edit_save(
     book_id: int,
     title: str = Form(...),
