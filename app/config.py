@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     api_port: int = 8000
     log_level: str = "INFO"
 
+    # Guards the /admin control panel (HTTP Basic). Required, no default -- an admin
+    # panel with a guessable or absent credential is worse than no panel at all.
+    admin_username: str
+    admin_password: str
+
     @field_validator("books_root", "covers_root")
     @classmethod
     def _resolve_against_repo_root(cls, value: Path) -> Path:
