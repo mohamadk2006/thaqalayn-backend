@@ -11,6 +11,7 @@ part of the public contract, so it's free to change shape without touching the a
 from __future__ import annotations
 
 import importlib.util
+import json
 import secrets
 import sys
 from html import escape
@@ -23,6 +24,7 @@ from starlette.exceptions import HTTPException
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.books import _resolve_under_root
 from app.config import get_settings
 from app.db import get_session
 from app.services.arabic import normalize
@@ -242,7 +244,8 @@ async def work_detail(
         f"<tr><td>{r.volume or '-'}</td><td>{escape(r.title)}</td>"
         f"<td>{'منشور' if r.is_published else 'غير منشور'}</td>"
         f"<td>{r.page_count or 0}</td>"
-        f'<td><a href="/admin/books/{r.id}">تعديل</a></td></tr>'
+        f'<td><a href="/admin/books/{r.id}">تعديل</a> | '
+        f'<a href="/admin/books/{r.id}/content">عرض المحتوى</a></td></tr>'
         for r in rows
     )
     body = (
@@ -293,6 +296,7 @@ async def book_edit_form(
     body = f"""
     {banner}
     <h1>تعديل الكتاب #{book_id}</h1>
+    <p><a href="/admin/books/{book_id}/content">عرض المحتوى &rarr;</a></p>
     <form method="post" action="/admin/books/{book_id}">
       <div class="row"><label>العنوان</label>
         <input name="title" value="{escape(row.title)}" required></div>
@@ -346,6 +350,103 @@ async def book_edit_save(
     )
     await session.commit()
     return RedirectResponse(f"/admin/books/{book_id}?saved=1", status_code=303)
+
+
+# ── Book content viewer ──────────────────────────────────────────────────────
+#
+# Reads the same JSON file the download endpoint serves and renders it the way it's
+# actually organized -- chapter, then section (a فهرس الموضوعات heading), then that
+# section's paragraphs with page numbers -- rather than a raw JSON dump. Sections are
+# the pagination unit here (not the whole book): the largest real files are 10-14 MB
+# with dozens of sections, and there's no reason to ever build all of that into one
+# HTML response when a book is opened.
+
+
+def _flat_sections(content: dict) -> list[dict]:
+    """Every section across every chapter, in reading order, each carrying its own
+    paragraphs -- flattened once so the TOC and the section view share one numbering."""
+    flat = []
+    for chapter in content.get("chapters", []):
+        for section in chapter.get("sections", []):
+            flat.append({**section, "chapterTitle": chapter.get("title")})
+    return flat
+
+
+@router.get("/books/{book_id:int}/content", response_class=HTMLResponse)
+async def book_content(
+    book_id: int,
+    section: int | None = None,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(_require_admin),
+) -> HTMLResponse:
+    row = (await session.execute(
+        text("SELECT title, content_path FROM books WHERE id = :id"), {"id": book_id}
+    )).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Unknown book")
+    if not row.content_path:
+        body = (
+            f"<h1>{escape(row.title)}</h1>"
+            "<p>لا يوجد محتوى بعد لهذا الكتاب.</p>"
+            f'<p><a href="/admin/books/{book_id}">&larr; رجوع</a></p>'
+        )
+        return _render(row.title, body)
+
+    settings = get_settings()
+    path = _resolve_under_root(settings.books_root, row.content_path)
+    if not path.is_file():
+        body = (
+            f"<h1>{escape(row.title)}</h1>"
+            "<p>سجل المحتوى موجود في قاعدة البيانات لكن الملف غير موجود على القرص.</p>"
+            f'<p><a href="/admin/books/{book_id}">&larr; رجوع</a></p>'
+        )
+        return _render(row.title, body)
+
+    content = json.loads(path.read_text(encoding="utf-8"))
+    sections = _flat_sections(content)
+
+    if section is None:
+        rows_html = "".join(
+            f'<tr><td>{i + 1}</td><td>{escape(s.get("title") or "")}</td>'
+            f'<td><a href="?section={i}">فتح</a></td></tr>'
+            for i, s in enumerate(sections)
+        )
+        body = (
+            f"<h1>{escape(row.title)}</h1>"
+            f"<p><small>{escape(content.get('author') or '')}</small></p>"
+            "<table><tr><th>#</th><th>العنوان</th><th></th></tr>"
+            f"{rows_html}</table>"
+            f'<p><a href="/admin/books/{book_id}">&larr; رجوع للتعديل</a></p>'
+        )
+        return _render(row.title, body)
+
+    if not (0 <= section < len(sections)):
+        raise HTTPException(status_code=404, detail="Unknown section")
+
+    sec = sections[section]
+    paragraphs_html = []
+    current_page: int | None = None
+    for p in sec.get("paragraphs", []):
+        if p.get("page") != current_page:
+            current_page = p.get("page")
+            paragraphs_html.append(f'<p><small>-- صفحة {current_page} --</small></p>')
+        paragraphs_html.append(f"<p>{escape(p.get('text') or '')}</p>")
+
+    nav = (
+        (f'<a href="?section={section - 1}">&larr; السابق</a>' if section > 0 else "")
+        + " &nbsp;|&nbsp; "
+        + f'<a href="/admin/books/{book_id}/content">الفهرس</a>'
+        + " &nbsp;|&nbsp; "
+        + (f'<a href="?section={section + 1}">التالي &rarr;</a>'
+           if section + 1 < len(sections) else "")
+    )
+    body = (
+        f"<h1>{escape(sec.get('title') or '')}</h1>"
+        f"<p>{nav}</p>"
+        f"{''.join(paragraphs_html)}"
+        f"<p>{nav}</p>"
+    )
+    return _render(sec.get("title") or row.title, body)
 
 
 # ── Add a book ───────────────────────────────────────────────────────────────
