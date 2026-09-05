@@ -15,6 +15,11 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY app/ app/
 COPY database/migrations database/migrations
 COPY database/sql database/sql
+# The admin panel's book-add flow (both .abx and .docx) dynamically loads
+# scripts/import/import_books.py at request time, reusing the exact same
+# convert/validate/import pipeline the bulk importer uses -- it has to be in the
+# image, not just run from a developer's checkout.
+COPY scripts/ scripts/
 COPY alembic.ini ./
 RUN uv sync --frozen --no-dev
 
