@@ -11,12 +11,15 @@ part of the public contract, so it's free to change shape without touching the a
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import secrets
 import sys
 from html import escape
 from pathlib import Path
 
+import docx
+from docx.oxml.ns import qn
 from fastapi import APIRouter, Depends, Form, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -449,6 +452,156 @@ async def book_content(
     return _render(sec.get("title") or row.title, body)
 
 
+# ── Word document import ──────────────────────────────────────────────────────
+#
+# A .docx has no stored concept of rendered page numbers -- Word computes those at
+# layout time and never writes them to the file. The one page signal a .docx *can*
+# carry is an explicit manual break (Ctrl+Enter, <w:br w:type="page"/>), which is
+# exactly what a source with real, meaningful page boundaries uses. Anything without
+# one of those stays on whatever page came before it -- there is no other basis to
+# invent a boundary from.
+#
+# Converting to a synthetic Shamela-style .abx text stream (rather than building a new
+# import path) means this reuses the exact same convert()/validate()/import_one()
+# pipeline every other book in the library goes through -- the result is
+# structurally identical by construction, not just by convention.
+
+
+_W_T = qn("w:t")
+_W_TAB = qn("w:tab")
+_W_BR = qn("w:br")
+
+
+def _paragraph_page_segments(para) -> list[str]:
+    """Split one paragraph's own text at each manual page break, in document order.
+
+    A break very often lands mid-paragraph -- text typed, then Ctrl+Enter, more text
+    typed into what is still (to Word) the same paragraph. Treating the break as a
+    paragraph-level flag would put everything typed *before* it on the wrong page;
+    walking each run's child nodes in order is what actually locates the break between
+    two runs of real text instead of before or after the whole paragraph.
+    """
+    segments = [""]
+    for run in para.runs:
+        for child in run._element:
+            if child.tag == _W_T:
+                segments[-1] += child.text or ""
+            elif child.tag == _W_TAB:
+                segments[-1] += "\t"
+            elif child.tag == _W_BR:
+                if child.get(qn("w:type")) == "page":
+                    segments.append("")
+                else:
+                    segments[-1] += " "  # a soft line break, not a page boundary
+    return segments
+
+
+def _docx_body_lines(data: bytes) -> list[str]:
+    document = docx.Document(io.BytesIO(data))
+    lines: list[str] = ["< صفحة > 1 < / صفحة >"]
+    page = 1
+    for para in document.paragraphs:
+        style = para.style.name if para.style else ""
+        is_heading = style.startswith("Heading") or style == "Title"
+
+        for i, segment in enumerate(_paragraph_page_segments(para)):
+            if i > 0:
+                page += 1
+                lines.append(f"< صفحة > {page} < / صفحة >")
+            text_ = segment.strip()
+            if not text_:
+                continue
+            if is_heading:
+                lines.append("< فهرس الموضوعات >")
+                lines.append(text_)
+                lines.append("< / فهرس الموضوعات >")
+            else:
+                lines.append(text_)
+    return lines
+
+
+def _abx_source_text(title: str, author: str, death: str, body_lines: list[str]) -> str:
+    # Angle brackets in a title/author would be indistinguishable from the tag grammar
+    # itself -- strip them rather than trying to escape something the format has no
+    # escaping mechanism for.
+    def clean(s: str) -> str:
+        return s.replace("<", "").replace(">", "").strip()
+
+    header = [
+        "checksum-not-applicable",
+        f"< اسم الكتاب > {clean(title)} < / اسم الكتاب >",
+        f"< اسم المؤلف > {clean(author)} < / اسم المؤلف >",
+    ]
+    if death.strip():
+        header.append(f"< سنة الوفاة > {clean(death)} < / سنة الوفاة >")
+    header.append("< الكتاب >")
+    return "\n".join(header + body_lines + ["< / الكتاب >"])
+
+
+@router.post("/books/new/docx")
+async def new_book_docx(
+    file: UploadFile,
+    title: str = Form(...),
+    author: str = Form(""),
+    death: str = Form(""),
+    subject: str = Form(...),
+    language: str = Form("ar"),
+    book_id: str = Form(""),
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(_require_admin),
+) -> RedirectResponse:
+    settings = get_settings()
+    resolved_id = int(book_id) if book_id.strip().isdigit() else await _next_manual_id(session)
+
+    try:
+        body_lines = _docx_body_lines(await file.read())
+    except Exception as exc:  # python-docx raises plain Exception/PackageNotFoundError
+        return RedirectResponse(
+            f"/admin/books/new?err=تعذّرت قراءة ملف Word (تأكد أنه .docx وليس .doc القديم): {exc}",
+            status_code=303,
+        )
+
+    tmp_dir = settings.books_root.parent / "_admin_uploads"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    source_path = tmp_dir / f"{resolved_id}.abx"
+    source_path.write_text(
+        _abx_source_text(title, author, death, body_lines), encoding="utf-8"
+    )
+
+    importer = _importer()
+    try:
+        result = await importer.import_one(
+            session, source_path, "admin-panel-docx", settings.books_root, True
+        )
+    finally:
+        source_path.unlink(missing_ok=True)
+
+    if result != "ok":
+        return RedirectResponse(
+            f"/admin/books/new?err=فشل الاستيراد ({result})", status_code=303
+        )
+
+    # subject/language come from the form, not a مجموعة string to classify -- import_one
+    # leaves the work's subject NULL and its language at the "ar" default for a source
+    # with no Shamela collection, so both are set directly here instead.
+    work_id = await session.scalar(
+        text("SELECT work_id FROM books WHERE id = :id"), {"id": resolved_id}
+    )
+    await session.execute(
+        text("UPDATE works SET subject_id = :sid, language_code = :lang WHERE id = :wid"),
+        {"sid": subject, "lang": language, "wid": work_id},
+    )
+    await session.execute(
+        text("UPDATE books SET language_code = :lang WHERE id = :id"),
+        {"lang": language, "id": resolved_id},
+    )
+    await session.commit()
+    return RedirectResponse(
+        f"/admin/books/new?ok=تم استيراد الكتاب رقم {resolved_id} من ملف Word بنجاح",
+        status_code=303,
+    )
+
+
 # ── Add a book ───────────────────────────────────────────────────────────────
 
 
@@ -469,6 +622,24 @@ async def new_book_form(
       <div class="row"><label>ملف .abx</label>
         <input name="file" type="file" accept=".abx" required></div>
       <div class="row"><label>رقم الكتاب (اختياري -- يُخصص تلقائياً إذا ترك فارغاً)</label>
+        <input name="book_id" type="number"></div>
+      <button type="submit">رفع واستيراد</button>
+    </form>
+
+    <h1>رفع ملف Word (.docx)</h1>
+    <p><small>يحوَّل إلى نفس البنية المستخدمة في المكتبة: عناوين Word (Heading) تصبح عناوين أقسام،
+    وفواصل الصفحات اليدوية في Word (Ctrl+Enter) تصبح أرقام صفحات. بلا فاصل صفحة يدوي، يبقى النص
+    على نفس رقم الصفحة السابق -- لا يوجد أساس آخر لتخمين حدود الصفحة.</small></p>
+    <form method="post" action="/admin/books/new/docx" enctype="multipart/form-data">
+      <div class="row"><label>ملف .docx</label>
+        <input name="file" type="file" accept=".docx" required></div>
+      <div class="row"><label>العنوان</label><input name="title" required></div>
+      <div class="row"><label>المؤلف</label><input name="author"></div>
+      <div class="row"><label>سنة الوفاة (اختياري)</label><input name="death"></div>
+      <div class="row"><label>التصنيف</label><select name="subject" required>{options}</select></div>
+      <div class="row"><label>اللغة</label>
+        <select name="language"><option value="ar">عربي</option><option value="fa">فارسي</option></select></div>
+      <div class="row"><label>رقم الكتاب (اختياري)</label>
         <input name="book_id" type="number"></div>
       <button type="submit">رفع واستيراد</button>
     </form>

@@ -16,6 +16,8 @@ dependencies = [
     "pydantic-settings>=2.6",
     # Only needed for the /admin control panel's file-upload and HTML form parsing.
     "python-multipart>=0.0.9",
+    # Reads .docx uploads for the /admin panel's Word-document import path.
+    "python-docx>=1.1",
 ]
 
 [dependency-groups]
