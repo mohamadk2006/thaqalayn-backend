@@ -155,6 +155,12 @@ class Work(Base):
     total_content_bytes: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default="0"
     )
+    # A curated "الكتب المختارة" set, toggled from the admin panel. Additive to
+    # subject_id, not a replacement -- a featured work keeps browsing under its real
+    # category and also shows up here.
+    is_featured: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
 
     # Set by the importer when the (title, author) grouping heuristic produced something
     # suspicious — a volume sequence with gaps or duplicates. Surfaces a review list

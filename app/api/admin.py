@@ -161,11 +161,37 @@ async def dashboard(
         for r in rows
     )
     body = (
+        '<p><a href="/admin/featured">الكتب المختارة &rarr;</a></p>'
         "<h1>التصنيفات</h1>"
         "<table><tr><th>التصنيف</th><th>عدد العناوين</th><th>عدد المجلدات</th></tr>"
         f"{rows_html}</table>"
     )
     return _render("لوحة التحكم", body)
+
+
+@router.get("/featured", response_class=HTMLResponse)
+async def featured_list(
+    session: AsyncSession = Depends(get_session), _: None = Depends(_require_admin)
+) -> HTMLResponse:
+    rows = (await session.execute(text("""
+        SELECT w.id AS work_id, w.title, a.name AS author, s.title AS subject_title
+        FROM works w
+        LEFT JOIN authors a ON a.id = w.author_id
+        LEFT JOIN subjects s ON s.id = w.subject_id
+        WHERE w.is_featured
+        ORDER BY w.title_norm
+    """))).all()
+    rows_html = "".join(
+        f'<tr><td><a href="/admin/works/{r.work_id}">{escape(r.title)}</a></td>'
+        f"<td>{escape(r.author or '')}</td><td>{escape(r.subject_title or '')}</td></tr>"
+        for r in rows
+    )
+    body = (
+        f"<h1>الكتب المختارة ({len(rows)})</h1>"
+        "<table><tr><th>العنوان</th><th>المؤلف</th><th>التصنيف</th></tr>"
+        f"{rows_html}</table>"
+    )
+    return _render("الكتب المختارة", body)
 
 
 # ── Subject detail: paginated works list ─────────────────────────────────────
@@ -283,7 +309,7 @@ async def book_edit_form(
     row = (await session.execute(
         text("""
             SELECT b.title, b.volume, b.is_published, a.name AS author,
-                   w.subject_id, w.id AS work_id
+                   w.subject_id, w.id AS work_id, w.is_featured
             FROM books b
             JOIN works w ON w.id = b.work_id
             LEFT JOIN authors a ON a.id = b.author_id
@@ -312,6 +338,10 @@ async def book_edit_form(
       <div class="row"><label>
         <input name="is_published" type="checkbox" style="width:auto"
           {"checked" if row.is_published else ""}> منشور</label></div>
+      <div class="row"><label>
+        <input name="is_featured" type="checkbox" style="width:auto"
+          {"checked" if row.is_featured else ""}> ضمن الكتب المختارة
+        (يطبق على كل مجلدات هذا العنوان)</label></div>
       <button type="submit">حفظ</button>
     </form>
     """
@@ -326,6 +356,7 @@ async def book_edit_save(
     subject: str = Form(...),
     volume: str = Form(""),
     is_published: bool = Form(False),
+    is_featured: bool = Form(False),
     session: AsyncSession = Depends(get_session),
     _: None = Depends(_require_admin),
 ) -> RedirectResponse:
@@ -348,8 +379,8 @@ async def book_edit_save(
          "vol": volume_int, "pub": is_published, "id": book_id},
     )
     await session.execute(
-        text("UPDATE works SET subject_id = :sid WHERE id = :wid"),
-        {"sid": subject, "wid": exists},
+        text("UPDATE works SET subject_id = :sid, is_featured = :feat WHERE id = :wid"),
+        {"sid": subject, "feat": is_featured, "wid": exists},
     )
     await session.commit()
     return RedirectResponse(f"/admin/books/{book_id}?saved=1", status_code=303)

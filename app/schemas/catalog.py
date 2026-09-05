@@ -89,6 +89,7 @@ class WorkOut(BaseModel):
     volumeCount: int
     totalSizeBytes: int
     shamelaCollection: str | None
+    isFeatured: bool
 
 
 class WorkDetailOut(WorkOut):

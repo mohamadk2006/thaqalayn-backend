@@ -60,6 +60,7 @@ def _work_out(work: Work, volume_count: int, total_bytes: int, subject_title: st
         volumeCount=volume_count,
         totalSizeBytes=total_bytes,
         shamelaCollection=collection_raw,
+        isFeatured=work.is_featured,
     )
 
 
@@ -71,6 +72,7 @@ async def list_works(
     subject_id: str | None = None,
     language: str | None = None,
     author_id: int | None = None,
+    featured: bool | None = None,
 ) -> tuple[list[WorkOut], int]:
     """Paginated, filterable list of works. Each row aggregates its published volumes'
     count and total size — a work with zero published volumes is excluded, since it has
@@ -105,6 +107,8 @@ async def list_works(
         query = query.where(Work.language_code == language)
     if author_id:
         query = query.where(Work.author_id == author_id)
+    if featured:
+        query = query.where(Work.is_featured.is_(True))
 
     total = await session.scalar(select(func.count()).select_from(query.subquery()))
 
