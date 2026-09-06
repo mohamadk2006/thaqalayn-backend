@@ -467,7 +467,10 @@ def convert(input_path: Path, book_id: str) -> dict:
     author = raw_metadata.get("اسم المؤلف", "").strip()
 
     return {
-        "schemaVersion": 1,
+        # 2, not 1: this is the page/block/toc shape, not v1's chapters/sections/
+        # paragraphs -- a reader that doesn't check this and assumes v1's layout would
+        # silently misparse every field from here down.
+        "schemaVersion": 2,
         "bookId": book_id,
         "title": title,
         "author": author,
