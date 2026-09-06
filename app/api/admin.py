@@ -397,12 +397,38 @@ async def book_edit_save(
 
 
 def _flat_sections(content: dict) -> list[dict]:
-    """Every section across every chapter, in reading order, each carrying its own
-    paragraphs -- flattened once so the TOC and the section view share one numbering."""
+    """Every v2 TOC entry, in reading order, each carrying the pages it covers -- a
+    section's range runs from its own page to just before the next entry's page (or the
+    book's last page, for the final entry), same logic as paginate_sections() in
+    app/services/paging.py. A source with no فهرس الموضوعات at all (no toc entries)
+    becomes a single synthetic section spanning every page, so the viewer still has
+    something to open instead of an empty index -- mirrors how a Section-less Page
+    already works for search."""
+    pages = sorted(content.get("pages", []), key=lambda p: p.get("sequence", 0))
+    if not pages:
+        return []
+
+    page_by_id = {p["id"]: p for p in pages}
+    toc = sorted(content.get("toc", []), key=lambda e: e.get("order", 0))
+    if not toc:
+        return [{"title": None, "pages": pages}]
+
     flat = []
-    for chapter in content.get("chapters", []):
-        for section in chapter.get("sections", []):
-            flat.append({**section, "chapterTitle": chapter.get("title")})
+    for i, entry in enumerate(toc):
+        start_page = page_by_id.get(entry.get("pageId"))
+        start_seq = start_page["sequence"] if start_page else None
+        if start_seq is None:
+            flat.append({"title": entry.get("title"), "pages": []})
+            continue
+        if i + 1 < len(toc):
+            next_page = page_by_id.get(toc[i + 1].get("pageId"))
+            end_seq = (next_page["sequence"] - 1) if next_page else start_seq
+        else:
+            end_seq = pages[-1]["sequence"]
+        flat.append({
+            "title": entry.get("title"),
+            "pages": [p for p in pages if start_seq <= p["sequence"] <= end_seq],
+        })
     return flat
 
 
@@ -441,7 +467,7 @@ async def book_content(
 
     if section is None:
         rows_html = "".join(
-            f'<tr><td>{i + 1}</td><td>{escape(s.get("title") or "")}</td>'
+            f'<tr><td>{i + 1}</td><td>{escape(s["title"] or "(الكتاب كاملاً)")}</td>'
             f'<td><a href="?section={i}">فتح</a></td></tr>'
             for i, s in enumerate(sections)
         )
@@ -458,13 +484,20 @@ async def book_content(
         raise HTTPException(status_code=404, detail="Unknown section")
 
     sec = sections[section]
-    paragraphs_html = []
-    current_page: int | None = None
-    for p in sec.get("paragraphs", []):
-        if p.get("page") != current_page:
-            current_page = p.get("page")
-            paragraphs_html.append(f'<p><small>-- صفحة {current_page} --</small></p>')
-        paragraphs_html.append(f"<p>{escape(p.get('text') or '')}</p>")
+    blocks_html = []
+    current_page_number: str | None = None
+    for page in sec["pages"]:
+        if page["pageNumber"] != current_page_number:
+            current_page_number = page["pageNumber"]
+            blocks_html.append(f'<p><small>-- صفحة {escape(current_page_number)} --</small></p>')
+        for block in sorted(page.get("blocks", []), key=lambda b: b.get("order", 0)):
+            text_ = escape(block.get("text") or "")
+            if block.get("type") == "heading":
+                blocks_html.append(f"<p><strong>{text_}</strong></p>")
+            elif block.get("type") == "footnotes":
+                blocks_html.append(f"<p><small>{text_}</small></p>")
+            else:
+                blocks_html.append(f"<p>{text_}</p>")
 
     nav = (
         (f'<a href="?section={section - 1}">&larr; السابق</a>' if section > 0 else "")
@@ -474,13 +507,14 @@ async def book_content(
         + (f'<a href="?section={section + 1}">التالي &rarr;</a>'
            if section + 1 < len(sections) else "")
     )
+    title = sec["title"] or row.title
     body = (
-        f"<h1>{escape(sec.get('title') or '')}</h1>"
+        f"<h1>{escape(title)}</h1>"
         f"<p>{nav}</p>"
-        f"{''.join(paragraphs_html)}"
+        f"{''.join(blocks_html)}"
         f"<p>{nav}</p>"
     )
-    return _render(sec.get("title") or row.title, body)
+    return _render(title, body)
 
 
 # ── Word document import ──────────────────────────────────────────────────────
