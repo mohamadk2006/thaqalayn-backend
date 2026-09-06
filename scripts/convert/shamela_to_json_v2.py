@@ -26,23 +26,62 @@ import argparse
 import json
 import re
 import sys
+from collections import deque
 from pathlib import Path
 
 METADATA_TAG_RE = re.compile(r"^<\s*(?P<tag>[^=>]+?)\s*>\s*(?P<value>.*?)\s*<\s*/\s*(?P=tag)\s*>$")
-PAGE_OPEN_RE = re.compile(r"^<\s*صفحة\s*>\s*(?P<label>.*?)\s*<\s*/\s*صفحة\s*>$")
-BLANK_PAGE_RE = re.compile(r"^<\s*صفحة\s+فارغة\s*>.*<\s*/\s*صفحة\s+فارغة\s*>$")
 HEADING_OPEN = "< فهرس الموضوعات >"
 HEADING_CLOSE = "< / فهرس الموضوعات >"
 FOOTNOTE_OPEN = "< هامش >"
 FOOTNOTE_CLOSE = "< / هامش >"
-# Both tags can also appear entirely on one line -- open, text, and close together --
-# rather than opening on their own line with the content following. Real and common:
-# 11,749 of 18,831 source files (62%) use this single-line form for at least one
-# heading. Checked before the bare-open-tag multi-line case below.
-HEADING_LINE_RE = re.compile(r"^< فهرس الموضوعات >\s*(?P<text>.*?)\s*< / فهرس الموضوعات >$")
-FOOTNOTE_LINE_RE = re.compile(r"^< هامش >\s*(?P<text>.*?)\s*< / هامش >$")
+# Unanchored counterparts of the four tag pairs above -- real lines routinely carry body
+# prose both before AND after a tag (a footnote reference mid-sentence: '...قال ( 1 )
+# < هامش > نص الهامش < / هامش > . وتابع ...'). The anchored ^...$ forms above only ever
+# matched a tag that filled its *entire* line, which is common but far from universal:
+# checked against the full 18,831-file corpus, a naive line-by-line scan using only the
+# anchored forms mislabels or loses real content in the large majority of files, because
+# the code fell through to treating the whole line (tag characters included) as a single
+# opaque text block, or -- worse -- because the old multi-line block reader required its
+# closing tag to be the last thing on the line, so any trailing punctuation after
+# '< / هامش >' (extremely common: a period, a semicolon) made it miss the real close and
+# keep consuming every following line -- including unrelated main-text paragraphs -- as
+# 'footnote' content until it stumbled on some later line that happened to end exactly on
+# the close tag, or hit EOF. parse_body finds and resolves these tags by leftmost
+# position within a line instead, splitting off and requeueing whatever text surrounds
+# them, so multiple tags per line and tags with prose on either side both resolve
+# correctly.
+PAGE_PAIR_RE = re.compile(r"<\s*صفحة\s*>\s*(?P<label>.*?)\s*<\s*/\s*صفحة\s*>")
+BLANK_PAGE_PAIR_RE = re.compile(r"<\s*صفحة\s+فارغة\s*>\s*(?P<label>.*?)\s*<\s*/\s*صفحة\s+فارغة\s*>")
+HEADING_PAIR_RE = re.compile(r"<\s*فهرس\s+الموضوعات\s*>\s*(?P<text>.*?)\s*<\s*/\s*فهرس\s+الموضوعات\s*>")
+FOOTNOTE_PAIR_RE = re.compile(r"<\s*هامش\s*>\s*(?P<text>.*?)\s*<\s*/\s*هامش\s*>")
+_PAIR_KINDS = (
+    ("blank_page", BLANK_PAGE_PAIR_RE),
+    ("page", PAGE_PAIR_RE),
+    ("heading", HEADING_PAIR_RE),
+    ("footnote", FOOTNOTE_PAIR_RE),
+)
+BLANK_PAGE_OPEN = "< صفحة فارغة >"
+BLANK_PAGE_CLOSE = "< / صفحة فارغة >"
+_BARE_OPEN_KINDS = (
+    ("heading_open", HEADING_OPEN),
+    ("footnote_open", FOOTNOTE_OPEN),
+    ("blank_page_open", BLANK_PAGE_OPEN),
+)
 BODY_MARKER = "< الكتاب >"
-BRACKETED_LINE_RE = re.compile(r"^<.*>$")
+# Any OTHER complete `< tag >` or `< / tag >` -- Shamela sources use a long tail of
+# sectioning/formatting tags beyond the four with real schema meaning above: poetry
+# (< شعر >), commentary (< شرح >), attachments (< ملحق = N >), inline language switches
+# (< لغة النص = انجليزي >, seen used per-word inside dictionary entries), glossary terms,
+# Q&A markers, and others. None of them carry a distinct field in the v2 schema, and --
+# critically -- their *content* is ordinary flowing text that itself may contain a real
+# page break, heading, or footnote (observed nested inside both < ملحق > and < شرح > in
+# real files), so treating them as opaque "read until the matching close" blocks like
+# heading/footnote would swallow those nested real tags as literal text. Instead each
+# complete tag of this kind is deleted in place, wherever it falls in a line, and
+# everything else keeps flowing through the same per-line scan uninterrupted -- this also
+# subsumes the old whole-line-only "unrecognized directive" skip (e.g.
+# < لغة النص = عربي > alone on its own line) as the same mechanism.
+GENERIC_TAG_RE = re.compile(r"<\s*/?\s*[^<>]+?\s*>")
 LEADING_DIGITS_RE = re.compile(r"^\s*(\d+)")
 TRAILING_DIGITS_RE = re.compile(r"(\d+)\s*$")
 
@@ -129,23 +168,69 @@ def _printed_number(label: str) -> int | None:
     return None
 
 
-def _read_block(lines: list[str], open_index: int, close_tag: str) -> tuple[str, int]:
-    """Headings and footnotes both open on their own line and may span several more
-    before the closing tag appears, occasionally trailing the last content fragment on
-    the same line as the close tag. Shared with v1's heading reader, generalized to
-    also read footnote blocks the same way."""
+def _strip_generic_tags(text: str) -> str:
+    """Deletes any complete generic (non-page/heading/footnote/blank) tag from `text`,
+    same as the main loop's 'generic_tag' handling -- needed here too because a
+    multi-line heading/footnote/blank-page span's interior lines never pass back through
+    _find_first_tag (only the line containing the real close tag gets inspected, for
+    close_tag itself), so a real citation like '< لغة النص = انجليزي > ... < / لغة النص
+    = انجليزي >' sitting inside a long footnote -- extremely common, English book/author
+    names cited mid-footnote -- would otherwise survive untouched in the block's text."""
+    while match := GENERIC_TAG_RE.search(text):
+        text = f"{text[:match.start()]} {text[match.end():]}"
+    return " ".join(text.split())
+
+
+def _read_block(first_fragment: str, queue: deque[str], close_tag: str) -> tuple[str, str]:
+    """Reads a heading/footnote/blank-page block whose close tag wasn't found on its
+    opening line. `first_fragment` is whatever followed the open tag on that same line.
+    Pulls further lines from `queue` until one *contains* close_tag (not merely ends
+    with it -- real closes are routinely followed by trailing punctuation, e.g.
+    '. < / هامش > .'), then returns (block_text, leftover) where leftover is whatever
+    trailed the close tag on that line, pushed back onto the caller's queue for normal
+    reprocessing."""
     fragments: list[str] = []
-    index = open_index + 1
-    while index < len(lines):
-        candidate = lines[index].strip()
-        if candidate.endswith(close_tag):
-            prefix = candidate[: -len(close_tag)].strip()
+    first_fragment = _strip_generic_tags(first_fragment)
+    if first_fragment:
+        fragments.append(first_fragment)
+    while queue:
+        candidate = queue.popleft().strip()
+        index = candidate.find(close_tag)
+        if index != -1:
+            prefix = _strip_generic_tags(candidate[:index])
             if prefix:
                 fragments.append(prefix)
-            return "\n".join(fragments), index + 1
-        fragments.append(candidate)
-        index += 1
-    raise ConversionError(f"block opened at line {open_index} never closed ({close_tag})")
+            return "\n".join(fragments), candidate[index + len(close_tag):].strip()
+        fragments.append(_strip_generic_tags(candidate))
+    raise ConversionError(f"block never closed ({close_tag})")
+
+
+def _find_first_tag(line: str):
+    """Leftmost recognized tag in `line`: a fully-closed pair (page/blank/heading/
+    footnote, wherever it sits amid surrounding prose), a bare open tag with no matching
+    close on this line (heading/footnote/blank-page -- the only tags that legitimately
+    span multiple lines), or any other single complete `< tag >`/`< / tag >` (deleted in
+    place -- see GENERIC_TAG_RE). Returns (start, kind, match_or_pos) or None."""
+    candidates: list[tuple[int, str, object]] = []
+    for kind, regex in _PAIR_KINDS:
+        m = regex.search(line)
+        if m:
+            candidates.append((m.start(), kind, m))
+    for kind, open_tag in _BARE_OPEN_KINDS:
+        pos = line.find(open_tag)
+        if pos != -1:
+            candidates.append((pos, kind, pos))
+    m = GENERIC_TAG_RE.search(line)
+    if m:
+        candidates.append((m.start(), "generic_tag", m))
+    if not candidates:
+        return None
+    # Stable sort: a pair match, a bare-open candidate, and the generic fallback can all
+    # share the same start position (the same tag, matched three different ways) --
+    # pair entries were appended first and bare-opens before the generic fallback, so
+    # ties correctly prefer the most specific interpretation.
+    candidates.sort(key=lambda c: c[0])
+    return candidates[0]
 
 
 _NUMERIC_WITH_SUFFIX_RE = re.compile(r"^\d+(\s*\(.*\))?$")
@@ -239,80 +324,116 @@ def parse_body(lines: list[str], start: int) -> tuple[list[dict], list[dict]]:
             return new_page("")
         return current_page
 
-    index = start
-    while index < len(lines):
-        line = lines[index].strip()
-
-        if not line or line == "< / الكتاب >":
-            index += 1
-            continue
-
-        if match := PAGE_OPEN_RE.match(line):
-            new_page(match.group("label"))
-            index += 1
-            continue
-
-        if BLANK_PAGE_RE.match(line):
-            ensure_page()["isBlank"] = True
-            index += 1
-            continue
-
-        heading_line = HEADING_LINE_RE.match(line)
-        if heading_line or line == HEADING_OPEN:
-            if heading_line:
-                text, index = heading_line.group("text"), index + 1
-            else:
-                text, index = _read_block(lines, index, HEADING_CLOSE)
-            page = ensure_page()
-            block_order += 1
-            toc_order += 1
-            toc_id = f"toc-{toc_order:05d}"
-            page["blocks"].append({
-                "id": f"{page['id']}-b-{block_order:03d}",
-                "type": "heading",
-                "order": block_order,
-                "text": text,
-                "tocId": toc_id,
-            })
-            # pageNumber isn't resolved yet -- frontMatter/main classification needs the
-            # whole file's labels, filled in once parsing finishes (see below).
-            toc.append({
-                "id": toc_id,
-                "order": toc_order,
-                "title": text,
-                "pageId": page["id"],
-            })
-            continue
-
-        footnote_line = FOOTNOTE_LINE_RE.match(line)
-        if footnote_line or line == FOOTNOTE_OPEN:
-            if footnote_line:
-                text, index = footnote_line.group("text"), index + 1
-            else:
-                text, index = _read_block(lines, index, FOOTNOTE_CLOSE)
-            page = ensure_page()
-            block_order += 1
-            page["blocks"].append({
-                "id": f"{page['id']}-b-{block_order:03d}",
-                "type": "footnotes",
-                "order": block_order,
-                "text": text,
-            })
-            continue
-
-        if BRACKETED_LINE_RE.match(line):
-            index += 1  # an unrecognized directive (e.g. < لغة النص = عربي >)
-            continue
-
+    def add_text_block(text: str) -> None:
+        nonlocal block_order
+        if not text:
+            return
         page = ensure_page()
         block_order += 1
         page["blocks"].append({
             "id": f"{page['id']}-b-{block_order:03d}",
             "type": "text",
             "order": block_order,
-            "text": line,
+            "text": text,
         })
-        index += 1
+
+    def add_heading_block(text: str) -> None:
+        nonlocal block_order, toc_order
+        page = ensure_page()
+        block_order += 1
+        toc_order += 1
+        toc_id = f"toc-{toc_order:05d}"
+        page["blocks"].append({
+            "id": f"{page['id']}-b-{block_order:03d}",
+            "type": "heading",
+            "order": block_order,
+            "text": text,
+            "tocId": toc_id,
+        })
+        # pageNumber isn't resolved yet -- frontMatter/main classification needs the
+        # whole file's labels, filled in once parsing finishes (see below).
+        toc.append({"id": toc_id, "order": toc_order, "title": text, "pageId": page["id"]})
+
+    def add_footnote_block(text: str) -> None:
+        nonlocal block_order
+        page = ensure_page()
+        block_order += 1
+        page["blocks"].append({
+            "id": f"{page['id']}-b-{block_order:03d}",
+            "type": "footnotes",
+            "order": block_order,
+            "text": text,
+        })
+
+    def mark_blank(label: str) -> None:
+        page = ensure_page()
+        page["isBlank"] = True
+        if label and not page.get("sourcePageLabel"):
+            page["sourcePageLabel"] = label
+
+    _BARE_OPEN_TAGS = {
+        "heading_open": (HEADING_OPEN, HEADING_CLOSE),
+        "footnote_open": (FOOTNOTE_OPEN, FOOTNOTE_CLOSE),
+        "blank_page_open": (BLANK_PAGE_OPEN, BLANK_PAGE_CLOSE),
+    }
+
+    queue: deque[str] = deque(lines[start:])
+    while queue:
+        line = queue.popleft().strip()
+
+        if not line or line == "< / الكتاب >":
+            continue
+
+        found = _find_first_tag(line)
+        if found is None:
+            add_text_block(line)
+            continue
+
+        tag_start, kind, payload = found
+        before = line[:tag_start].strip()
+
+        if kind in ("blank_page", "page", "heading", "footnote"):
+            match = payload
+            add_text_block(before)
+            after = line[match.end():].strip()
+            if kind == "page":
+                new_page(match.group("label"))
+            elif kind == "blank_page":
+                mark_blank(match.group("label"))
+            elif kind == "heading":
+                add_heading_block(_strip_generic_tags(match.group("text")))
+            elif kind == "footnote":
+                add_footnote_block(_strip_generic_tags(match.group("text")))
+            if after:
+                queue.appendleft(after)
+            continue
+
+        if kind == "generic_tag":
+            # A sectioning/formatting tag with no distinct schema meaning (poetry,
+            # commentary, attachments, inline language switches, ...) -- deleted in
+            # place rather than treated as a block boundary, since its content is
+            # ordinary flowing text that may itself contain a real page/heading/
+            # footnote tag later in the stream.
+            add_text_block(before)
+            after = line[payload.end():].strip()
+            if after:
+                queue.appendleft(after)
+            continue
+
+        # bare open with no close on this line -- reads forward across lines until the
+        # close tag turns up, wherever in that later line it lands.
+        add_text_block(before)
+        open_tag, close_tag = _BARE_OPEN_TAGS[kind]
+        first_fragment = line[tag_start + len(open_tag):]
+        text, leftover = _read_block(first_fragment, queue, close_tag)
+        if kind == "heading_open":
+            add_heading_block(text)
+        elif kind == "footnote_open":
+            add_footnote_block(text)
+        else:
+            mark_blank(text)
+        if leftover:
+            queue.appendleft(leftover)
 
     split = _classify_split(labels)
     front_matter_index = 0
