@@ -1,5 +1,6 @@
 """Async SQLAlchemy engine and session wiring."""
 
+import os
 from collections.abc import AsyncIterator
 
 from sqlalchemy.ext.asyncio import (
@@ -25,9 +26,20 @@ def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         settings = get_settings()
+        # Pool size is only ever overridden by the bulk importer (via these env vars,
+        # set before it calls get_sessionmaker() — see scripts/import/import_books.py),
+        # never by the API process, so this can't change the live API's connection
+        # budget. SQLAlchemy's defaults (5 + 10 overflow = 15) otherwise apply.
+        pool_kwargs = {}
+        if pool_size := os.environ.get("DB_POOL_SIZE"):
+            pool_kwargs["pool_size"] = int(pool_size)
+        if max_overflow := os.environ.get("DB_MAX_OVERFLOW"):
+            pool_kwargs["max_overflow"] = int(max_overflow)
         # pool_pre_ping guards against connections silently killed by a restarted
         # container or a VPS network blip — cheap insurance for a long-running API.
-        _engine = create_async_engine(settings.database_url, pool_pre_ping=True, future=True)
+        _engine = create_async_engine(
+            settings.database_url, pool_pre_ping=True, future=True, **pool_kwargs
+        )
     return _engine
 
 

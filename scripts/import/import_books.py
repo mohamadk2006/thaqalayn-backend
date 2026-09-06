@@ -29,6 +29,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
@@ -386,8 +387,8 @@ async def main() -> int:
         help="number of books to import concurrently (default 6). The importer is "
              "I/O-bound on database round trips, not CPU-bound, so several books' "
              "worth of DB work can overlap productively. Each worker holds its own "
-             "connection; SQLAlchemy's default pool (5 + 10 overflow = 15) comfortably "
-             "covers the default concurrency without extra configuration.",
+             "connection for the run's duration, so the connection pool is sized to "
+             "match this value automatically (see DB_POOL_SIZE in app/db.py).",
     )
     parser.add_argument(
         "--min-free-gb", type=float, default=3.0,
@@ -398,6 +399,15 @@ async def main() -> int:
              "unpredictable one partway through a write.",
     )
     args = parser.parse_args()
+
+    # Each worker holds its own connection for the run's duration, so the pool must
+    # cover --concurrency or workers spend their time queued for a connection instead
+    # of doing useful work. Set before the first get_sessionmaker() call (inside
+    # _worker(), below) creates the engine; harmless to the API process, which never
+    # sets these. +2 overflow as slack for the occasional non-worker query (the
+    # monitor loop, _lookup_collection, etc.) that might overlap a worker's own use.
+    os.environ["DB_POOL_SIZE"] = str(args.concurrency)
+    os.environ["DB_MAX_OVERFLOW"] = "2"
 
     books_root = args.books_root or get_settings().books_root
 
