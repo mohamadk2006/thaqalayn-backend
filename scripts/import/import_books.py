@@ -295,27 +295,25 @@ async def import_one(
         section_rows = paginate_sections(content)
         ord_to_section_id: dict[int, int] = {}
         if section_rows:
-            values_sql = ", ".join(f"(:bid, :ord{i}, :title{i}, :norm{i}, :ps{i}, :pe{i})"
-                                    for i in range(len(section_rows)))
-            params: dict = {"bid": bid}
-            for i, sec in enumerate(section_rows):
-                params.update({
-                    f"ord{i}": sec.ord, f"title{i}": sec.title,
-                    f"norm{i}": normalize(sec.title),
-                    f"ps{i}": sec.page_start_sequence, f"pe{i}": sec.page_end_sequence,
-                })
-            # A single INSERT ... RETURNING for the whole book's sections. PostgreSQL
-            # returns rows in the same order the VALUES list was given, so this can be
-            # zipped directly against section_rows without needing `ord` echoed back.
-            result = await session.execute(
-                text(f"""INSERT INTO sections (book_id, ord, title, title_norm,
-                                                page_start_sequence, page_end_sequence)
-                        VALUES {values_sql} RETURNING id"""),
-                params,
+            # executemany-style (one dict per row), not a single hand-built multi-row
+            # VALUES clause with a uniquely-named parameter per cell: a dictionary-type
+            # book can carry tens of thousands of headings (one per headword), and a
+            # single VALUES clause's parameter count -- 5 names per row -- blows past
+            # asyncpg's 32,767-parameter ceiling well before that. A follow-up SELECT
+            # gets the (ord -> id) mapping instead of relying on RETURNING, which
+            # doesn't give a usable per-row mapping under executemany anyway.
+            await session.execute(
+                text("""INSERT INTO sections (book_id, ord, title, title_norm,
+                                               page_start_sequence, page_end_sequence)
+                        VALUES (:bid, :ord, :title, :norm, :ps, :pe)"""),
+                [{"bid": bid, "ord": sec.ord, "title": sec.title,
+                  "norm": normalize(sec.title), "ps": sec.page_start_sequence,
+                  "pe": sec.page_end_sequence} for sec in section_rows],
             )
-            ord_to_section_id = {
-                sec.ord: row[0] for sec, row in zip(section_rows, result.fetchall(), strict=True)
-            }
+            rows = (await session.execute(
+                text("SELECT ord, id FROM sections WHERE book_id = :bid"), {"bid": bid}
+            )).all()
+            ord_to_section_id = dict(rows)
 
         stage = "pages"
         if pages:
