@@ -105,7 +105,7 @@ class TestSearchFindsUndiacriticizedQuery:
         hit = next(h for h in response.json()["items"] if h["bookId"] == BOOK_ID)
         assert hit["workTitle"] == "كتاب اختبار البحث"
         assert hit["author"] == "مؤلف الاختبار الثالث"
-        assert hit["page"] == 1
+        assert hit["page"] == "1"
         assert hit["sectionTitle"] == "باب في فضل الإمام"
         assert hit["subjectId"] == "hadith-shia-amm"
         assert hit["score"] > 0
@@ -145,7 +145,7 @@ class TestSearchDoesNotMatchUnrelatedContent:
             "/api/search", params={"q": "الامام الصادق", "work": work_id}
         )
         pages = [h["page"] for h in response.json()["items"] if h["bookId"] == BOOK_ID]
-        assert pages == [1]
+        assert pages == ["1"]
 
 
 class TestPaginationAndFilters:

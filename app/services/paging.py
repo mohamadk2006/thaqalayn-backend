@@ -1,85 +1,110 @@
-"""Group a converted book's paragraphs into pages.
+"""Shape a v2-converted book's pages/toc into the search-index rows the schema stores.
 
 The one piece of import logic worth isolating and testing on its own: it turns the
-paragraph-level BookContent structure into the page-level rows the schema stores, and it
-is where the paragraph→page offset mapping that enables post-download deep-linking is
+page/block/toc BookContent structure into the `pages`/`sections` rows the schema stores,
+and it is where the block->page offset mapping that enables post-download deep-linking is
 built. Both the importer and its tests use this, so they can never drift apart.
 """
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass
 
 
 @dataclass
 class PageRow:
-    page_no: int
+    sequence: int
+    page_number: str
+    page_type: str
+    is_blank: bool
     text: str
-    paragraph_offsets: list[dict]  # [{"id": str, "start": int}], char offset within text
-    section_ord: int | None        # 1-based ordinal of the section this page opens in
+    block_offsets: list[dict]  # [{"id": str, "start": int}], char offset within text
+    section_ord: int | None    # 1-based ordinal of the section this page opens in
 
 
 @dataclass
 class SectionRow:
     ord: int
     title: str
-    page_start: int | None
-    page_end: int | None
+    page_start_sequence: int | None
+    page_end_sequence: int | None
 
 
 def paginate_sections(content: dict) -> list[SectionRow]:
-    """Section rows with the page range each spans, for the sections table.
+    """Section rows with the page-sequence range each spans, for the `sections` table.
 
-    A section's range is the first and last printed page of its paragraphs. Ranges can
-    overlap between consecutive sections (two headings can share a page), which is
-    expected — sections index the text, they do not partition it.
+    A section's range runs from its own page's sequence to the sequence right before the
+    next TOC entry's page (or the book's last page, for the final entry). Two TOC entries
+    can share a page (sequence range of length zero) — sections index the text, they do
+    not partition it, same as v1.
     """
+    toc = sorted(content.get("toc", []), key=lambda e: e.get("order", 0))
+    if not toc:
+        return []
+
+    page_sequence = {page["id"]: page["sequence"] for page in content.get("pages", [])}
+    last_sequence = max(page_sequence.values(), default=None)
+
     rows: list[SectionRow] = []
-    ordinal = 0
-    for chapter in sorted(content.get("chapters", []), key=lambda c: c.get("order", 0)):
-        for section in sorted(chapter.get("sections", []), key=lambda s: s.get("order", 0)):
-            ordinal += 1
-            pages = [p["page"] for p in section.get("paragraphs", [])]
-            rows.append(SectionRow(
-                ord=ordinal,
-                title=section.get("title", ""),
-                page_start=min(pages) if pages else None,
-                page_end=max(pages) if pages else None,
-            ))
+    for i, entry in enumerate(toc):
+        start = page_sequence.get(entry["pageId"])
+        if i + 1 < len(toc):
+            next_start = page_sequence.get(toc[i + 1]["pageId"])
+            end = (next_start - 1) if (next_start is not None and start is not None) else start
+        else:
+            end = last_sequence
+        rows.append(SectionRow(
+            ord=i + 1, title=entry.get("title", ""),
+            page_start_sequence=start, page_end_sequence=end,
+        ))
     return rows
 
 
 def paginate(content: dict) -> list[PageRow]:
-    """Collapse paragraphs into one row per (page number) in reading order.
+    """One row per v2 page, in reading order.
 
-    Paragraphs on the same printed page are joined with '\\n', and each paragraph's
-    character offset within the joined text is recorded so a search hit can later resolve
-    back to an exact paragraph. A page is tagged with the section it *opens* in — the
-    section active at its first paragraph — which is what a search result needs to show
-    "which chapter" without storing a section per paragraph.
+    A page's blocks (text, heading, and footnote text alike — a reader searching for a
+    phrase that only appears in a footnote citation should still find the page) are joined
+    with '\\n', and each block's character offset within the joined text is recorded so a
+    search hit can later resolve back to an exact block after download. A page is tagged
+    with the section active as of its own sequence — the count of TOC entries at or before
+    it — which is what a search result needs to show "which chapter" without storing a
+    section per block. Using a count rather than a boolean "does this page open a section"
+    flag matters when a page carries more than one heading: each TOC entry still gets its
+    own ordinal in paginate_sections, and a page's section_ord must land on the *last* of
+    those ordinals to point at the section actually covering the page, not just whichever
+    one happened to be first.
     """
-    pages: dict[int, PageRow] = {}
-    order: list[int] = []
-    section_ord = 0
+    rows: list[PageRow] = []
+    page_sequence = {p["id"]: p["sequence"] for p in content.get("pages", [])}
+    toc = sorted(content.get("toc", []), key=lambda e: e.get("order", 0))
+    # Non-decreasing by construction: the converter appends a heading to toc in the same
+    # document-order pass that assigns page sequences, so an earlier toc entry can never
+    # point at a later page than one that follows it.
+    toc_page_sequences = [
+        page_sequence[e["pageId"]] for e in toc if e["pageId"] in page_sequence
+    ]
 
-    for chapter in sorted(content.get("chapters", []), key=lambda c: c.get("order", 0)):
-        for section in sorted(chapter.get("sections", []), key=lambda s: s.get("order", 0)):
-            section_ord += 1
-            for para in sorted(section.get("paragraphs", []), key=lambda p: p.get("order", 0)):
-                page_no = para["page"]
-                text = para.get("text", "")
+    for page in sorted(content.get("pages", []), key=lambda p: p["sequence"]):
+        section_ord = bisect.bisect_right(toc_page_sequences, page["sequence"])
 
-                row = pages.get(page_no)
-                if row is None:
-                    row = PageRow(
-                        page_no=page_no, text="", paragraph_offsets=[],
-                        section_ord=section_ord,
-                    )
-                    pages[page_no] = row
-                    order.append(page_no)
+        text = ""
+        offsets: list[dict] = []
+        for block in sorted(page.get("blocks", []), key=lambda b: b.get("order", 0)):
+            block_text = block.get("text", "")
+            start = len(text) + (1 if text else 0)  # account for the joining '\n'
+            offsets.append({"id": block["id"], "start": start})
+            text = f"{text}\n{block_text}" if text else block_text
 
-                start = len(row.text) + (1 if row.text else 0)  # account for the joining '\n'
-                row.paragraph_offsets.append({"id": para["id"], "start": start})
-                row.text = f"{row.text}\n{text}" if row.text else text
+        rows.append(PageRow(
+            sequence=page["sequence"],
+            page_number=page["pageNumber"],
+            page_type=page["pageType"],
+            is_blank=page.get("isBlank", False),
+            text=text,
+            block_offsets=offsets,
+            section_ord=section_ord if section_ord else None,
+        ))
 
-    return [pages[n] for n in order]
+    return rows

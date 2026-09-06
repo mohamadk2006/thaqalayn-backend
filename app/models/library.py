@@ -239,9 +239,18 @@ class Book(Base):
         nullable=False, default=False, server_default="false"
     )
 
+    # page_first/page_last: the printed number of the book's first/last *main* page
+    # (front matter's "0.N" labels are never numeric, so they're excluded — a book that
+    # is entirely front matter, none seen in the real corpus, would leave both NULL).
+    # Exposed to iOS as BookOut.pageFirst/pageLast; still plain ints since both are
+    # always genuine printed numbers, unlike Page.page_number which must be a string.
     page_first: Mapped[int | None] = mapped_column(Integer)
     page_last: Mapped[int | None] = mapped_column(Integer)
     page_count: Mapped[int | None] = mapped_column(Integer)
+    # Total block count across all pages (text + heading + footnotes) — the closest v2
+    # analogue of v1's paragraph count, kept under the same name/field since it served
+    # the same "how much content is in this book" role and nothing consumes its exact
+    # definition today. Exposed to iOS as BookOut.paragraphCount.
     paragraph_count: Mapped[int | None] = mapped_column(Integer)
     section_count: Mapped[int | None] = mapped_column(Integer)
 
@@ -273,11 +282,18 @@ class Book(Base):
 
 
 class Section(Base):
-    """A heading from the source's فهرس الموضوعات index.
+    """A heading from the source's فهرس الموضوعات index — one row per v2 `toc[]` entry.
 
     Nullable relationships everywhere it touches pages, because some Shamela exports have
     no headings at all — 3 of the 10 originally sampled books had exactly one synthetic
     section. Search results for those books can report a page number but no section title.
+
+    `page_start_sequence`/`page_end_sequence` are `Page.sequence` values, not printed page
+    numbers — v2 page numbers are strings and not unique within a book (see Page), so they
+    cannot anchor a range. A section's range is "from its own page's sequence to the
+    sequence right before the next TOC entry's page" (or the book's last page, for the
+    final entry) — sequence is always present, always unique per book, and always
+    orderable, which is exactly what a range needs.
     """
 
     __tablename__ = "sections"
@@ -289,8 +305,8 @@ class Section(Base):
     ord: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     title_norm: Mapped[str] = mapped_column(Text, nullable=False)
-    page_start: Mapped[int | None] = mapped_column(Integer)
-    page_end: Mapped[int | None] = mapped_column(Integer)
+    page_start_sequence: Mapped[int | None] = mapped_column(Integer)
+    page_end_sequence: Mapped[int | None] = mapped_column(Integer)
 
     book: Mapped[Book] = relationship(back_populates="sections")
 
@@ -301,7 +317,7 @@ class Section(Base):
 
 
 class Page(Base):
-    """The search unit: one print page of one book.
+    """The search unit: one v2 page (`pages[]` entry) of one book.
 
     Only the **original** text is stored, with full tashkeel. The normalized form exists
     solely inside `search_tsv`, which is derived — storing a second normalized copy would
@@ -311,6 +327,14 @@ class Page(Base):
     snippet (stripped of hamza and tashkeel), which is wrong to show a reader. Snippets
     must therefore be cut from `text` here, with match offsets mapped back from normalized
     space — not taken from PostgreSQL's pre-marked headline.
+
+    `sequence`, not `page_number`, is the identity column: v2's own `pageNumber` is a
+    *string* ("0.1".."0.n" for front matter, the printed number as text for main pages)
+    and the schema explicitly does not guarantee it's unique within a book, so it cannot
+    carry a uniqueness constraint or serve as a stable join key the way v1's integer
+    `page_no` did. `sequence` is v2's own 1..N page ordinal — always present, always
+    unique per book, always orderable — and is what `Section` ranges and any future
+    deep-link addressing should use. `page_number` survives purely as the display string.
     """
 
     __tablename__ = "pages"
@@ -319,15 +343,21 @@ class Page(Base):
     book_id: Mapped[int] = mapped_column(
         ForeignKey("books.id", ondelete="CASCADE"), nullable=False
     )
-    page_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    page_number: Mapped[str] = mapped_column(Text, nullable=False)
+    page_type: Mapped[str] = mapped_column(Text, nullable=False)  # frontMatter | main
+    is_blank: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default="false"
+    )
     section_id: Mapped[int | None] = mapped_column(ForeignKey("sections.id", ondelete="SET NULL"))
 
     text: Mapped[str] = mapped_column(Text, nullable=False)
 
-    # Character offsets of each paragraph within `text`, as [{"id": ..., "start": ...}].
-    # Lets a search hit resolve back to a paragraph for deep-linking after download,
-    # without storing paragraph rows or a second copy of the text.
-    paragraph_offsets: Mapped[dict | None] = mapped_column(JSONB)
+    # Character offsets of each v2 *block* within `text`, as [{"id": ..., "start": ...}].
+    # Lets a search hit resolve back to a specific block for deep-linking after download,
+    # without storing block rows or a second copy of the text. (Was paragraph_offsets,
+    # keyed on v1 paragraph ids — v2 has no paragraph concept, only blocks.)
+    block_offsets: Mapped[dict | None] = mapped_column(JSONB)
 
     # GENERATED ... STORED: PostgreSQL maintains this on write, so the index can never
     # drift out of sync with the text the way a trigger-maintained column can. This is
@@ -339,7 +369,8 @@ class Page(Base):
     )
 
     __table_args__ = (
-        UniqueConstraint("book_id", "page_no", name="uq_pages_book_page"),
+        CheckConstraint("page_type IN ('frontMatter','main')", name="ck_pages_page_type"),
+        UniqueConstraint("book_id", "sequence", name="uq_pages_book_sequence"),
         Index("ix_pages_book", "book_id"),
         Index("ix_pages_section", "section_id"),
         # GIN over the tsvector is what makes full-library search feasible. Build it AFTER

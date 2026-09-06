@@ -90,7 +90,7 @@ class TestSeedData:
 class TestGeneratedSearchVector:
     async def test_tsvector_is_populated_automatically(self, session):
         book = await _make_book(session)
-        page = Page(book_id=book.id, page_no=1, text=DIACRITIZED)
+        page = Page(book_id=book.id, sequence=1, page_number="1", page_type="main", text=DIACRITIZED)
         session.add(page)
         await session.flush()
 
@@ -102,15 +102,15 @@ class TestGeneratedSearchVector:
         book = await _make_book(session)
         session.add_all(
             [
-                Page(book_id=book.id, page_no=1, text=DIACRITIZED),
-                Page(book_id=book.id, page_no=2, text=OTHER_PAGE),
+                Page(book_id=book.id, sequence=1, page_number="1", page_type="main", text=DIACRITIZED),
+                Page(book_id=book.id, sequence=2, page_number="2", page_type="main", text=OTHER_PAGE),
             ]
         )
         await session.flush()
 
         found = (
             await session.execute(
-                select(Page.page_no)
+                select(Page.page_number)
                 .where(Page.book_id == book.id)
                 .where(
                     Page.search_tsv.op("@@")(
@@ -119,13 +119,13 @@ class TestGeneratedSearchVector:
                 )
             )
         ).scalars().all()
-        assert found == [1]
+        assert found == ["1"]
 
     async def test_tsvector_updates_when_text_changes(self, session):
         """A STORED generated column must track its source; a trigger-based design could
         silently drift."""
         book = await _make_book(session)
-        page = Page(book_id=book.id, page_no=1, text="نص أولي")
+        page = Page(book_id=book.id, sequence=1, page_number="1", page_type="main", text="نص أولي")
         session.add(page)
         await session.flush()
 
@@ -173,22 +173,22 @@ class TestConstraints:
         # lets the fixture tear down cleanly instead of warning.
         await session.rollback()
 
-    async def test_duplicate_page_number_within_a_book_is_rejected(self, session):
+    async def test_duplicate_sequence_within_a_book_is_rejected(self, session):
         book = await _make_book(session)
-        session.add(Page(book_id=book.id, page_no=5, text="أول"))
+        session.add(Page(book_id=book.id, sequence=5, page_number="5", page_type="main", text="أول"))
         await session.flush()
-        session.add(Page(book_id=book.id, page_no=5, text="ثان"))
+        session.add(Page(book_id=book.id, sequence=5, page_number="5", page_type="main", text="ثان"))
         with pytest.raises((IntegrityError, DBAPIError)):
             await session.flush()
         await session.rollback()
 
-    async def test_same_page_number_in_different_books_is_fine(self, session):
+    async def test_same_sequence_in_different_books_is_fine(self, session):
         first = await _make_book(session, book_id=900003)
         second = await _make_book(session, book_id=900004)
         session.add_all(
             [
-                Page(book_id=first.id, page_no=1, text="أول"),
-                Page(book_id=second.id, page_no=1, text="ثان"),
+                Page(book_id=first.id, sequence=1, page_number="1", page_type="main", text="أول"),
+                Page(book_id=second.id, sequence=1, page_number="1", page_type="main", text="ثان"),
             ]
         )
         await session.flush()  # must not raise
@@ -197,7 +197,7 @@ class TestConstraints:
 class TestCascades:
     async def test_deleting_a_book_removes_its_pages(self, session):
         book = await _make_book(session)
-        session.add(Page(book_id=book.id, page_no=1, text=DIACRITIZED))
+        session.add(Page(book_id=book.id, sequence=1, page_number="1", page_type="main", text=DIACRITIZED))
         await session.flush()
 
         await session.execute(delete(Book).where(Book.id == book.id))
@@ -218,7 +218,7 @@ class TestCascades:
         session.add(section)
         await session.flush()
 
-        page = Page(book_id=book.id, page_no=1, text=DIACRITIZED, section_id=section.id)
+        page = Page(book_id=book.id, sequence=1, page_number="1", page_type="main", text=DIACRITIZED, section_id=section.id)
         session.add(page)
         await session.flush()
 

@@ -205,7 +205,8 @@ class TestDownload:
         assert response.headers["content-type"] == "application/json"
         body = response.json()
         assert body["bookId"] == BOOK_A
-        assert "الإمام الصادق" in body["chapters"][0]["sections"][0]["paragraphs"][0]["text"]
+        block_texts = [b["text"] for p in body["pages"] for b in p["blocks"]]
+        assert any("الإمام الصادق" in t for t in block_texts)
 
     async def test_content_length_matches_stored_size(self, imported: AsyncClient):
         detail = (await imported.get(f"/api/books/{BOOK_A}")).json()

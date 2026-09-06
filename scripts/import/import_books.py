@@ -40,8 +40,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "convert"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts" / "validate"))
 
-import shamela_to_json as conv  # noqa: E402
-import validate_book as val  # noqa: E402
+import shamela_to_json_v2 as conv  # noqa: E402
+import validate_book_v2 as val  # noqa: E402
 from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
@@ -70,6 +70,49 @@ def _hijri_year(death_label: str) -> int | None:
     """
     match = re.search(r"\d+", death_label)
     return int(match.group()) if match else None
+
+
+def _book_summary(content: dict) -> dict:
+    """The handful of derived fields v1's converter used to hand back as a separate
+    `manifest` dict. v2's convert() returns one flat content dict instead -- title/author
+    live at the top level, everything else under `metadata` with its own key names (e.g.
+    'authorDeath' not 'death', 'publicationYear' not 'published_year') -- so this is where
+    that translation happens, once, rather than scattered across the call site below.
+
+    pageFirst/pageLast are the printed-number range of *main* pages only: front matter's
+    "0.N" labels aren't real printed numbers, and a book that's front matter start-to-end
+    (none seen in the real corpus) leaves both None. paragraphCount counts every block
+    (text + heading + footnotes) across all pages -- the closest v2 analogue of v1's
+    paragraph count, since v2 has no paragraph concept at all.
+    """
+    md = content.get("metadata", {})
+    pages = content.get("pages", [])
+    main_numbers = [
+        int(p["pageNumber"]) for p in pages
+        if p.get("pageType") == "main" and str(p.get("pageNumber", "")).isdigit()
+    ]
+    volume = md.get("volume")
+    return {
+        "title": content.get("title", ""),
+        "author": content.get("author", ""),
+        "volume": int(volume) if volume and volume.isdigit() else None,
+        "collection": md.get("collection"),
+        "death": md.get("authorDeath"),
+        "publisher": md.get("publisher"),
+        "edition": md.get("edition"),
+        "published_year": md.get("publicationYear"),
+        "printer": md.get("printer"),
+        "editor": md.get("editor"),
+        "isbn": md.get("isbn"),
+        "source_pdf": md.get("attachedFile"),
+        "identity_notes": md.get("notes"),
+        "verified": bool(md.get("trusted", False)),
+        "pageFirst": min(main_numbers) if main_numbers else None,
+        "pageLast": max(main_numbers) if main_numbers else None,
+        "pageCount": len(pages),
+        "paragraphCount": sum(len(p.get("blocks", [])) for p in pages),
+        "sectionCount": len(content.get("toc", [])),
+    }
 
 
 async def _get_or_create_author(session: AsyncSession, name: str, death: str | None) -> int | None:
@@ -156,7 +199,8 @@ async def import_one(
         )
 
     try:
-        content, manifest = conv.convert(source, book_id_str)
+        content = conv.convert(source, book_id_str)
+        manifest = _book_summary(content)
 
         stage = "validate"
         issues = val.validate(content)
@@ -184,9 +228,8 @@ async def import_one(
         content_path.write_bytes(payload)
 
         stage = "metadata"
-        md = manifest["metadata"]
-        collection = await _lookup_collection(session, md.get("collection"))
-        author_id = await _get_or_create_author(session, manifest["author"], md.get("death"))
+        collection = await _lookup_collection(session, manifest["collection"])
+        author_id = await _get_or_create_author(session, manifest["author"], manifest["death"])
 
         # Language: the per-file body marker is authoritative; fall back to the collection
         # hint; default Arabic. Resolved before work creation so the work (not just the
@@ -228,11 +271,11 @@ async def import_one(
                 "title": manifest["title"], "norm": normalize(manifest["title"]),
                 "author": author_id, "lang": lang,
                 "cid": collection["id"] if collection else None,
-                "pub": md.get("publisher"), "ed": md.get("edition"),
-                "py": md.get("published_year"), "pr": md.get("printer"),
-                "editor": md.get("editor"), "isbn": md.get("isbn"),
-                "pdf": md.get("source_pdf"), "notes": md.get("identity_notes"),
-                "verified": md.get("verified") == "1",
+                "pub": manifest["publisher"], "ed": manifest["edition"],
+                "py": manifest["published_year"], "pr": manifest["printer"],
+                "editor": manifest["editor"], "isbn": manifest["isbn"],
+                "pdf": manifest["source_pdf"], "notes": manifest["identity_notes"],
+                "verified": manifest["verified"],
                 # Stored relative to BOOKS_ROOT so the same row resolves on macOS and the
                 # VPS; the download endpoint joins it back onto the configured root.
                 "cpath": content_path.relative_to(books_root).as_posix(),
@@ -259,14 +302,14 @@ async def import_one(
                 params.update({
                     f"ord{i}": sec.ord, f"title{i}": sec.title,
                     f"norm{i}": normalize(sec.title),
-                    f"ps{i}": sec.page_start, f"pe{i}": sec.page_end,
+                    f"ps{i}": sec.page_start_sequence, f"pe{i}": sec.page_end_sequence,
                 })
             # A single INSERT ... RETURNING for the whole book's sections. PostgreSQL
             # returns rows in the same order the VALUES list was given, so this can be
             # zipped directly against section_rows without needing `ord` echoed back.
             result = await session.execute(
                 text(f"""INSERT INTO sections (book_id, ord, title, title_norm,
-                                                page_start, page_end)
+                                                page_start_sequence, page_end_sequence)
                         VALUES {values_sql} RETURNING id"""),
                 params,
             )
@@ -277,10 +320,13 @@ async def import_one(
         stage = "pages"
         if pages:
             await session.execute(
-                text("""INSERT INTO pages (book_id, page_no, text, paragraph_offsets, section_id)
-                        VALUES (:bid, :pno, :text, cast(:offs as jsonb), :sid)"""),
-                [{"bid": bid, "pno": p.page_no, "text": p.text,
-                  "offs": json.dumps(p.paragraph_offsets, ensure_ascii=False),
+                text("""INSERT INTO pages (book_id, sequence, page_number, page_type,
+                                            is_blank, text, block_offsets, section_id)
+                        VALUES (:bid, :seq, :pno, :ptype, :blank, :text, cast(:offs as jsonb),
+                                :sid)"""),
+                [{"bid": bid, "seq": p.sequence, "pno": p.page_number, "ptype": p.page_type,
+                  "blank": p.is_blank, "text": p.text,
+                  "offs": json.dumps(p.block_offsets, ensure_ascii=False),
                   "sid": ord_to_section_id.get(p.section_ord)} for p in pages],
             )
 

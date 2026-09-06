@@ -21,7 +21,9 @@ class SearchHit(BaseModel):
     subjectId: str | None
     subjectTitle: str | None
     sectionTitle: str | None  # None when the source has no headings at all
-    page: int
+    # A string, not an int: v2 page numbers include front matter's "0.1".."0.n" labels
+    # and are not guaranteed unique within a book — see Page in app/models/library.py.
+    page: str
     snippet: str
     # Character offsets into `snippet` (not into the full page), matching the
     # ReaderHighlight/matchRange convention the client's own local search already uses --

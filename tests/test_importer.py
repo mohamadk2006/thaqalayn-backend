@@ -149,11 +149,11 @@ async def test_search_finds_imported_content(tmp_path: Path, cleanup):
 
     async with get_sessionmaker()() as s:
         hit = (await s.execute(text("""
-            SELECT b.title, p.page_no, sec.title AS section
+            SELECT b.title, p.page_number, sec.title AS section
             FROM pages p JOIN books b ON b.id=p.book_id
             LEFT JOIN sections sec ON sec.id=p.section_id
             WHERE b.id=:i
               AND p.search_tsv @@ phraseto_tsquery('simple', arabic_normalize('الامام الصادق'))
         """), {"i": int(TEST_ID)})).one()
-    assert hit.page_no == 1
+    assert hit.page_number == "1"
     assert hit.section == "الباب الأول"

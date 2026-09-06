@@ -57,7 +57,7 @@ _SEARCH_SQL = """
     SELECT
         b.id AS book_id, b.work_id, w.title AS work_title, b.title, b.volume,
         a.name AS author, w.subject_id, s.title AS subject_title,
-        sec.title AS section_title, p.page_no, p.text,
+        sec.title AS section_title, p.page_number, p.text,
         ts_rank_cd(p.search_tsv, q) AS score,
         count(*) OVER () AS total_count
     FROM pages p
@@ -147,7 +147,7 @@ async def search(
                 subjectId=row.subject_id,
                 subjectTitle=row.subject_title,
                 sectionTitle=row.section_title,
-                page=row.page_no,
+                page=row.page_number,
                 snippet=snippet,
                 matchStart=match_start,
                 matchEnd=match_end,
