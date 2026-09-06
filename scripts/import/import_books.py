@@ -184,10 +184,43 @@ async def _existing_hash(session: AsyncSession, book_id: int) -> str | None:
 async def import_one(
     session: AsyncSession, source: Path, run_id: str, books_root: Path, force: bool
 ) -> str:
-    """Import a single .abx. Returns 'ok' | 'skipped' | 'failed'. Never raises: every
+    """Import a single .abx: convert it, then hand off to _import_content() for
+    everything after that. Returns 'ok' | 'skipped' | 'failed'. Never raises: every
     failure is logged and swallowed so the batch continues."""
     book_id_str = source.stem
-    stage = "convert"
+    try:
+        content = conv.convert(source, book_id_str)
+    except conv.ConversionError as exc:
+        await session.rollback()
+        await session.execute(
+            text("""INSERT INTO import_log (run_id, book_id, source_file, status, stage,
+                                            message, content_sha256)
+                    VALUES (:run, :bid, :src, 'failed', 'convert', :msg, NULL)"""),
+            {"run": run_id, "bid": int(book_id_str) if book_id_str.isdigit() else None,
+             "src": source.name, "msg": str(exc)},
+        )
+        await session.commit()
+        return "failed"
+    return await _import_content(session, content, book_id_str, source.name, run_id, books_root, force)
+
+
+async def _import_content(
+    session: AsyncSession, content: dict, book_id_str: str, source_name: str,
+    run_id: str, books_root: Path, force: bool,
+) -> str:
+    """Write/insert an already-converted v2 BookContent dict. Returns 'ok' | 'skipped' |
+    'failed'. Never raises: every failure is logged and swallowed so the batch continues.
+
+    Split out of import_one() so a deploy that reuses pre-converted JSON (already
+    validated, already sitting at its final books_root path -- e.g. rsynced from
+    elsewhere rather than reconverted from source on the target machine) still goes
+    through the exact same idempotency check and ON CONFLICT upsert logic as a normal
+    .abx import. That matters beyond just avoiding redundant reconversion: the upsert
+    preserves admin-set is_featured/is_published/description on existing rows, which a
+    wholesale table replace (e.g. a raw pg_dump/restore of a freshly re-imported
+    database) would silently wipe out.
+    """
+    stage = "validate"
 
     async def log(status: str, message: str | None, sha: str | None) -> None:
         await session.execute(
@@ -195,15 +228,12 @@ async def import_one(
                                             message, content_sha256)
                     VALUES (:run, :bid, :src, :status, :stage, :msg, :sha)"""),
             {"run": run_id, "bid": int(book_id_str) if book_id_str.isdigit() else None,
-             "src": source.name, "status": status, "stage": stage,
+             "src": source_name, "status": status, "stage": stage,
              "msg": message, "sha": sha},
         )
 
     try:
-        content = conv.convert(source, book_id_str)
         manifest = _book_summary(content)
-
-        stage = "validate"
         issues = val.validate(content)
         errors = [i for i in issues if i.severity == "error"]
         if errors:
@@ -333,11 +363,6 @@ async def import_one(
         await session.commit()
         return "ok"
 
-    except conv.ConversionError as exc:
-        await session.rollback()
-        await log("failed", str(exc), None)
-        await session.commit()
-        return "failed"
     except Exception as exc:  # noqa: BLE001 — the whole point is that no book aborts the run
         await session.rollback()
         await log("failed", f"unexpected in {stage}: {exc}", None)
