@@ -201,6 +201,20 @@ def parse_body(lines: list[str], start: int) -> tuple[list[dict], list[dict]]:
 
     def new_page(label: str) -> dict:
         nonlocal current_page, block_order
+        printed = _printed_number(label)
+
+        # The Qur'an (and anything else that tags every verse/paragraph with its own
+        # < صفحة > marker) repeats the same printed number across many consecutive
+        # markers -- one real Mushaf page, several verses, several markers. Those are
+        # the same physical page, not one page each: continue it instead of starting a
+        # new one whenever the printed number hasn't actually moved.
+        if (
+            current_page is not None
+            and printed is not None
+            and current_page.get("printedPage") == printed
+        ):
+            return current_page
+
         sequence = len(pages) + 1
         current_page = {
             "id": f"p-{sequence:06d}",
@@ -208,7 +222,6 @@ def parse_body(lines: list[str], start: int) -> tuple[list[dict], list[dict]]:
             "isBlank": False,
             "blocks": [],
         }
-        printed = _printed_number(label)
         if printed is not None:
             current_page["printedPage"] = printed
         if label:
