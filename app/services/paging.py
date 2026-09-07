@@ -4,6 +4,13 @@ The one piece of import logic worth isolating and testing on its own: it turns t
 page/block/toc BookContent structure into the `pages`/`sections` rows the schema stores,
 and it is where the block->page offset mapping that enables post-download deep-linking is
 built. Both the importer and its tests use this, so they can never drift apart.
+
+`page_text_and_offsets()` is also reused by search_service.py: `pages` doesn't store the
+page's own text (see Page's docstring in app/models/library.py), so a search hit
+reconstructs it, on demand, straight from the book's own JSON file -- the identical
+block-join this module uses at import time to build the value search_tsv is computed
+from. The two must never drift apart either, or a search match's snippet could disagree
+with what the match was actually found in.
 """
 
 from __future__ import annotations
@@ -12,13 +19,28 @@ import bisect
 from dataclasses import dataclass
 
 
+def page_text_and_offsets(page: dict) -> tuple[str, list[dict]]:
+    """A page's blocks (text, heading, and footnote text alike — a reader searching for a
+    phrase that only appears in a footnote citation should still find the page), joined
+    with '\\n' in reading order, plus each block's character offset within that joined
+    text (for resolving a search hit back to an exact block after download)."""
+    text = ""
+    offsets: list[dict] = []
+    for block in sorted(page.get("blocks", []), key=lambda b: b.get("order", 0)):
+        block_text = block.get("text", "")
+        start = len(text) + (1 if text else 0)  # account for the joining '\n'
+        offsets.append({"id": block["id"], "start": start})
+        text = f"{text}\n{block_text}" if text else block_text
+    return text, offsets
+
+
 @dataclass
 class PageRow:
     sequence: int
     page_number: str
     page_type: str
     is_blank: bool
-    text: str
+    text: str  # used to compute search_tsv at import time; not itself persisted
     block_offsets: list[dict]  # [{"id": str, "start": int}], char offset within text
     section_ord: int | None    # 1-based ordinal of the section this page opens in
 
@@ -88,14 +110,7 @@ def paginate(content: dict) -> list[PageRow]:
 
     for page in sorted(content.get("pages", []), key=lambda p: p["sequence"]):
         section_ord = bisect.bisect_right(toc_page_sequences, page["sequence"])
-
-        text = ""
-        offsets: list[dict] = []
-        for block in sorted(page.get("blocks", []), key=lambda b: b.get("order", 0)):
-            block_text = block.get("text", "")
-            start = len(text) + (1 if text else 0)  # account for the joining '\n'
-            offsets.append({"id": block["id"], "start": start})
-            text = f"{text}\n{block_text}" if text else block_text
+        text, offsets = page_text_and_offsets(page)
 
         rows.append(PageRow(
             sequence=page["sequence"],

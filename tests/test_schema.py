@@ -17,6 +17,14 @@ DIACRITIZED = "قالَ الإمامُ الصادقُ عليه السلام: ا�
 OTHER_PAGE = "وقال أبو عبد الله عليه السلام: مَن كان عاقلًا كان له دِين"
 
 
+def _tsv(page_text: str):
+    """`pages` has no stored text column (see Page's docstring) -- search_tsv is
+    computed the same way the real importer computes it, from a value that is itself
+    never persisted, so any test exercising search behavior has to build it explicitly
+    rather than rely on a GENERATED column to do it automatically."""
+    return func.to_tsvector("arabic", func.arabic_normalize(page_text))
+
+
 async def _make_book(session, *, book_id: int = 900001, volume: int | None = 1) -> Book:
     """Get-or-create the author and work, then add a book.
 
@@ -88,22 +96,31 @@ class TestSeedData:
 
 
 class TestGeneratedSearchVector:
-    async def test_tsvector_is_populated_automatically(self, session):
+    async def test_search_tsv_stores_the_computed_value(self, session):
         book = await _make_book(session)
-        page = Page(book_id=book.id, sequence=1, page_number="1", page_type="main", text=DIACRITIZED)
+        page = Page(
+            book_id=book.id, sequence=1, page_number="1", page_type="main",
+            search_tsv=_tsv(DIACRITIZED),
+        )
         session.add(page)
         await session.flush()
 
         tsv = await session.scalar(select(Page.search_tsv).where(Page.id == page.id))
-        assert tsv, "GENERATED column produced an empty tsvector"
+        assert tsv, "search_tsv was empty"
 
     async def test_undiacriticized_query_finds_diacriticized_page(self, session):
         """The end-to-end proof: this is what a user actually types."""
         book = await _make_book(session)
         session.add_all(
             [
-                Page(book_id=book.id, sequence=1, page_number="1", page_type="main", text=DIACRITIZED),
-                Page(book_id=book.id, sequence=2, page_number="2", page_type="main", text=OTHER_PAGE),
+                Page(
+                    book_id=book.id, sequence=1, page_number="1", page_type="main",
+                    search_tsv=_tsv(DIACRITIZED),
+                ),
+                Page(
+                    book_id=book.id, sequence=2, page_number="2", page_type="main",
+                    search_tsv=_tsv(OTHER_PAGE),
+                ),
             ]
         )
         await session.flush()
@@ -114,35 +131,12 @@ class TestGeneratedSearchVector:
                 .where(Page.book_id == book.id)
                 .where(
                     Page.search_tsv.op("@@")(
-                        func.phraseto_tsquery("simple", func.arabic_normalize("الامام الصادق"))
+                        func.phraseto_tsquery("arabic", func.arabic_normalize("الامام الصادق"))
                     )
                 )
             )
         ).scalars().all()
         assert found == ["1"]
-
-    async def test_tsvector_updates_when_text_changes(self, session):
-        """A STORED generated column must track its source; a trigger-based design could
-        silently drift."""
-        book = await _make_book(session)
-        page = Page(book_id=book.id, sequence=1, page_number="1", page_type="main", text="نص أولي")
-        session.add(page)
-        await session.flush()
-
-        page.text = DIACRITIZED
-        await session.flush()
-
-        matches = await session.scalar(
-            select(func.count())
-            .select_from(Page)
-            .where(Page.id == page.id)
-            .where(
-                Page.search_tsv.op("@@")(
-                    func.phraseto_tsquery("simple", func.arabic_normalize("الامام الصادق"))
-                )
-            )
-        )
-        assert matches == 1
 
     async def test_search_uses_the_gin_index(self, session):
         """Guards the property that makes full-library search viable at all. A sequential
@@ -153,7 +147,7 @@ class TestGeneratedSearchVector:
             await session.execute(
                 text(
                     "EXPLAIN SELECT id FROM pages WHERE search_tsv @@ "
-                    "phraseto_tsquery('simple', arabic_normalize('الامام الصادق'))"
+                    "phraseto_tsquery('arabic', arabic_normalize('الامام الصادق'))"
                 )
             )
         ).scalars().all()
@@ -175,9 +169,9 @@ class TestConstraints:
 
     async def test_duplicate_sequence_within_a_book_is_rejected(self, session):
         book = await _make_book(session)
-        session.add(Page(book_id=book.id, sequence=5, page_number="5", page_type="main", text="أول"))
+        session.add(Page(book_id=book.id, sequence=5, page_number="5", page_type="main", search_tsv=_tsv("أول")))
         await session.flush()
-        session.add(Page(book_id=book.id, sequence=5, page_number="5", page_type="main", text="ثان"))
+        session.add(Page(book_id=book.id, sequence=5, page_number="5", page_type="main", search_tsv=_tsv("ثان")))
         with pytest.raises((IntegrityError, DBAPIError)):
             await session.flush()
         await session.rollback()
@@ -187,8 +181,8 @@ class TestConstraints:
         second = await _make_book(session, book_id=900004)
         session.add_all(
             [
-                Page(book_id=first.id, sequence=1, page_number="1", page_type="main", text="أول"),
-                Page(book_id=second.id, sequence=1, page_number="1", page_type="main", text="ثان"),
+                Page(book_id=first.id, sequence=1, page_number="1", page_type="main", search_tsv=_tsv("أول")),
+                Page(book_id=second.id, sequence=1, page_number="1", page_type="main", search_tsv=_tsv("ثان")),
             ]
         )
         await session.flush()  # must not raise
@@ -197,7 +191,7 @@ class TestConstraints:
 class TestCascades:
     async def test_deleting_a_book_removes_its_pages(self, session):
         book = await _make_book(session)
-        session.add(Page(book_id=book.id, sequence=1, page_number="1", page_type="main", text=DIACRITIZED))
+        session.add(Page(book_id=book.id, sequence=1, page_number="1", page_type="main", search_tsv=_tsv(DIACRITIZED)))
         await session.flush()
 
         await session.execute(delete(Book).where(Book.id == book.id))
@@ -218,7 +212,7 @@ class TestCascades:
         session.add(section)
         await session.flush()
 
-        page = Page(book_id=book.id, sequence=1, page_number="1", page_type="main", text=DIACRITIZED, section_id=section.id)
+        page = Page(book_id=book.id, sequence=1, page_number="1", page_type="main", search_tsv=_tsv(DIACRITIZED), section_id=section.id)
         session.add(page)
         await session.flush()
 

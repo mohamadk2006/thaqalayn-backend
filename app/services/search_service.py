@@ -1,10 +1,17 @@
 """Full-library search: the implementation the API contract deliberately hides.
 
-Matching runs against the GIN-indexed, normalized `search_tsv` column (fast, proven
-correct against real diacritized text). Snippets are extracted separately, from each
-matched page's *original* text via `find_original_match` -- ts_headline() would return
-normalized (tashkeel-stripped) text instead, since that's all search_tsv's source ever
-was, and a search result has to show the user real text.
+Matching runs against the GIN-indexed `search_tsv` column (fast, proven correct against
+real diacritized text, stemmed via Postgres's built-in 'arabic' config). Snippets are
+extracted separately, from each matched page's *original* text via `find_original_match`
+-- ts_headline() would return normalized (tashkeel-stripped, stemmed) text instead, and a
+search result has to show the user real text.
+
+`pages` does not store that text (see Page's docstring in app/models/library.py) -- only
+the search index computed from it, to avoid duplicating ~30 GB of already-downloadable
+text inside the database. So a hit's original text is read back from the book's own JSON
+file on BOOKS_ROOT, on demand, for each of the (at most `limit`) rows a query actually
+returns -- never for the full set of candidates the GIN index narrows down, so the extra
+I/O this adds is bounded by page size and result count, not corpus size.
 
 This is the one module search-consuming code should ever import. If PostgreSQL FTS is
 ever swapped for something else (Typesense, Meilisearch), this is the only place that
@@ -13,11 +20,15 @@ changes -- the router and schema stay as they are.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.search import SearchHit
 from app.services.arabic import find_original_match, normalize
+from app.services.paging import page_text_and_offsets
 
 # Characters of context kept on each side of the match inside a snippet. Large enough to
 # give real context, small enough to keep the response light across up to `limit` hits.
@@ -53,11 +64,36 @@ def _extract_snippet(text_: str, normalized_query: str) -> tuple[str, int | None
     return snippet, snippet_start, snippet_end
 
 
+def _load_page_text(books_root: Path, book_id: int, sequence: int, cache: dict) -> str | None:
+    """The one place a search hit re-reads its book's JSON file. `cache` is per-call
+    (one search() invocation, keyed by book_id) so several hits landing in the same book
+    -- not unusual for a common phrase -- parse that file once, not once per hit.
+
+    Returns None if the file is missing or the page can't be found in it (the DB row
+    should always have a matching JSON page, but a search result disappearing a snippet
+    is a far better failure than a 500 over a data mismatch that shouldn't happen).
+    """
+    if book_id not in cache:
+        path = books_root / f"{book_id}.json"
+        try:
+            cache[book_id] = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cache[book_id] = None
+    content = cache[book_id]
+    if content is None:
+        return None
+    for page in content.get("pages", []):
+        if page.get("sequence") == sequence:
+            text_, _offsets = page_text_and_offsets(page)
+            return text_
+    return None
+
+
 _SEARCH_SQL = """
     SELECT
         b.id AS book_id, b.work_id, w.title AS work_title, b.title, b.volume,
         a.name AS author, w.subject_id, s.title AS subject_title,
-        sec.title AS section_title, p.page_number, p.text,
+        sec.title AS section_title, p.page_number, p.sequence,
         ts_rank_cd(p.search_tsv, q) AS score,
         count(*) OVER () AS total_count
     FROM pages p
@@ -66,7 +102,7 @@ _SEARCH_SQL = """
     LEFT JOIN authors a ON a.id = b.author_id
     LEFT JOIN subjects s ON s.id = w.subject_id
     LEFT JOIN sections sec ON sec.id = p.section_id,
-    phraseto_tsquery('simple', :normalized_query) q
+    phraseto_tsquery('arabic', :normalized_query) q
     WHERE p.search_tsv @@ q
 """
 
@@ -77,6 +113,7 @@ async def search(
     query: str,
     page: int,
     limit: int,
+    books_root: Path,
     subject_ids: list[str] | None = None,
     languages: list[str] | None = None,
     author_ids: list[int] | None = None,
@@ -134,8 +171,16 @@ async def search(
 
     total = rows[0].total_count
     hits = []
+    page_text_cache: dict[int, dict | None] = {}
     for row in rows:
-        snippet, match_start, match_end = _extract_snippet(row.text, normalized_query)
+        original_text = _load_page_text(books_root, row.book_id, row.sequence, page_text_cache)
+        if original_text is None:
+            # Should not happen (a DB row with no matching JSON page), but a missing
+            # snippet is a far better failure than a 500 over a data mismatch that
+            # shouldn't exist -- the hit still carries a real book, page, and score.
+            snippet, match_start, match_end = "", None, None
+        else:
+            snippet, match_start, match_end = _extract_snippet(original_text, normalized_query)
         hits.append(
             SearchHit(
                 bookId=str(row.book_id),

@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import Settings, get_settings
 from app.db import get_session
 from app.schemas.catalog import PageEnvelope
 from app.schemas.search import SearchHit
@@ -26,9 +27,10 @@ async def search(
     ),
     work: int | None = None,
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> PageEnvelope[SearchHit]:
     items, total = await search_service.search(
-        session, query=q, page=page, limit=limit,
+        session, query=q, page=page, limit=limit, books_root=settings.books_root,
         subject_ids=subject, languages=language,
         author_ids=author, author_names=authorName, work_id=work,
     )

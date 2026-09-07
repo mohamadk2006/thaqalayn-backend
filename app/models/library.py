@@ -30,7 +30,6 @@ import datetime as dt
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    Computed,
     DateTime,
     ForeignKey,
     Index,
@@ -319,14 +318,20 @@ class Section(Base):
 class Page(Base):
     """The search unit: one v2 page (`pages[]` entry) of one book.
 
-    Only the **original** text is stored, with full tashkeel. The normalized form exists
-    solely inside `search_tsv`, which is derived — storing a second normalized copy would
-    add roughly 10 GB across the library for text nothing ever displays.
+    Deliberately does NOT store the page's own text at all -- only the search index
+    computed from it. The text already lives once, on disk, in the book's own JSON file
+    (which the app downloads directly); storing a second full copy in Postgres, on top of
+    the GIN index over it, was found to roughly double this table's footprint for a VPS
+    that doesn't have room to spare. `search_tsv` is populated directly at import time
+    from the source text, passed as a bind parameter and never persisted as a column --
+    only Postgres's own computed tsvector output is stored.
 
-    A consequence for Milestone 6: `ts_headline` over normalized text returns a normalized
-    snippet (stripped of hamza and tashkeel), which is wrong to show a reader. Snippets
-    must therefore be cut from `text` here, with match offsets mapped back from normalized
-    space — not taken from PostgreSQL's pre-marked headline.
+    The real cost of this: a search hit's snippet can no longer be cut straight from a
+    `text` column. search_service.py re-opens the book's JSON file for each of the
+    (typically <= `limit`) hits actually returned, reconstructs that one page's text the
+    same way paging.py does at import time, and extracts the snippet from that -- extra
+    per-request I/O, bounded by the page size, not the corpus size, in exchange for not
+    duplicating ~30 GB of already-downloadable text inside the database.
 
     `sequence`, not `page_number`, is the identity column: v2's own `pageNumber` is a
     *string* ("0.1".."0.n" for front matter, the printed number as text for main pages)
@@ -351,22 +356,21 @@ class Page(Base):
     )
     section_id: Mapped[int | None] = mapped_column(ForeignKey("sections.id", ondelete="SET NULL"))
 
-    text: Mapped[str] = mapped_column(Text, nullable=False)
-
-    # Character offsets of each v2 *block* within `text`, as [{"id": ..., "start": ...}].
-    # Lets a search hit resolve back to a specific block for deep-linking after download,
-    # without storing block rows or a second copy of the text. (Was paragraph_offsets,
-    # keyed on v1 paragraph ids — v2 has no paragraph concept, only blocks.)
+    # Character offsets of each v2 *block* within the page's (unstored) combined text, as
+    # [{"id": ..., "start": ...}]. Still meaningful without a stored `text` column here --
+    # it describes structure, and a client resolves it against the same page's text once
+    # downloaded. (Was paragraph_offsets, keyed on v1 paragraph ids — v2 has no paragraph
+    # concept, only blocks.)
     block_offsets: Mapped[dict | None] = mapped_column(JSONB)
 
-    # GENERATED ... STORED: PostgreSQL maintains this on write, so the index can never
-    # drift out of sync with the text the way a trigger-maintained column can. This is
-    # why arabic_normalize() must be IMMUTABLE — PostgreSQL rejects anything else here.
-    search_tsv: Mapped[str] = mapped_column(
-        TSVECTOR,
-        Computed("to_tsvector('simple', arabic_normalize(text))", persisted=True),
-        nullable=False,
-    )
+    # NOT a GENERATED column: that would require a stored source column to generate from,
+    # which is exactly what this table doesn't have. The importer computes this directly
+    # -- to_tsvector('arabic', arabic_normalize(:text)) -- passing the page text as a bind
+    # parameter that is never itself persisted. 'arabic' (Postgres's built-in Snowball
+    # stemmer), not 'simple': measured on a real sample, stemming shrunk the index by
+    # ~42% and means a query for one inflected form of a word also finds other forms of
+    # it, which 'simple' never did.
+    search_tsv: Mapped[str] = mapped_column(TSVECTOR, nullable=False)
 
     __table_args__ = (
         CheckConstraint("page_type IN ('frontMatter','main')", name="ck_pages_page_type"),

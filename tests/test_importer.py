@@ -153,7 +153,7 @@ async def test_search_finds_imported_content(tmp_path: Path, cleanup):
             FROM pages p JOIN books b ON b.id=p.book_id
             LEFT JOIN sections sec ON sec.id=p.section_id
             WHERE b.id=:i
-              AND p.search_tsv @@ phraseto_tsquery('simple', arabic_normalize('الامام الصادق'))
+              AND p.search_tsv @@ phraseto_tsquery('arabic', arabic_normalize('الامام الصادق'))
         """), {"i": int(TEST_ID)})).one()
     assert hit.page_number == "1"
     assert hit.section == "الباب الأول"
