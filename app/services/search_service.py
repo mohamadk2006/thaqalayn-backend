@@ -209,10 +209,19 @@ async def search(
     if expanding:
         stmt = stmt.bindparams(*(bindparam(name, expanding=True) for name in expanding))
 
-    # Defense in depth on top of _CANDIDATE_CAP: a filter combination the cap doesn't
-    # anticipate well should fail loudly with a 500 in seconds, not hold a pooled
-    # connection (and, at high enough concurrency, the whole pool) hostage for minutes.
+    # _CANDIDATE_CAP (the LIMIT inside the CTE) only bounds cost when a phrase has many
+    # true matches, letting the scan stop early once it fills the cap. It does nothing
+    # for the opposite failure mode: two individually common words that are only rarely
+    # actually adjacent. Real example ("العلم نور"): the GIN index returns 112,650 rows
+    # containing both words in any position, and only 1,459 survive the exact-adjacency
+    # recheck against the real tsvector -- a 98.7% false-positive rate, forcing ~100k
+    # heap reads to confirm. gin_fuzzy_search_limit thins the GIN scan's own output
+    # *before* that recheck, at the index level, which is the only thing that bounds
+    # this case: measured on that exact query, 11+s of recheck work dropped to ~175ms.
+    # Verified this doesn't regress the already-fixed many-true-matches case (still
+    # fills the full requested candidate set, timing unchanged within normal variance).
     await session.execute(text("SET LOCAL statement_timeout = '8000'"))
+    await session.execute(text("SET LOCAL gin_fuzzy_search_limit = 100000"))
     rows = (await session.execute(stmt, params)).all()
     if not rows:
         return [], 0
