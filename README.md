@@ -151,30 +151,23 @@ escape the root and confirming the request is refused rather than served.
 
 ## Categories
 
-`GET /api/categories` returns Shamela's own published 39-category list — given directly
-as ground truth, not a scheme this project invented (an earlier iteration used 20
-self-invented subjects plus separate tradition/madhhab/format columns; that scheme was
-replaced). Most of what tradition/madhhab/format used to capture is already encoded in
-which of the 39 a work falls under — e.g. `فقه المذهب الحنبلي` already says fiqh +
-hanbali, `مصادر العقائد عند السنيين` already says aqaid + sunni — so a single subject
-slug is now the only classification dimension.
+`GET /api/categories` returns the project owner's 39-category list — given directly as
+ground truth. `id` is the category's own Arabic string verbatim (e.g.
+`فقه المذهب الحنبلي`), not a slug: the string itself is stable and is exactly what a
+client displays, so there's no separate code.
 
-The sources carry **530 distinct raw `< مجموعة >` strings** for those 39 categories:
-orthographic variants (عربى vs عربي), separator variants (parentheses vs. a dash vs.
-"قسم"), appended language suffixes, and stacked/compound values. `subject_id` is derived
-from the raw string by `scripts/import/build_collection_map.py` — ordered, most-specific
-regex rules, checked against every one of the 530 real values, not written from a guess.
+**A work can belong to more than one category.** `works.subject_id` (a single foreign
+key) was replaced by a `work_subjects` join table (see `WorkSubject` in
+`app/models/library.py`) — some books are genuinely filed under two categories at once,
+which a single column could never represent. `BookOut`/`WorkOut`/`SearchHit` all carry
+a `subjects` array, not a singular `subjectId`/`subjectTitle` pair.
 
-**A 40th slug, `other` (أخرى), catches ~11.8% of the library (~2,183 books, 1,080
-works)** that isn't really "other" thematically — it's the tradition-ambiguous residual.
-Every one of the 39 hadith/tafsir/aqaid/rijal categories is tradition-specific (سنة vs.
-شيعة), and a raw string like a bare `مصادر الحديث` genuinely doesn't say which. Rather
-than guess a tradition with no evidence behind it, or leave `subject_id` `NULL`, these
-are routed to `other` — a real, browsable, non-NULL category, per an explicit decision
-to prefer a labeled catch-all. Revising the mapping (including ever splitting `other`
-further, if a real signal turns up) is always a re-run of `build_collection_map.py` →
-`load_collection_map.py` → `resync_taxonomy.py`, never a re-import — the same pattern
-used for every taxonomy fix so far.
+Classification is assigned directly (by the project owner, per work), not derived
+automatically from the raw `< مجموعة >` collection string via regex — that pipeline
+(`scripts/import/build_collection_map.py` → `load_collection_map.py` →
+`resync_taxonomy.py`) produced real, confirmed misclassifications and has been retired.
+A freshly-imported work starts unclassified (zero rows in `work_subjects`) until
+something assigns it.
 
 ## Search
 
@@ -189,8 +182,8 @@ real diacritized text (Milestone 2). Each hit:
 ```json
 {
   "bookId": "…", "workId": "…", "workTitle": "…", "title": "…", "author": "…",
-  "volume": null, "subjectId": "…", "subjectTitle": "…", "sectionTitle": "…",
-  "page": 159, "snippet": "…", "matchStart": 52, "matchEnd": 65, "score": 3.7
+  "volume": null, "subjects": [{"id": "…", "title": "…"}], "sectionTitle": "…",
+  "page": "159", "snippet": "…", "matchStart": 52, "matchEnd": 65, "score": 3.7
 }
 ```
 
@@ -237,14 +230,9 @@ Properties that matter for the full 18,798-file run:
   nothing aborts the batch.
 - **Memory-bounded**: books are processed and committed one at a time.
 
-The Shamela `مجموعة` → taxonomy mapping is loaded separately and only needs rebuilding
-when the mapping changes, never per import:
-
-```bash
-uv run python scripts/validate/scan_sources.py <source-dir> --json scan.json
-uv run python scripts/import/build_collection_map.py scan.json -o database/seeds/collection_map.json
-uv run python scripts/import/load_collection_map.py
-```
+Category assignment is separate from import entirely (see Categories above) — importing
+a book never sets its work's subjects; something else assigns them via `work_subjects`
+afterward.
 
 ## Milestones
 

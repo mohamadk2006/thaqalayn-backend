@@ -80,6 +80,10 @@ _PAGE = """<!doctype html>
   nav {{ margin-bottom: 1.5rem; }}
   .pager a {{ margin-left: 0.8rem; }}
   small {{ color: #666; }}
+  .checkbox-group {{ max-height: 14rem; overflow-y: auto; border: 1px solid #ddd;
+    padding: 0.4rem 0.6rem; background: #fafafa; }}
+  .checkbox-row {{ display: block; font-weight: normal; margin: 0.2rem 0; }}
+  .checkbox-row input {{ width: auto; margin-left: 0.5rem; }}
 </style>
 </head>
 <body>
@@ -150,7 +154,8 @@ async def dashboard(
     rows = (await session.execute(text("""
         SELECT s.id, s.title, count(DISTINCT w.id) AS work_count, count(b.id) AS book_count
         FROM subjects s
-        LEFT JOIN works w ON w.subject_id = s.id
+        LEFT JOIN work_subjects ws ON ws.subject_id = s.id
+        LEFT JOIN works w ON w.id = ws.work_id
         LEFT JOIN books b ON b.work_id = w.id
         GROUP BY s.id, s.title, s.sort_order
         ORDER BY s.sort_order
@@ -174,16 +179,19 @@ async def featured_list(
     session: AsyncSession = Depends(get_session), _: None = Depends(_require_admin)
 ) -> HTMLResponse:
     rows = (await session.execute(text("""
-        SELECT w.id AS work_id, w.title, a.name AS author, s.title AS subject_title
+        SELECT w.id AS work_id, w.title, a.name AS author,
+               string_agg(s.title, '، ' ORDER BY s.sort_order) AS subject_titles
         FROM works w
         LEFT JOIN authors a ON a.id = w.author_id
-        LEFT JOIN subjects s ON s.id = w.subject_id
+        LEFT JOIN work_subjects ws ON ws.work_id = w.id
+        LEFT JOIN subjects s ON s.id = ws.subject_id
         WHERE w.is_featured
+        GROUP BY w.id, w.title, a.name
         ORDER BY w.title_norm
     """))).all()
     rows_html = "".join(
         f'<tr><td><a href="/admin/works/{r.work_id}">{escape(r.title)}</a></td>'
-        f"<td>{escape(r.author or '')}</td><td>{escape(r.subject_title or '')}</td></tr>"
+        f"<td>{escape(r.author or '')}</td><td>{escape(r.subject_titles or '')}</td></tr>"
         for r in rows
     )
     body = (
@@ -217,9 +225,9 @@ async def subject_detail(
             SELECT w.id AS work_id, w.title, a.name AS author, w.volume_count,
                    count(b.id) AS book_count
             FROM works w
+            JOIN work_subjects ws ON ws.work_id = w.id AND ws.subject_id = :sid
             LEFT JOIN authors a ON a.id = w.author_id
             LEFT JOIN books b ON b.work_id = w.id
-            WHERE w.subject_id = :sid
             GROUP BY w.id, w.title, a.name, w.volume_count
             ORDER BY w.title
             LIMIT :limit OFFSET :offset
@@ -288,15 +296,40 @@ async def work_detail(
 # ── Book edit ────────────────────────────────────────────────────────────────
 
 
-async def _subject_options(session: AsyncSession, selected: str | None) -> str:
+async def _subject_checkboxes(session: AsyncSession, selected: set[str]) -> str:
+    """A work can belong to more than one of the 39 subjects, so this is a checkbox
+    group (one <input name="subject"> per checked box, collected server-side as a list)
+    rather than the single-select dropdown it used to be."""
     rows = (await session.execute(
         text("SELECT id, title FROM subjects ORDER BY sort_order")
     )).all()
     return "".join(
-        f'<option value="{escape(r.id)}"{" selected" if r.id == selected else ""}>'
-        f"{escape(r.title)}</option>"
+        f'<label class="checkbox-row"><input type="checkbox" name="subject" '
+        f'value="{escape(r.id)}"{" checked" if r.id in selected else ""}> '
+        f"{escape(r.title)}</label>"
         for r in rows
     )
+
+
+async def _work_subject_ids(session: AsyncSession, work_id: int) -> set[str]:
+    rows = (await session.execute(
+        text("SELECT subject_id FROM work_subjects WHERE work_id = :wid"), {"wid": work_id}
+    )).scalars().all()
+    return set(rows)
+
+
+async def _set_work_subjects(session: AsyncSession, work_id: int, subject_ids: list[str]) -> None:
+    """Replace a work's whole subject set with `subject_ids` -- delete then re-insert
+    rather than diffing, since a work rarely has more than a couple of subjects and this
+    is only ever called from a form submit carrying the complete intended set."""
+    await session.execute(
+        text("DELETE FROM work_subjects WHERE work_id = :wid"), {"wid": work_id}
+    )
+    if subject_ids:
+        await session.execute(
+            text("INSERT INTO work_subjects (work_id, subject_id) VALUES (:wid, :sid)"),
+            [{"wid": work_id, "sid": sid} for sid in dict.fromkeys(subject_ids)],
+        )
 
 
 @router.get("/books/{book_id:int}", response_class=HTMLResponse)
@@ -309,7 +342,7 @@ async def book_edit_form(
     row = (await session.execute(
         text("""
             SELECT b.title, b.volume, b.is_published, a.name AS author,
-                   w.subject_id, w.id AS work_id, w.is_featured
+                   w.id AS work_id, w.is_featured
             FROM books b
             JOIN works w ON w.id = b.work_id
             LEFT JOIN authors a ON a.id = b.author_id
@@ -320,7 +353,8 @@ async def book_edit_form(
     if row is None:
         raise HTTPException(status_code=404, detail="Unknown book")
 
-    options = await _subject_options(session, row.subject_id)
+    selected = await _work_subject_ids(session, row.work_id)
+    options = await _subject_checkboxes(session, selected)
     banner = _msg("تم الحفظ", True) if saved else ""
     body = f"""
     {banner}
@@ -331,8 +365,8 @@ async def book_edit_form(
         <input name="title" value="{escape(row.title)}" required></div>
       <div class="row"><label>المؤلف</label>
         <input name="author" value="{escape(row.author or '')}"></div>
-      <div class="row"><label>التصنيف (يطبق على كل مجلدات هذا العنوان)</label>
-        <select name="subject">{options}</select></div>
+      <div class="row"><label>التصنيف (يطبق على كل مجلدات هذا العنوان -- يمكن اختيار أكثر من واحد)</label>
+        <div class="checkbox-group">{options}</div></div>
       <div class="row"><label>رقم المجلد</label>
         <input name="volume" type="number" value="{row.volume or ''}"></div>
       <div class="row"><label>
@@ -353,7 +387,7 @@ async def book_edit_save(
     book_id: int,
     title: str = Form(...),
     author: str = Form(""),
-    subject: str = Form(...),
+    subject: list[str] = Form([]),
     volume: str = Form(""),
     is_published: bool = Form(False),
     is_featured: bool = Form(False),
@@ -379,9 +413,10 @@ async def book_edit_save(
          "vol": volume_int, "pub": is_published, "id": book_id},
     )
     await session.execute(
-        text("UPDATE works SET subject_id = :sid, is_featured = :feat WHERE id = :wid"),
-        {"sid": subject, "feat": is_featured, "wid": exists},
+        text("UPDATE works SET is_featured = :feat WHERE id = :wid"),
+        {"feat": is_featured, "wid": exists},
     )
+    await _set_work_subjects(session, exists, subject)
     await session.commit()
     return RedirectResponse(f"/admin/books/{book_id}?saved=1", status_code=303)
 
@@ -609,7 +644,7 @@ async def new_book_docx(
     title: str = Form(...),
     author: str = Form(""),
     death: str = Form(""),
-    subject: str = Form(...),
+    subject: list[str] = Form(...),
     language: str = Form("ar"),
     book_id: str = Form(""),
     session: AsyncSession = Depends(get_session),
@@ -647,15 +682,16 @@ async def new_book_docx(
         )
 
     # subject/language come from the form, not a مجموعة string to classify -- import_one
-    # leaves the work's subject NULL and its language at the "ar" default for a source
+    # leaves the work unclassified and its language at the "ar" default for a source
     # with no Shamela collection, so both are set directly here instead.
     work_id = await session.scalar(
         text("SELECT work_id FROM books WHERE id = :id"), {"id": resolved_id}
     )
     await session.execute(
-        text("UPDATE works SET subject_id = :sid, language_code = :lang WHERE id = :wid"),
-        {"sid": subject, "lang": language, "wid": work_id},
+        text("UPDATE works SET language_code = :lang WHERE id = :wid"),
+        {"lang": language, "wid": work_id},
     )
+    await _set_work_subjects(session, work_id, subject)
     await session.execute(
         text("UPDATE books SET language_code = :lang WHERE id = :id"),
         {"lang": language, "id": resolved_id},
@@ -677,7 +713,7 @@ async def new_book_form(
     session: AsyncSession = Depends(get_session),
     _: None = Depends(_require_admin),
 ) -> HTMLResponse:
-    options = await _subject_options(session, None)
+    options = await _subject_checkboxes(session, set())
     banner = _msg(ok, True) if ok else (_msg(err, False) if err else "")
     body = f"""
     {banner}
@@ -701,7 +737,8 @@ async def new_book_form(
       <div class="row"><label>العنوان</label><input name="title" required></div>
       <div class="row"><label>المؤلف</label><input name="author"></div>
       <div class="row"><label>سنة الوفاة (اختياري)</label><input name="death"></div>
-      <div class="row"><label>التصنيف</label><select name="subject" required>{options}</select></div>
+      <div class="row"><label>التصنيف (يمكن اختيار أكثر من واحد)</label>
+        <div class="checkbox-group">{options}</div></div>
       <div class="row"><label>اللغة</label>
         <select name="language"><option value="ar">عربي</option><option value="fa">فارسي</option></select></div>
       <div class="row"><label>رقم الكتاب (اختياري)</label>
@@ -715,7 +752,8 @@ async def new_book_form(
     <form method="post" action="/admin/books/new/manual">
       <div class="row"><label>العنوان</label><input name="title" required></div>
       <div class="row"><label>المؤلف</label><input name="author"></div>
-      <div class="row"><label>التصنيف</label><select name="subject" required>{options}</select></div>
+      <div class="row"><label>التصنيف (يمكن اختيار أكثر من واحد)</label>
+        <div class="checkbox-group">{options}</div></div>
       <div class="row"><label>اللغة</label>
         <select name="language"><option value="ar">عربي</option><option value="fa">فارسي</option></select></div>
       <button type="submit">إنشاء</button>
@@ -761,7 +799,7 @@ async def new_book_upload(
 async def new_book_manual(
     title: str = Form(...),
     author: str = Form(""),
-    subject: str = Form(...),
+    subject: list[str] = Form(...),
     language: str = Form("ar"),
     session: AsyncSession = Depends(get_session),
     _: None = Depends(_require_admin),
@@ -769,15 +807,14 @@ async def new_book_manual(
     author_id = await _get_or_create_author(session, author)
     work_id = await session.scalar(
         text("""
-            INSERT INTO works (title, title_norm, author_id, subject_id, language_code)
-            VALUES (:title, :norm, :author, :subject, :lang)
-            ON CONFLICT (title_norm, author_id) DO UPDATE SET
-                title = EXCLUDED.title, subject_id = EXCLUDED.subject_id
+            INSERT INTO works (title, title_norm, author_id, language_code)
+            VALUES (:title, :norm, :author, :lang)
+            ON CONFLICT (title_norm, author_id) DO UPDATE SET title = EXCLUDED.title
             RETURNING id
         """),
-        {"title": title, "norm": normalize(title), "author": author_id,
-         "subject": subject, "lang": language},
+        {"title": title, "norm": normalize(title), "author": author_id, "lang": language},
     )
+    await _set_work_subjects(session, work_id, subject)
     book_id = await _next_manual_id(session)
     await session.execute(
         text("""

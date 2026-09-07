@@ -5,10 +5,11 @@ across three documents (the initial backend brief, and Amendments 1–2 on categ
 works/volumes). Renaming a field here is a breaking change on that side — check the
 brief before changing anything under BookOut or WorkOut.
 
-subjectId/subjectTitle now carry Shamela's own 39-category classification (see
-app.models.library.Subject) — tradition/madhhab/format were removed as separate fields:
-most of that distinction is already encoded directly in which of the 39 a work falls
-under, and the project owner asked for the 39 to be the single source of truth instead.
+`subjects` (plural) carries the project owner's 39-category classification (see
+app.models.library.Subject/WorkSubject) — a work can genuinely belong to more than one,
+which replaced the old single subjectId/subjectTitle pair. tradition/madhhab/format were
+already removed as separate fields before that: most of that distinction is already
+encoded directly in which of the 39 a work falls under.
 
 bookId/workId are emitted as strings, matching the `let bookId: String` already in the
 iOS CatalogBook type, even though both are integers internally (the Shamela filename ID).
@@ -60,8 +61,7 @@ class BookOut(BaseModel):
     author: str
     authorDeath: str | None
     description: str | None
-    subjectId: str | None
-    subjectTitle: str | None
+    subjects: list[SubjectOut]
     language: str | None
     publisher: str | None
     shamelaCollection: str | None
@@ -83,8 +83,7 @@ class WorkOut(BaseModel):
     title: str
     author: str
     authorDeath: str | None
-    subjectId: str | None
-    subjectTitle: str | None
+    subjects: list[SubjectOut]
     language: str | None
     volumeCount: int
     totalSizeBytes: int

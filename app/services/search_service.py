@@ -26,6 +26,7 @@ from pathlib import Path
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.schemas.catalog import SubjectOut
 from app.schemas.search import SearchHit
 from app.services.arabic import find_original_match, normalize
 from app.services.paging import page_text_and_offsets
@@ -89,21 +90,60 @@ def _load_page_text(books_root: Path, book_id: int, sequence: int, cache: dict) 
     return None
 
 
-_SEARCH_SQL = """
+# A phrase as common as an Imam's name can match tens of thousands of pages out of the
+# corpus's ~7.9M -- with no index that supports ranking by score directly, Postgres has
+# to rank and sort every candidate before it can return the top ones. Measured on the
+# real full corpus: uncapped, that took 60-70+ seconds for such a phrase. Capping the
+# candidate set *before* the joins and ts_rank_cd (inside the CTE, so the planner pushes
+# the LIMIT into the bitmap scan itself and stops early) brought the same query down to
+# ~1.8 seconds. This trades exact ranking/counts on the rare very-broad query for
+# reasonable, bounded latency on every query -- the right tradeoff for a single small VPS
+# with no dedicated search engine. Realistic multi-word queries (what users actually
+# type) match far fewer pages and are unaffected by the cap.
+_CANDIDATE_CAP = 5000
+
+# Filter conditions (subject/language/author/work) MUST apply inside this CTE, before
+# the cap -- not after it on the outer query. A LIMIT with no ORDER BY stops the bitmap
+# scan as soon as it has _CANDIDATE_CAP matches in physical heap order; a book filter
+# applied only afterward would silently see nothing if that book's matches don't happen
+# to fall within that first arbitrary batch (a real risk for a book added after most of
+# the corpus, since new rows land at the physical end of the table). Pushing the filter
+# into the CTE narrows what the scan is even looking for, so a filtered search stays both
+# fast and exact -- only a broad, unfiltered, very-common-phrase search is subject to the
+# cap's approximation at all.
+_CANDIDATES_CTE = """
+    WITH candidates AS (
+        SELECT p.id, p.book_id, p.sequence, p.page_number, p.section_id,
+               ts_rank_cd(p.search_tsv, q) AS score
+        FROM pages p
+        JOIN books b ON b.id = p.book_id AND b.is_published
+        JOIN works w ON w.id = b.work_id
+        LEFT JOIN authors a ON a.id = b.author_id,
+        phraseto_tsquery('arabic', :normalized_query) q
+        WHERE p.search_tsv @@ q
+"""
+
+_SEARCH_SQL_TAIL = f"""
+        LIMIT {_CANDIDATE_CAP}
+    )
     SELECT
         b.id AS book_id, b.work_id, w.title AS work_title, b.title, b.volume,
-        a.name AS author, w.subject_id, s.title AS subject_title,
-        sec.title AS section_title, p.page_number, p.sequence,
-        ts_rank_cd(p.search_tsv, q) AS score,
+        a.name AS author,
+        -- A work can belong to more than one of the 39 subjects (see WorkSubject) --
+        -- a correlated subquery keeps this a JSON array per hit without joining
+        -- work_subjects directly into the main query, which would multiply rows (and
+        -- corrupt count(*) OVER () / ts_rank_cd-based ordering) for any work with 2+.
+        (SELECT json_agg(json_build_object('id', s.id, 'title', s.title) ORDER BY s.sort_order)
+         FROM work_subjects ws JOIN subjects s ON s.id = ws.subject_id
+         WHERE ws.work_id = w.id) AS subjects_json,
+        sec.title AS section_title, c.page_number, c.sequence,
+        c.score,
         count(*) OVER () AS total_count
-    FROM pages p
-    JOIN books b ON b.id = p.book_id AND b.is_published
+    FROM candidates c
+    JOIN books b ON b.id = c.book_id
     JOIN works w ON w.id = b.work_id
     LEFT JOIN authors a ON a.id = b.author_id
-    LEFT JOIN subjects s ON s.id = w.subject_id
-    LEFT JOIN sections sec ON sec.id = p.section_id,
-    phraseto_tsquery('arabic', :normalized_query) q
-    WHERE p.search_tsv @@ q
+    LEFT JOIN sections sec ON sec.id = c.section_id
 """
 
 
@@ -134,7 +174,10 @@ async def search(
     }
     expanding: list[str] = []
     if subject_ids:
-        conditions.append("w.subject_id IN :subject_ids")
+        conditions.append(
+            "EXISTS (SELECT 1 FROM work_subjects ws "
+            "WHERE ws.work_id = w.id AND ws.subject_id IN :subject_ids)"
+        )
         params["subject_ids"] = subject_ids
         expanding.append("subject_ids")
     if languages:
@@ -156,15 +199,20 @@ async def search(
         conditions.append("b.work_id = :work_id")
         params["work_id"] = work_id
 
-    sql = _SEARCH_SQL
+    sql = _CANDIDATES_CTE
     if conditions:
         sql += " AND " + " AND ".join(conditions)
-    sql += " ORDER BY score DESC LIMIT :limit OFFSET :offset"
+    sql += _SEARCH_SQL_TAIL
+    sql += " ORDER BY c.score DESC LIMIT :limit OFFSET :offset"
 
     stmt = text(sql)
     if expanding:
         stmt = stmt.bindparams(*(bindparam(name, expanding=True) for name in expanding))
 
+    # Defense in depth on top of _CANDIDATE_CAP: a filter combination the cap doesn't
+    # anticipate well should fail loudly with a 500 in seconds, not hold a pooled
+    # connection (and, at high enough concurrency, the whole pool) hostage for minutes.
+    await session.execute(text("SET LOCAL statement_timeout = '8000'"))
     rows = (await session.execute(stmt, params)).all()
     if not rows:
         return [], 0
@@ -181,6 +229,9 @@ async def search(
             snippet, match_start, match_end = "", None, None
         else:
             snippet, match_start, match_end = _extract_snippet(original_text, normalized_query)
+        subjects_raw = row.subjects_json
+        if isinstance(subjects_raw, str):
+            subjects_raw = json.loads(subjects_raw)
         hits.append(
             SearchHit(
                 bookId=str(row.book_id),
@@ -189,8 +240,7 @@ async def search(
                 title=row.title,
                 author=row.author or "",
                 volume=row.volume,
-                subjectId=row.subject_id,
-                subjectTitle=row.subject_title,
+                subjects=[SubjectOut(**s) for s in (subjects_raw or [])],
                 sectionTitle=row.section_title,
                 page=row.page_number,
                 snippet=snippet,

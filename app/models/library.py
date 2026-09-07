@@ -86,35 +86,56 @@ class Author(Base):
 
 
 class Subject(Base):
-    """Shamela's own published 39-category list — not a scheme we invented. Distinct
-    from the raw Shamela collection string, which is preserved separately on
-    ShamelaCollection. This is the single classification dimension: there is no
-    separate tradition/madhhab/format any more, because most of that distinction is
-    already encoded directly in which of the 39 a book falls under (e.g. فقه المذهب
-    الحنبلي already says fiqh + hanbali; مصادر العقائد عند السنيين already says
-    aqaid + sunni)."""
+    """The project owner's 39-category list, given directly as the definitive
+    classification — not derived from the raw `< مجموعة >` collection string via regex
+    (that automatic pipeline produced real, confirmed misclassifications and has been
+    retired; see the migration for history). `id` is the category's own Arabic string
+    verbatim, not a slug — there is no separate code, since the string itself is stable
+    and is what a client displays anyway.
+
+    A work can belong to more than one subject (see WorkSubject) — some books are
+    genuinely filed under two categories at once, which a single foreign key on Work
+    could never represent."""
 
     __tablename__ = "subjects"
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)  # stable slug
-    title: Mapped[str] = mapped_column(Text, nullable=False)       # Arabic display name
+    id: Mapped[str] = mapped_column(Text, primary_key=True)   # the Arabic category string
+    title: Mapped[str] = mapped_column(Text, nullable=False)  # same string as id
     sort_order: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
 
 
+class WorkSubject(Base):
+    """One (work, subject) membership — the many-to-many that replaced Work.subject_id.
+    A work with no rows here is simply unclassified, not "other": the old 40th
+    catch-all subject doesn't exist any more."""
+
+    __tablename__ = "work_subjects"
+
+    work_id: Mapped[int] = mapped_column(
+        ForeignKey("works.id", ondelete="CASCADE"), primary_key=True
+    )
+    subject_id: Mapped[str] = mapped_column(
+        ForeignKey("subjects.id", ondelete="CASCADE"), primary_key=True
+    )
+
+    __table_args__ = (Index("ix_work_subjects_subject", "subject_id"),)
+
+
 class ShamelaCollection(Base):
-    """One row per distinct `< مجموعة >` string in the sources, mapped to a subject.
+    """One row per distinct `< مجموعة >` string in the sources (530 distinct raw values
+    found by the full scan: orthographic variants like عربى vs عربي, separator variants,
+    appended language suffixes, compound/stacked values).
 
-    The scan found **530 distinct raw values** for the 39 real categories: orthographic
-    variants (عربى vs عربي), separator variants (parentheses vs. a dash vs. "قسم"),
-    appended language suffixes, and compound/stacked values. subject_id is NULL where
-    the raw string genuinely doesn't say enough (e.g. a bare "مصادر الحديث" with no
-    سنة/شيعة marker, when every one of the 39 hadith categories is tradition-specific)
-    — left unclassified rather than guessed, per an explicit decision.
+    No longer carries a subject: automatically deriving a single category from this raw
+    string via regex rules is exactly the mechanism that produced real, confirmed
+    misclassifications and has been retired in favor of direct, possibly multi-valued
+    classification on Work (see WorkSubject). This table still exists for `language_hint`
+    and for keeping the raw string available to whatever assigns subjects now.
 
-    Keeping the raw string verbatim means a mapping mistake is always recoverable without
-    re-importing, and `normalized` is what the importer actually joins on.
+    Keeping the raw string verbatim means nothing is lost, and `normalized` is what the
+    importer actually joins on.
     """
 
     __tablename__ = "shamela_collections"
@@ -123,7 +144,6 @@ class ShamelaCollection(Base):
     raw: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     normalized: Mapped[str] = mapped_column(Text, nullable=False)
 
-    subject_id: Mapped[str | None] = mapped_column(ForeignKey("subjects.id"))
     # Shamela appends '، فارسى' / '، عربى' to many collection names; that suffix is a
     # usable language signal, though the per-file body marker is authoritative.
     language_hint: Mapped[str | None] = mapped_column(ForeignKey("languages.code"))
@@ -145,7 +165,6 @@ class Work(Base):
     title_norm: Mapped[str] = mapped_column(Text, nullable=False)
 
     author_id: Mapped[int | None] = mapped_column(ForeignKey("authors.id"))
-    subject_id: Mapped[str | None] = mapped_column(ForeignKey("subjects.id"))
     language_code: Mapped[str | None] = mapped_column(ForeignKey("languages.code"))
 
     volume_count: Mapped[int] = mapped_column(
@@ -154,9 +173,9 @@ class Work(Base):
     total_content_bytes: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default="0"
     )
-    # A curated "الكتب المختارة" set, toggled from the admin panel. Additive to
-    # subject_id, not a replacement -- a featured work keeps browsing under its real
-    # category and also shows up here.
+    # A curated "الكتب المختارة" set, toggled from the admin panel. Additive to a work's
+    # categories, not a replacement -- a featured work keeps browsing under them and also
+    # shows up here.
     is_featured: Mapped[bool] = mapped_column(
         nullable=False, default=False, server_default="false"
     )
@@ -168,6 +187,9 @@ class Work(Base):
 
     author: Mapped[Author | None] = relationship()
     books: Mapped[list[Book]] = relationship(back_populates="work", order_by="Book.volume")
+    # A work belongs to zero or more of the 39 subjects (see WorkSubject) -- zero is a
+    # real, valid state (unclassified), not an error.
+    subjects: Mapped[list[Subject]] = relationship(secondary="work_subjects", order_by="Subject.sort_order")
 
     __table_args__ = (
         UniqueConstraint(
@@ -176,7 +198,6 @@ class Work(Base):
         ),
         Index("ix_works_title_norm", "title_norm"),
         Index("ix_works_author", "author_id"),
-        Index("ix_works_subject", "subject_id"),
     )
 
 

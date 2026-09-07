@@ -75,20 +75,29 @@ async def test_full_pipeline_imports_book_work_author_pages_sections(
     async with get_sessionmaker()() as s:
         row = (await s.execute(text("""
             SELECT b.volume, b.language_code, b.publisher, b.page_count,
-                   w.title AS work_title, w.subject_id,
+                   w.title AS work_title,
                    a.name AS author, a.death_year_hijri
             FROM books b JOIN works w ON w.id=b.work_id
             LEFT JOIN authors a ON a.id=b.author_id
             WHERE b.id=:i"""), {"i": int(TEST_ID)})).one()
-    volume, lang, publisher, page_count, work_title, subject, author, death = row
+    volume, lang, publisher, page_count, work_title, author, death = row
     assert volume == 2
     assert lang == "ar"
     assert publisher == "دار الاختبار"
     assert page_count == 2
     assert work_title == "كتاب الاختبار"  # clean, no volume suffix
-    assert subject == "tafsir-shia"
     assert author == "المؤلف التجريبي"
     assert death == 460
+
+    # Import never assigns a subject -- that's now a separate, direct step (see
+    # WorkSubject) -- so a freshly-imported work starts genuinely unclassified.
+    async with get_sessionmaker()() as s:
+        subject_count = await s.scalar(
+            text("SELECT count(*) FROM work_subjects ws JOIN books b ON b.work_id = ws.work_id "
+                 "WHERE b.id = :i"),
+            {"i": int(TEST_ID)},
+        )
+    assert subject_count == 0
 
 
 async def test_file_written_to_books_root(tmp_path: Path, cleanup):

@@ -132,12 +132,15 @@ async def _get_or_create_author(session: AsyncSession, name: str, death: str | N
 
 
 async def _get_or_create_work(
-    session: AsyncSession, title: str, author_id: int | None, collection: dict | None,
-    language: str,
+    session: AsyncSession, title: str, author_id: int | None, language: str,
 ) -> int:
-    """Group volumes into a work by (normalized title, author). The collection row
-    already carries the subject, so a work inherits it from the first volume that
-    names its collection.
+    """Group volumes into a work by (normalized title, author).
+
+    Does not touch subject classification at all -- a work's subjects (see WorkSubject;
+    a work may have more than one) are assigned directly, separately from import, since
+    automatically deriving one from the raw `< مجموعة >` string produced real, confirmed
+    misclassifications and has been retired. A freshly-created work is simply
+    unclassified until something assigns it.
 
     `language` is the *book's own* resolved language (body marker, falling back to the
     collection hint only if that's absent — see the caller) — not the collection hint
@@ -148,17 +151,13 @@ async def _get_or_create_work(
     """
     return await session.scalar(
         text("""
-            INSERT INTO works (title, title_norm, author_id, subject_id, language_code)
-            VALUES (:title, :norm, :author, :subject, :lang)
+            INSERT INTO works (title, title_norm, author_id, language_code)
+            VALUES (:title, :norm, :author, :lang)
             ON CONFLICT (title_norm, author_id) DO UPDATE SET
                 title = EXCLUDED.title, language_code = EXCLUDED.language_code
             RETURNING id
         """),
-        {
-            "title": title, "norm": normalize(title), "author": author_id,
-            "subject": (collection or {}).get("subject_id"),
-            "lang": language,
-        },
+        {"title": title, "norm": normalize(title), "author": author_id, "lang": language},
     )
 
 
@@ -166,13 +165,12 @@ async def _lookup_collection(session: AsyncSession, raw: str | None) -> dict | N
     if not raw:
         return None
     row = (await session.execute(
-        text("""SELECT id, subject_id, language_hint
-                FROM shamela_collections WHERE raw = :raw"""),
+        text("SELECT id, language_hint FROM shamela_collections WHERE raw = :raw"),
         {"raw": raw},
     )).first()
     if row is None:
         return None
-    return {"id": row[0], "subject_id": row[1], "language_hint": row[2]}
+    return {"id": row[0], "language_hint": row[1]}
 
 
 async def _existing_hash(session: AsyncSession, book_id: int) -> str | None:
@@ -270,9 +268,7 @@ async def _import_content(
             lang = collection.get("language_hint")
         lang = lang or "ar"
 
-        work_id = await _get_or_create_work(
-            session, manifest["title"], author_id, collection, lang
-        )
+        work_id = await _get_or_create_work(session, manifest["title"], author_id, lang)
 
         stage = "book"
         pages = paginate(content)

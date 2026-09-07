@@ -11,6 +11,7 @@ from app.models.library import (
     ShamelaCollection,
     Subject,
     Work,
+    WorkSubject,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "ShamelaCollection",
     "Subject",
     "Work",
+    "WorkSubject",
 ]

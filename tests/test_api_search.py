@@ -48,7 +48,14 @@ async def imported(tmp_path: Path):
         result = await import_books.import_one(
             session, tmp_path / f"{BOOK_ID}.abx", "test", books_root, False
         )
-    assert result == "ok"
+        assert result == "ok"
+        # Import never assigns a subject any more (see WorkSubject) -- assign one
+        # directly here so the subjectId-carrying assertions below have something real.
+        await session.execute(text("""
+            INSERT INTO work_subjects (work_id, subject_id)
+            SELECT DISTINCT work_id, 'مصادر الحديث الشيعية - القسم العام' FROM books WHERE id = :i
+        """), {"i": int(BOOK_ID)})
+        await session.commit()
 
     app = create_app()
     from app.config import Settings, get_settings
@@ -107,7 +114,7 @@ class TestSearchFindsUndiacriticizedQuery:
         assert hit["author"] == "مؤلف الاختبار الثالث"
         assert hit["page"] == "1"
         assert hit["sectionTitle"] == "باب في فضل الإمام"
-        assert hit["subjectId"] == "hadith-shia-amm"
+        assert [s["id"] for s in hit["subjects"]] == ["مصادر الحديث الشيعية - القسم العام"]
         assert hit["score"] > 0
 
     async def test_snippet_preserves_original_tashkeel(self, imported: AsyncClient):
@@ -159,13 +166,14 @@ class TestPaginationAndFilters:
         work_id = await _work_id(imported)
         response = await imported.get(
             "/api/search",
-            params={"q": "الامام الصادق", "work": work_id, "subject": "hadith-shia-amm"},
+            params={"q": "الامام الصادق", "work": work_id,
+                     "subject": "مصادر الحديث الشيعية - القسم العام"},
         )
         assert any(h["bookId"] == BOOK_ID for h in response.json()["items"])
 
         response = await imported.get(
             "/api/search",
-            params={"q": "الامام الصادق", "work": work_id, "subject": "tibb"},
+            params={"q": "الامام الصادق", "work": work_id, "subject": "الطب"},
         )
         assert not any(h["bookId"] == BOOK_ID for h in response.json()["items"])
 

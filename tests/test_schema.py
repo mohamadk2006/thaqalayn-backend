@@ -75,23 +75,29 @@ class TestSeedData:
         assert codes == ["ar", "fa"]
 
     async def test_subjects_seeded(self, session):
-        """Asserts the slugs, not the count. Clients switch on these strings and the
-        collection mapping references them as foreign keys, so a renamed or dropped slug
-        is a breaking change — whereas adding one is not. These 39 are Shamela's own
-        published category list, not a scheme this project invented."""
+        """Asserts the exact 39 strings, not just the count. `id` is the category's own
+        Arabic string verbatim (given directly by the project owner as ground truth,
+        not derived from anything) — a renamed or dropped one is a breaking change,
+        adding one is not. No 40th catch-all any more: a work with none of these is
+        simply unclassified (see WorkSubject), not routed to an "other" bucket."""
         result = await session.execute(select(Subject.id))
         assert set(result.scalars()) == {
-            "aqaid-sunni", "aqaid-shia", "rijal-sunni", "rijal-shia", "sira",
-            "fiqh-mustaqilla", "mustalahat-fiqhiyya", "makhtutat", "tarikh-jughrafia",
-            "tafsir-sunni", "tafsir-shia", "hadith-sunni-amm", "hadith-sunni-fiqh",
-            "hadith-shia-amm", "hadith-shia-fiqh", "fiqh-hanbali", "fiqh-hanafi",
-            "fiqh-zaydi", "fiqh-shafii", "fiqh-zahiri", "fiqh-maliki",
-            "qadaya-muasira", "majallat-munawwaat", "mantiq-falsafa",
-            "dalil-muallafat", "dawawin-shir", "ulum-ukhra", "ulum-lugha",
-            "fiqh-shia-fatawa", "fiqh-shia-qabl-thamin", "fiqh-shia-bad-thamin",
-            "usul-fiqh-shia", "usul-fiqh-sunni", "akhlaq-irfan", "adiya-ziyarat",
-            "ansab-tarajim", "tibb", "firaq-madhahib", "quran-ulum",
-            "other",
+            "مصادر العقائد عند السنيين", "مصادر العقائد عند الشيعة",
+            "مصادر رجال الحديث عند السنة", "مصادر رجال الحديث عند الشيعة",
+            "مصادر سيرة النبي والأئمة (ع)", "مصادر فقهية مستقلة",
+            "مصطلحات ومفردات فقهية", "مخطوطات", "مصادر التاريخ والجغرافيا",
+            "مصادر التفسير عند السنة", "مصادر التفسير عند الشيعة",
+            "مصادر الحديث السنية - القسم العام", "مصادر الحديث السنية - قسم الفقه",
+            "مصادر الحديث الشيعية - القسم العام", "مصادر الحديث الشيعية - قسم الفقه",
+            "فقه المذهب الحنبلي", "فقه المذهب الحنفي", "فقه المذهب الزيدي",
+            "فقه المذهب الشافعي", "فقه المذهب الظاهري", "فقه المذهب المالكي",
+            "قضايا إسلامية ومعاصرة", "مجلات ومنوعات", "المنطق والفلسفة",
+            "دليل المؤلفات وفهارس المكاتب", "دواوين الشعر", "علوم أخرى",
+            "علوم اللغة العربية", "فقه الشيعة - فتاوى المراجع",
+            "فقه الشيعة إلى القرن الثامن", "فقه الشيعة من القرن الثامن",
+            "أصول الفقه عند الشيعة", "أصول الفقه عند المذاهب السنية",
+            "الأخلاق والعرفان", "الأدعية والزيارات", "الأنساب والتراجم",
+            "الطب", "الفرق والمذاهب", "القرآن الكريم وعلومه",
         }
 
 

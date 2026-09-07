@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from app.schemas.catalog import SubjectOut
+
 
 class SearchHit(BaseModel):
     bookId: str
@@ -18,8 +20,7 @@ class SearchHit(BaseModel):
     title: str
     author: str
     volume: int | None
-    subjectId: str | None
-    subjectTitle: str | None
+    subjects: list[SubjectOut]  # a work may belong to more than one of the 39 categories
     sectionTitle: str | None  # None when the source has no headings at all
     # A string, not an int: v2 page numbers include front matter's "0.1".."0.n" labels
     # and are not guaranteed unique within a book — see Page in app/models/library.py.
