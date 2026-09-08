@@ -423,54 +423,22 @@ async def book_edit_save(
 
 # ── Book content viewer ──────────────────────────────────────────────────────
 #
-# Reads the same JSON file the download endpoint serves and renders it the way it's
-# actually organized -- chapter, then section (a فهرس الموضوعات heading), then that
-# section's paragraphs with page numbers -- rather than a raw JSON dump. Sections are
-# the pagination unit here (not the whole book): the largest real files are 10-14 MB
-# with dozens of sections, and there's no reason to ever build all of that into one
-# HTML response when a book is opened.
+# Reads the same JSON file the download endpoint serves and renders it the way v2
+# actually organizes it: pages[] is the real unit -- a book is browsed one physical
+# page at a time, exactly like the app itself and like Page/search_tsv on the server
+# side. toc[] is flat, optional context (some sources have no فهرس الموضوعات at all)
+# used only as a jump-list to a starting page, never as the thing being paginated
+# through -- there is no chapter/section container to open any more.
 
 
-def _flat_sections(content: dict) -> list[dict]:
-    """Every v2 TOC entry, in reading order, each carrying the pages it covers -- a
-    section's range runs from its own page to just before the next entry's page (or the
-    book's last page, for the final entry), same logic as paginate_sections() in
-    app/services/paging.py. A source with no فهرس الموضوعات at all (no toc entries)
-    becomes a single synthetic section spanning every page, so the viewer still has
-    something to open instead of an empty index -- mirrors how a Section-less Page
-    already works for search."""
-    pages = sorted(content.get("pages", []), key=lambda p: p.get("sequence", 0))
-    if not pages:
-        return []
-
-    page_by_id = {p["id"]: p for p in pages}
-    toc = sorted(content.get("toc", []), key=lambda e: e.get("order", 0))
-    if not toc:
-        return [{"title": None, "pages": pages}]
-
-    flat = []
-    for i, entry in enumerate(toc):
-        start_page = page_by_id.get(entry.get("pageId"))
-        start_seq = start_page["sequence"] if start_page else None
-        if start_seq is None:
-            flat.append({"title": entry.get("title"), "pages": []})
-            continue
-        if i + 1 < len(toc):
-            next_page = page_by_id.get(toc[i + 1].get("pageId"))
-            end_seq = (next_page["sequence"] - 1) if next_page else start_seq
-        else:
-            end_seq = pages[-1]["sequence"]
-        flat.append({
-            "title": entry.get("title"),
-            "pages": [p for p in pages if start_seq <= p["sequence"] <= end_seq],
-        })
-    return flat
+def _page_lookup(content: dict) -> dict[int, dict]:
+    return {p["sequence"]: p for p in content.get("pages", [])}
 
 
 @router.get("/books/{book_id:int}/content", response_class=HTMLResponse)
 async def book_content(
     book_id: int,
-    section: int | None = None,
+    page: int | None = None,
     session: AsyncSession = Depends(get_session),
     _: None = Depends(_require_admin),
 ) -> HTMLResponse:
@@ -498,58 +466,68 @@ async def book_content(
         return _render(row.title, body)
 
     content = json.loads(path.read_text(encoding="utf-8"))
-    sections = _flat_sections(content)
-
-    if section is None:
-        rows_html = "".join(
-            f'<tr><td>{i + 1}</td><td>{escape(s["title"] or "(الكتاب كاملاً)")}</td>'
-            f'<td><a href="?section={i}">فتح</a></td></tr>'
-            for i, s in enumerate(sections)
+    pages = sorted(content.get("pages", []), key=lambda p: p.get("sequence", 0))
+    if not pages:
+        body = (
+            f"<h1>{escape(row.title)}</h1>"
+            "<p>لا توجد صفحات في هذا الملف.</p>"
+            f'<p><a href="/admin/books/{book_id}">&larr; رجوع</a></p>'
         )
+        return _render(row.title, body)
+
+    if page is None:
+        toc = sorted(content.get("toc", []), key=lambda e: e.get("order", 0))
+        page_by_id = {p["id"]: p for p in pages}
+        toc_html = "".join(
+            f'<tr><td>{escape(entry.get("title") or "")}</td>'
+            f'<td>{escape(str(page_by_id[entry["pageId"]]["pageNumber"])) if entry.get("pageId") in page_by_id else ""}</td>'
+            f'<td><a href="?page={page_by_id[entry["pageId"]]["sequence"]}">فتح</a></td></tr>'
+            for entry in toc if entry.get("pageId") in page_by_id
+        ) or "<tr><td colspan=3>لا يوجد فهرس موضوعات لهذا الكتاب</td></tr>"
         body = (
             f"<h1>{escape(row.title)}</h1>"
             f"<p><small>{escape(content.get('author') or '')}</small></p>"
-            "<table><tr><th>#</th><th>العنوان</th><th></th></tr>"
-            f"{rows_html}</table>"
+            f'<p><a href="?page={pages[0]["sequence"]}">&rarr; ابدأ من الصفحة الأولى</a>'
+            f' ({len(pages)} صفحة)</p>'
+            "<h2>فهرس الموضوعات</h2>"
+            "<table><tr><th>العنوان</th><th>الصفحة</th><th></th></tr>"
+            f"{toc_html}</table>"
             f'<p><a href="/admin/books/{book_id}">&larr; رجوع للتعديل</a></p>'
         )
         return _render(row.title, body)
 
-    if not (0 <= section < len(sections)):
-        raise HTTPException(status_code=404, detail="Unknown section")
+    lookup = _page_lookup(content)
+    current = lookup.get(page)
+    if current is None:
+        raise HTTPException(status_code=404, detail="Unknown page")
 
-    sec = sections[section]
     blocks_html = []
-    current_page_number: str | None = None
-    for page in sec["pages"]:
-        if page["pageNumber"] != current_page_number:
-            current_page_number = page["pageNumber"]
-            blocks_html.append(f'<p><small>-- صفحة {escape(current_page_number)} --</small></p>')
-        for block in sorted(page.get("blocks", []), key=lambda b: b.get("order", 0)):
-            text_ = escape(block.get("text") or "")
-            if block.get("type") == "heading":
-                blocks_html.append(f"<p><strong>{text_}</strong></p>")
-            elif block.get("type") == "footnotes":
-                blocks_html.append(f"<p><small>{text_}</small></p>")
-            else:
-                blocks_html.append(f"<p>{text_}</p>")
+    for block in sorted(current.get("blocks", []), key=lambda b: b.get("order", 0)):
+        text_ = escape(block.get("text") or "")
+        if block.get("type") == "heading":
+            blocks_html.append(f"<p><strong>{text_}</strong></p>")
+        elif block.get("type") == "footnotes":
+            blocks_html.append(f"<p><small>{text_}</small></p>")
+        else:
+            blocks_html.append(f"<p>{text_}</p>")
+    if current.get("isBlank"):
+        blocks_html.append("<p><small>(صفحة بيضاء)</small></p>")
 
+    min_seq, max_seq = pages[0]["sequence"], pages[-1]["sequence"]
     nav = (
-        (f'<a href="?section={section - 1}">&larr; السابق</a>' if section > 0 else "")
+        (f'<a href="?page={page - 1}">&larr; السابقة</a>' if page > min_seq else "")
         + " &nbsp;|&nbsp; "
         + f'<a href="/admin/books/{book_id}/content">الفهرس</a>'
         + " &nbsp;|&nbsp; "
-        + (f'<a href="?section={section + 1}">التالي &rarr;</a>'
-           if section + 1 < len(sections) else "")
+        + (f'<a href="?page={page + 1}">التالية &rarr;</a>' if page < max_seq else "")
     )
-    title = sec["title"] or row.title
     body = (
-        f"<h1>{escape(title)}</h1>"
+        f"<h1>{escape(row.title)} -- صفحة {escape(str(current['pageNumber']))}</h1>"
         f"<p>{nav}</p>"
         f"{''.join(blocks_html)}"
         f"<p>{nav}</p>"
     )
-    return _render(title, body)
+    return _render(row.title, body)
 
 
 # ── Word document import ──────────────────────────────────────────────────────
