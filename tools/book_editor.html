@@ -1,0 +1,601 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>محرر كتب JSON — Thaqalayn</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #fff; --border: #d8d5cd; --text: #222;
+    --muted: #777; --accent: #8a6d3b; --danger: #a33; --ok: #2a7a3a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 15px;
+    display: flex; flex-direction: column;
+  }
+  header {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 10px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; color: var(--accent); white-space: nowrap; }
+  header input[type=text].title-field { font-size: 15px; padding: 5px 8px; min-width: 220px; }
+  header input, header select, header button { font-family: inherit; }
+  .spacer { flex: 1; }
+  button {
+    cursor: pointer; border: 1px solid var(--border); background: var(--panel);
+    padding: 6px 12px; border-radius: 4px; font-size: 14px; color: var(--text);
+  }
+  button:hover { background: #f0eee8; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.primary:hover { background: #74582c; }
+  button.danger { color: var(--danger); border-color: #d8b9b9; }
+  button:disabled { opacity: .45; cursor: default; }
+  #status { font-size: 13px; color: var(--muted); white-space: nowrap; }
+  #status.dirty { color: var(--danger); }
+  #status.saved { color: var(--ok); }
+  main { flex: 1; display: flex; min-height: 0; }
+  #dropzone {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 14px; color: var(--muted);
+  }
+  #dropzone .box {
+    border: 2px dashed var(--border); border-radius: 10px; padding: 60px 80px;
+    text-align: center; background: var(--panel);
+  }
+  aside {
+    width: 300px; flex: none; background: var(--panel); border-left: 1px solid var(--border);
+    overflow-y: auto; display: flex; flex-direction: column;
+  }
+  aside .tabs { display: flex; border-bottom: 1px solid var(--border); }
+  aside .tabs button { flex: 1; border: none; border-radius: 0; background: none; }
+  aside .tabs button.active { border-bottom: 2px solid var(--accent); font-weight: bold; }
+  aside .search { padding: 8px; border-bottom: 1px solid var(--border); }
+  aside .search input { width: 100%; padding: 5px 8px; }
+  aside ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
+  aside li { border-bottom: 1px solid #eee; }
+  aside li a {
+    display: block; padding: 7px 10px; text-decoration: none; color: var(--text);
+    font-size: 13.5px; cursor: pointer;
+  }
+  aside li a:hover { background: #f0eee8; }
+  aside li a.current { background: #efe6d3; font-weight: bold; }
+  aside li a .num { color: var(--muted); font-size: 12px; }
+  #content { flex: 1; overflow-y: auto; padding: 18px 26px; }
+  .page-meta {
+    display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 14px; margin-bottom: 14px; font-size: 13.5px;
+  }
+  .page-meta label { display: flex; align-items: center; gap: 5px; color: var(--muted); }
+  .page-meta input[type=text], .page-meta select { padding: 3px 6px; font-size: 13.5px; }
+  .page-meta input[type=text].small { width: 70px; }
+  .nav-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+  .block-row {
+    display: flex; gap: 8px; align-items: flex-start; margin-bottom: 8px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px;
+  }
+  .block-row.heading { border-right: 4px solid var(--accent); }
+  .block-row.footnotes { border-right: 4px solid #999; opacity: .92; }
+  .block-row .handle { display: flex; flex-direction: column; gap: 3px; }
+  .block-row .handle button { padding: 2px 6px; font-size: 11px; }
+  .block-row select { align-self: flex-start; font-size: 12.5px; padding: 3px 4px; }
+  .block-row textarea {
+    flex: 1; min-height: 42px; padding: 6px 8px; font-family: inherit; font-size: 14.5px;
+    border: 1px solid var(--border); border-radius: 4px; resize: vertical; line-height: 1.6;
+  }
+  .block-row.heading textarea { font-weight: bold; }
+  .block-row.footnotes textarea { font-size: 12.5px; color: #555; }
+  .insert-row { text-align: center; margin: 2px 0 10px; }
+  .insert-row button { font-size: 11.5px; padding: 2px 10px; opacity: .5; }
+  .insert-row button:hover { opacity: 1; }
+  .page-controls { display: flex; gap: 8px; margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--border); }
+  details.meta-panel { margin-bottom: 14px; }
+  details.meta-panel summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .meta-grid { display: grid; grid-template-columns: max-content 1fr; gap: 6px 10px; margin-top: 8px; max-width: 560px; }
+  .meta-grid label { font-size: 13px; color: var(--muted); align-self: center; }
+  .meta-grid input { padding: 4px 7px; font-size: 13px; }
+  #issues { margin: 10px 0; }
+  #issues .issue { padding: 6px 10px; border-radius: 4px; font-size: 13px; margin-bottom: 5px; }
+  #issues .issue.error { background: #fbe4e4; color: #7a1f1f; }
+  #issues .issue.warning { background: #fff6e0; color: #7a5a00; }
+  dialog { border: none; border-radius: 8px; padding: 0; max-width: 420px; }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  dialog .inner { padding: 20px; }
+  dialog .btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+  small.hint { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>محرر كتب JSON</h1>
+  <input type="file" id="fileInput" accept="application/json,.json">
+  <input type="text" id="titleField" class="title-field" placeholder="عنوان الكتاب" disabled>
+  <input type="text" id="authorField" class="title-field" placeholder="المؤلف" disabled>
+  <span class="spacer"></span>
+  <span id="status"></span>
+  <button id="downloadBtn" class="primary" disabled>تنزيل الملف المعدّل</button>
+</header>
+
+<main>
+  <div id="dropzone">
+    <div class="box">
+      <p><strong>افتح ملف كتاب (schemaVersion 2)</strong></p>
+      <p><small class="hint">مثال: data/books/3721.json — يعمل هذا المحرر بالكامل داخل المتصفح، لا يرسل أي بيانات لأي خادم.</small></p>
+    </div>
+  </div>
+
+  <div id="editorRoot" style="display:none; flex:1; min-width:0;">
+    <aside>
+      <div class="tabs">
+        <button id="tabPages" class="active">الصفحات</button>
+        <button id="tabToc">الفهرس</button>
+      </div>
+      <div class="search"><input type="text" id="pageFilter" placeholder="بحث برقم الصفحة..."></div>
+      <ul id="pageList"></ul>
+      <ul id="tocList" style="display:none"></ul>
+    </aside>
+    <div id="content"></div>
+  </div>
+</main>
+
+<dialog id="draftDialog">
+  <div class="inner">
+    <p>يوجد مسودة محفوظة تلقائياً لهذا الكتاب من جلسة سابقة لم يتم تنزيلها.</p>
+    <div class="btns">
+      <button id="draftDiscard">تجاهل المسودة</button>
+      <button id="draftRestore" class="primary">استعادة المسودة</button>
+    </div>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+
+let book = null;          // parsed BookContent, pages sorted/normalized in-memory
+let currentPage = 0;      // index into book.pages
+let dirty = false;
+let draftKey = null;
+
+const pad = (n, w) => String(n).padStart(w, "0");
+const $ = (id) => document.getElementById(id);
+
+// Some browsers (notably file:// pages opened directly, which is how this tool is meant
+// to be used) treat the page as an opaque origin and throw on any localStorage access.
+// Draft autosave is a convenience, not a requirement, so every call is best-effort.
+const safeStorage = {
+  get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+  set(key, val) { try { localStorage.setItem(key, val); } catch { /* unavailable here */ } },
+  remove(key) { try { localStorage.removeItem(key); } catch { /* unavailable here */ } },
+};
+
+// ── loading ────────────────────────────────────────────────────────────────
+
+$("fileInput").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(reader.result);
+      loadBook(parsed);
+    } catch (err) {
+      alert("تعذّرت قراءة الملف كـ JSON صالح: " + err.message);
+    }
+  };
+  reader.readAsText(file);
+});
+
+function loadBook(parsed) {
+  if (parsed.schemaVersion !== 2) {
+    if (!confirm(`schemaVersion هذا الملف هو ${parsed.schemaVersion}، وليس 2. المتابعة على أي حال؟`)) return;
+  }
+  book = parsed;
+  book.pages = (book.pages || []).slice().sort((a, b) => (a.sequence||0) - (b.sequence||0));
+  for (const p of book.pages) {
+    p.blocks = (p.blocks || []).slice().sort((a, b) => (a.order||0) - (b.order||0));
+  }
+  delete book.toc; // fully rebuilt on export -- see buildExportObject()
+  currentPage = 0;
+  dirty = false;
+
+  $("dropzone").style.display = "none";
+  $("editorRoot").style.display = "flex";
+  $("titleField").disabled = false;
+  $("authorField").disabled = false;
+  $("downloadBtn").disabled = false;
+  $("titleField").value = book.title || "";
+  $("authorField").value = book.author || "";
+
+  draftKey = "book_editor_draft_" + (book.bookId ?? "unknown");
+  const draft = safeStorage.get(draftKey);
+  if (draft) {
+    $("draftDialog").showModal();
+    $("draftRestore").onclick = () => {
+      try {
+        const d = JSON.parse(draft);
+        book = d;
+        book.pages = book.pages.slice().sort((a,b)=>(a.sequence||0)-(b.sequence||0));
+        for (const p of book.pages) p.blocks = (p.blocks||[]).slice().sort((a,b)=>(a.order||0)-(b.order||0));
+        delete book.toc;
+        $("titleField").value = book.title || "";
+        $("authorField").value = book.author || "";
+        markDirty();
+        renderAll();
+      } catch (e) { /* ignore corrupt draft */ }
+      $("draftDialog").close();
+    };
+    $("draftDiscard").onclick = () => { safeStorage.remove(draftKey); $("draftDialog").close(); };
+  }
+
+  renderAll();
+  setStatus("تم التحميل", "saved");
+}
+
+// ── dirty / draft autosave ───────────────────────────────────────────────────
+
+let saveTimer = null;
+function markDirty() {
+  dirty = true;
+  setStatus("تعديلات غير محفوظة", "dirty");
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    if (draftKey) safeStorage.set(draftKey, JSON.stringify(book));
+  }, 600);
+}
+function setStatus(msg, cls) {
+  const el = $("status");
+  el.textContent = msg;
+  el.className = cls || "";
+}
+
+$("titleField").addEventListener("input", (e) => { book.title = e.target.value; markDirty(); });
+$("authorField").addEventListener("input", (e) => { book.author = e.target.value; markDirty(); });
+
+window.addEventListener("beforeunload", (e) => {
+  if (dirty) { e.preventDefault(); e.returnValue = ""; }
+});
+
+// ── rendering: sidebar ───────────────────────────────────────────────────────
+
+function renderAll() {
+  renderSidebar();
+  renderPage();
+}
+
+function renderSidebar() {
+  const list = $("pageList");
+  const filter = $("pageFilter").value.trim();
+  list.innerHTML = "";
+  book.pages.forEach((p, i) => {
+    if (filter && !String(p.pageNumber ?? "").includes(filter) && !String(i+1).includes(filter)) return;
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.className = i === currentPage ? "current" : "";
+    a.innerHTML = `<span class="num">#${i+1}</span> — صفحة ${escapeHtml(String(p.pageNumber ?? ""))}` +
+      (p.isBlank ? " <small>(بيضاء)</small>" : "");
+    a.onclick = () => { currentPage = i; renderAll(); };
+    li.appendChild(a);
+    list.appendChild(li);
+  });
+
+  const tocList = $("tocList");
+  tocList.innerHTML = "";
+  const headings = collectHeadings();
+  if (headings.length === 0) {
+    tocList.innerHTML = "<li><a>لا توجد عناوين بعد</a></li>";
+  }
+  headings.forEach(h => {
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.textContent = h.text || "(بدون عنوان)";
+    a.onclick = () => { currentPage = h.pageIndex; renderAll(); };
+    li.appendChild(a);
+    tocList.appendChild(li);
+  });
+}
+
+$("pageFilter").addEventListener("input", renderSidebar);
+$("tabPages").addEventListener("click", () => {
+  $("tabPages").classList.add("active"); $("tabToc").classList.remove("active");
+  $("pageList").style.display = ""; $("tocList").style.display = "none";
+});
+$("tabToc").addEventListener("click", () => {
+  $("tabToc").classList.add("active"); $("tabPages").classList.remove("active");
+  $("tocList").style.display = ""; $("pageList").style.display = "none";
+});
+
+function collectHeadings() {
+  const out = [];
+  book.pages.forEach((p, pi) => {
+    for (const b of p.blocks) {
+      if (b.type === "heading") out.push({ text: b.text, pageIndex: pi });
+    }
+  });
+  return out;
+}
+
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+// ── rendering: main page editor ──────────────────────────────────────────────
+
+function renderPage() {
+  const content = $("content");
+  if (!book.pages.length) {
+    content.innerHTML = "<p>لا توجد صفحات. أضف صفحة جديدة.</p><button onclick=\"addPage(-1)\">+ صفحة جديدة</button>";
+    return;
+  }
+  currentPage = Math.max(0, Math.min(currentPage, book.pages.length - 1));
+  const p = book.pages[currentPage];
+
+  content.innerHTML = "";
+
+  const nav = document.createElement("div");
+  nav.className = "nav-bar";
+  nav.innerHTML = `
+    <button ${currentPage === 0 ? "disabled" : ""} id="prevBtn">&rarr; السابقة</button>
+    <span>صفحة ${currentPage + 1} من ${book.pages.length} — رقم الصفحة المطبوع: ${escapeHtml(String(p.pageNumber ?? ""))}</span>
+    <button ${currentPage === book.pages.length - 1 ? "disabled" : ""} id="nextBtn">التالية &larr;</button>
+  `;
+  content.appendChild(nav);
+  nav.querySelector("#prevBtn")?.addEventListener("click", () => { currentPage--; renderAll(); });
+  nav.querySelector("#nextBtn")?.addEventListener("click", () => { currentPage++; renderAll(); });
+
+  const meta = document.createElement("div");
+  meta.className = "page-meta";
+  meta.innerHTML = `
+    <label>النوع
+      <select id="pageTypeSel">
+        <option value="main" ${p.pageType==="main"?"selected":""}>main</option>
+        <option value="frontMatter" ${p.pageType==="frontMatter"?"selected":""}>frontMatter</option>
+      </select>
+    </label>
+    <label>رقم الصفحة المطبوع
+      <input type="text" class="small" id="pageNumberInput" value="${escapeHtml(p.pageNumber ?? "")}"
+        ${p.pageType==="frontMatter" ? "disabled title='يُحسب تلقائياً لصفحات frontMatter عند التنزيل'" : ""}>
+    </label>
+    <label><input type="checkbox" id="isBlankCk" ${p.isBlank ? "checked" : ""}> صفحة بيضاء</label>
+  `;
+  content.appendChild(meta);
+  meta.querySelector("#pageTypeSel").addEventListener("change", (e) => { p.pageType = e.target.value; markDirty(); renderPage(); });
+  meta.querySelector("#pageNumberInput")?.addEventListener("input", (e) => { p.pageNumber = e.target.value; markDirty(); });
+  meta.querySelector("#isBlankCk").addEventListener("change", (e) => { p.isBlank = e.target.checked; markDirty(); });
+
+  const details = document.createElement("details");
+  details.className = "meta-panel";
+  details.innerHTML = `<summary>حقول إضافية للصفحة (printedPage / sourcePageLabel)</summary>
+    <div class="meta-grid">
+      <label>printedPage</label><input type="text" id="printedPageInput" value="${escapeHtml(p.printedPage ?? "")}">
+      <label>sourcePageLabel</label><input type="text" id="sourceLabelInput" value="${escapeHtml(p.sourcePageLabel ?? "")}">
+    </div>`;
+  content.appendChild(details);
+  details.querySelector("#printedPageInput").addEventListener("input", (e) => {
+    const n = Number(e.target.value); p.printedPage = Number.isFinite(n) && e.target.value.trim() !== "" ? n : e.target.value; markDirty();
+  });
+  details.querySelector("#sourceLabelInput").addEventListener("input", (e) => { p.sourcePageLabel = e.target.value; markDirty(); });
+
+  const blocksWrap = document.createElement("div");
+  blocksWrap.id = "blocksWrap";
+  content.appendChild(blocksWrap);
+  renderBlocks(blocksWrap, p);
+
+  const pageControls = document.createElement("div");
+  pageControls.className = "page-controls";
+  pageControls.innerHTML = `
+    <button id="addPageAfter">+ صفحة جديدة بعد هذه</button>
+    <button id="movePageUp" ${currentPage===0?"disabled":""}>&uarr; نقل الصفحة للأعلى</button>
+    <button id="movePageDown" ${currentPage===book.pages.length-1?"disabled":""}>&darr; نقل الصفحة للأسفل</button>
+    <button id="deletePageBtn" class="danger">حذف هذه الصفحة</button>
+  `;
+  content.appendChild(pageControls);
+  pageControls.querySelector("#addPageAfter").addEventListener("click", () => addPage(currentPage));
+  pageControls.querySelector("#movePageUp").addEventListener("click", () => movePage(currentPage, -1));
+  pageControls.querySelector("#movePageDown").addEventListener("click", () => movePage(currentPage, 1));
+  pageControls.querySelector("#deletePageBtn").addEventListener("click", () => deletePage(currentPage));
+}
+
+function renderBlocks(wrap, p) {
+  wrap.innerHTML = "";
+  wrap.appendChild(insertRow(p, 0));
+  p.blocks.forEach((b, bi) => {
+    wrap.appendChild(blockRow(p, b, bi));
+    wrap.appendChild(insertRow(p, bi + 1));
+  });
+}
+
+function insertRow(p, atIndex) {
+  const div = document.createElement("div");
+  div.className = "insert-row";
+  const btn = document.createElement("button");
+  btn.textContent = "+ إضافة فقرة هنا";
+  btn.onclick = () => {
+    p.blocks.splice(atIndex, 0, { type: "text", text: "" });
+    markDirty();
+    renderBlocks($("blocksWrap"), p);
+  };
+  div.appendChild(btn);
+  return div;
+}
+
+function blockRow(p, b, bi) {
+  const row = document.createElement("div");
+  row.className = "block-row " + (b.type || "text");
+
+  const handle = document.createElement("div");
+  handle.className = "handle";
+  const up = document.createElement("button"); up.textContent = "↑";
+  up.disabled = bi === 0;
+  up.onclick = () => { [p.blocks[bi-1], p.blocks[bi]] = [p.blocks[bi], p.blocks[bi-1]]; markDirty(); renderBlocks($("blocksWrap"), p); };
+  const down = document.createElement("button"); down.textContent = "↓";
+  down.disabled = bi === p.blocks.length - 1;
+  down.onclick = () => { [p.blocks[bi+1], p.blocks[bi]] = [p.blocks[bi], p.blocks[bi+1]]; markDirty(); renderBlocks($("blocksWrap"), p); };
+  const del = document.createElement("button"); del.textContent = "✕"; del.title = "حذف الفقرة";
+  del.onclick = () => {
+    if (b.type === "heading" && !confirm("هذا العنوان سيُحذف من الفهرس أيضاً. متابعة؟")) return;
+    p.blocks.splice(bi, 1); markDirty(); renderBlocks($("blocksWrap"), p);
+  };
+  handle.append(up, down, del);
+
+  const typeSel = document.createElement("select");
+  for (const t of ["text", "heading", "footnotes"]) {
+    const opt = document.createElement("option");
+    opt.value = t; opt.textContent = t; opt.selected = (b.type || "text") === t;
+    typeSel.appendChild(opt);
+  }
+  typeSel.onchange = () => {
+    b.type = typeSel.value;
+    if (b.type !== "heading") delete b.tocId;
+    markDirty();
+    renderBlocks($("blocksWrap"), p);
+  };
+
+  const ta = document.createElement("textarea");
+  ta.value = b.text || "";
+  ta.dir = "rtl";
+  ta.addEventListener("input", () => { b.text = ta.value; markDirty(); });
+
+  row.append(handle, typeSel, ta);
+  return row;
+}
+
+// ── page/block structural edits ──────────────────────────────────────────────
+
+function addPage(afterIndex) {
+  const newPage = {
+    pageType: "main", isBlank: false, pageNumber: "",
+    printedPage: "", sourcePageLabel: "", blocks: [{ type: "text", text: "" }],
+  };
+  book.pages.splice(afterIndex + 1, 0, newPage);
+  currentPage = afterIndex + 1;
+  markDirty();
+  renderAll();
+}
+
+function movePage(index, dir) {
+  const j = index + dir;
+  if (j < 0 || j >= book.pages.length) return;
+  [book.pages[index], book.pages[j]] = [book.pages[j], book.pages[index]];
+  currentPage = j;
+  markDirty();
+  renderAll();
+}
+
+function deletePage(index) {
+  if (!confirm("حذف هذه الصفحة نهائياً من الملف؟ لا يمكن التراجع.")) return;
+  book.pages.splice(index, 1);
+  currentPage = Math.min(currentPage, book.pages.length - 1);
+  markDirty();
+  renderAll();
+}
+
+// ── export: rebuild every position-derived id/order/toc from scratch ─────────
+// Mirrors scripts/validate/validate_book_v2.py's invariants exactly, so a file
+// downloaded here always passes validation: page id/sequence and block id/order
+// are pure functions of array position, never carried over from user edits.
+
+function buildExportObject() {
+  const out = {
+    schemaVersion: 2,
+    bookId: book.bookId,
+    title: book.title || "",
+    author: book.author || "",
+    metadata: book.metadata || {},
+    pages: [],
+    toc: [],
+  };
+
+  let frontCounter = 0;
+  let tocCounter = 0;
+
+  book.pages.forEach((p, pi) => {
+    const seq = pi + 1;
+    const pageId = `p-${pad(seq, 6)}`;
+    let pageNumber = p.pageNumber ?? "";
+    if (p.pageType === "frontMatter") {
+      frontCounter++;
+      pageNumber = `0.${frontCounter}`;
+    }
+
+    const outBlocks = p.blocks.map((b, bi) => {
+      const order = bi + 1;
+      const blockId = `${pageId}-b-${pad(order, 3)}`;
+      const outBlock = { id: blockId, type: b.type || "text", order, text: b.text || "" };
+      if (outBlock.type === "heading") {
+        tocCounter++;
+        const tocId = `toc-${pad(tocCounter, 5)}`;
+        outBlock.tocId = tocId;
+        out.toc.push({ id: tocId, order: tocCounter, title: outBlock.text, pageId, pageNumber });
+      }
+      return outBlock;
+    });
+
+    out.pages.push({
+      id: pageId, sequence: seq, isBlank: !!p.isBlank, blocks: outBlocks,
+      printedPage: p.printedPage ?? seq, sourcePageLabel: p.sourcePageLabel ?? String(pageNumber),
+      pageType: p.pageType || "main", pageNumber,
+    });
+  });
+
+  return out;
+}
+
+function validateExport(out) {
+  const issues = [];
+  if (!out.title.trim()) issues.push({ sev: "error", msg: "لا يوجد عنوان للكتاب." });
+  if (!out.author.trim()) issues.push({ sev: "warning", msg: "لا يوجد اسم مؤلف." });
+  if (!out.pages.length) issues.push({ sev: "error", msg: "لا توجد صفحات." });
+  const totalBlocks = out.pages.reduce((n, p) => n + p.blocks.length, 0);
+  if (totalBlocks === 0) issues.push({ sev: "error", msg: "لا توجد أي فقرة/محتوى في كامل الكتاب." });
+  const emptyBlocks = out.pages.reduce((n, p) => n + p.blocks.filter(b => !b.text.trim()).length, 0);
+  if (emptyBlocks) issues.push({ sev: "warning", msg: `${emptyBlocks} فقرة فارغة (سيتم استيرادها فارغة).` });
+  // frontMatter pageNumber is computed automatically; main pages carry the real printed
+  // label and the validator rejects an empty one outright (bad_page_number).
+  const missingPageNumbers = out.pages.filter(p => p.pageType === "main" && !String(p.pageNumber ?? "").trim());
+  if (missingPageNumbers.length) {
+    issues.push({
+      sev: "error",
+      msg: `${missingPageNumbers.length} صفحة (main) بلا "رقم الصفحة المطبوع": ` +
+        missingPageNumbers.slice(0, 8).map(p => "#" + p.sequence).join("، ") +
+        (missingPageNumbers.length > 8 ? " ..." : ""),
+    });
+  }
+  return issues;
+}
+
+$("downloadBtn").addEventListener("click", () => {
+  const out = buildExportObject();
+  // NFC-normalize all text, matching what the importer's own normalizer would do anyway --
+  // avoids the validator's non_nfc_text warning for free.
+  for (const p of out.pages) for (const b of p.blocks) b.text = b.text.normalize("NFC");
+  for (const t of out.toc) t.title = t.title.normalize("NFC");
+
+  const issues = validateExport(out);
+  const errors = issues.filter(i => i.sev === "error");
+  if (issues.length) {
+    const msg = issues.map(i => `[${i.sev === "error" ? "خطأ" : "تنبيه"}] ${i.msg}`).join("\n");
+    if (errors.length) { alert("لا يمكن التنزيل:\n\n" + msg); return; }
+    if (!confirm(msg + "\n\nمتابعة التنزيل رغم ذلك؟")) return;
+  }
+
+  const blob = new Blob([JSON.stringify(out, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${out.bookId}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+
+  dirty = false;
+  setStatus("تم التنزيل", "saved");
+  if (draftKey) safeStorage.remove(draftKey);
+});
+</script>
+</body>
+</html>
