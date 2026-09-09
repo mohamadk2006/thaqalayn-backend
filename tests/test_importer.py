@@ -6,6 +6,7 @@ cleans up after itself.
 """
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -149,6 +150,77 @@ async def test_malformed_source_is_logged_not_raised(tmp_path: Path, cleanup):
             {"i": int(TEST_ID)},
         )
     assert status == "failed"
+
+
+async def test_metadata_language_overrides_title_heuristic(tmp_path: Path, cleanup):
+    """A book backfilled with the corrected `metadata.language` (see
+    backfill_subjects_language.py) must have that value win over the old title-substring
+    heuristic -- otherwise reimporting a backfilled file would silently regress the
+    language fix this field exists to carry."""
+    (tmp_path / f"{TEST_ID}.abx").write_text(ABX, encoding="utf-8")
+    await _run_import(tmp_path, tmp_path / "books")
+
+    written = tmp_path / "books" / f"{TEST_ID}.json"
+    content = json.loads(written.read_text(encoding="utf-8"))
+    assert "فارسي" not in content["title"]  # heuristic would have said 'ar' here
+    content["metadata"]["language"] = "fa"
+
+    async with get_sessionmaker()() as s:
+        result = await import_books._import_content(
+            s, content, TEST_ID, "manual", "test-run-2", tmp_path / "books", True,
+        )
+        assert result == "ok"
+        lang = await s.scalar(
+            text("SELECT language_code FROM books WHERE id=:i"), {"i": int(TEST_ID)}
+        )
+    assert lang == "fa"
+
+
+async def test_reimport_with_list_collection_preserves_collection_id(tmp_path: Path, cleanup):
+    """A book's JSON, once backfilled, carries the corrected category array in
+    metadata.collection instead of the original raw Shamela tag -- _lookup_collection
+    can't resolve a list against shamela_collections.raw and returns None for it, but a
+    reimport must not let that None wipe out the collection_id the *original* .abx import
+    already resolved (see the ON CONFLICT comment in _import_content)."""
+    async with get_sessionmaker()() as s:
+        collection_id = await s.scalar(text("""
+            INSERT INTO shamela_collections (raw, normalized, book_count)
+            VALUES ('مصادر التفسير عند الشيعة', 'مصادر التفسير عند الشيعة', 0)
+            ON CONFLICT (raw) DO UPDATE SET raw = EXCLUDED.raw
+            RETURNING id
+        """))
+        await s.commit()
+
+    (tmp_path / f"{TEST_ID}.abx").write_text(ABX, encoding="utf-8")
+    await _run_import(tmp_path, tmp_path / "books")
+
+    async with get_sessionmaker()() as s:
+        original_cid = await s.scalar(
+            text("SELECT collection_id FROM books WHERE id=:i"), {"i": int(TEST_ID)}
+        )
+    assert original_cid == collection_id
+
+    written = tmp_path / "books" / f"{TEST_ID}.json"
+    content = json.loads(written.read_text(encoding="utf-8"))
+    content["metadata"]["collection"] = ["مصادر التفسير عند الشيعة", "الطب"]
+
+    async with get_sessionmaker()() as s:
+        result = await import_books._import_content(
+            s, content, TEST_ID, "manual", "test-run-2", tmp_path / "books", True,
+        )
+        assert result == "ok"
+        cid_after = await s.scalar(
+            text("SELECT collection_id FROM books WHERE id=:i"), {"i": int(TEST_ID)}
+        )
+    assert cid_after == original_cid
+
+    async with get_sessionmaker()() as s:
+        # The books row (which references collection_id) is normally cleared by the
+        # `cleanup` fixture, but that runs after this function returns -- delete it here
+        # too so the shamela_collections row isn't left FK-referenced when removed below.
+        await s.execute(text("DELETE FROM books WHERE id = :i"), {"i": int(TEST_ID)})
+        await s.execute(text("DELETE FROM shamela_collections WHERE id=:i"), {"i": collection_id})
+        await s.commit()
 
 
 async def test_search_finds_imported_content(tmp_path: Path, cleanup):

@@ -98,6 +98,7 @@ def _book_summary(content: dict) -> dict:
         "author": content.get("author", ""),
         "volume": int(volume) if volume and volume.isdigit() else None,
         "collection": md.get("collection"),
+        "language": md.get("language"),
         "death": md.get("authorDeath"),
         "publisher": md.get("publisher"),
         "edition": md.get("edition"),
@@ -161,8 +162,14 @@ async def _get_or_create_work(
     )
 
 
-async def _lookup_collection(session: AsyncSession, raw: str | None) -> dict | None:
-    if not raw:
+async def _lookup_collection(session: AsyncSession, raw) -> dict | None:
+    # `raw` is a plain string for anything converted straight from a .abx source (the
+    # original Shamela '< مجموعة >' tag). A book whose JSON has since been backfilled with
+    # the corrected multi-category classification (see backfill_subjects_language.py)
+    # carries a list there instead -- that's a different, incompatible kind of value, not
+    # a lookup key into shamela_collections, so it's treated the same as absent rather
+    # than raising or being passed into a text-column comparison it could never match.
+    if not raw or not isinstance(raw, str):
         return None
     row = (await session.execute(
         text("SELECT id, language_hint FROM shamela_collections WHERE raw = :raw"),
@@ -260,10 +267,15 @@ async def _import_content(
         collection = await _lookup_collection(session, manifest["collection"])
         author_id = await _get_or_create_author(session, manifest["author"], manifest["death"])
 
-        # Language: the per-file body marker is authoritative; fall back to the collection
-        # hint; default Arabic. Resolved before work creation so the work (not just the
-        # book) gets a language, since the collection hint alone covers almost nothing.
-        lang = "fa" if "فارسي" in manifest["title"] or "فارسى" in manifest["title"] else None
+        # Language: metadata.language is the corrected, hand-verified classification
+        # (backfilled from the DB after the language-fix pass -- see backfill_subjects_
+        # language.py) and takes priority whenever present. Older files that haven't been
+        # backfilled yet fall back to the original heuristic: the per-file body marker,
+        # then the collection hint, then a default of Arabic. Resolved before work
+        # creation so the work (not just the book) gets a language.
+        lang = manifest.get("language")
+        if not lang:
+            lang = "fa" if "فارسي" in manifest["title"] or "فارسى" in manifest["title"] else None
         if lang is None and collection:
             lang = collection.get("language_hint")
         lang = lang or "ar"
@@ -285,7 +297,14 @@ async def _import_content(
                 ON CONFLICT (id) DO UPDATE SET
                     work_id=EXCLUDED.work_id, volume=EXCLUDED.volume, title=EXCLUDED.title,
                     title_norm=EXCLUDED.title_norm, author_id=EXCLUDED.author_id,
-                    language_code=EXCLUDED.language_code, collection_id=EXCLUDED.collection_id,
+                    language_code=EXCLUDED.language_code,
+                    -- collection_id is deliberately NOT updated here (unlike every other
+                    -- column): it's resolved from metadata.collection, which a backfilled
+                    -- book's JSON now uses for the corrected category array instead of
+                    -- the original raw Shamela tag -- _lookup_collection returns None for
+                    -- that shape, and re-applying None on every reimport would silently
+                    -- wipe out the collection already resolved from that book's original
+                    -- .abx import. A brand-new row still gets it from :cid normally.
                     content_sha256=EXCLUDED.content_sha256, content_bytes=EXCLUDED.content_bytes,
                     content_path=EXCLUDED.content_path, page_first=EXCLUDED.page_first,
                     page_last=EXCLUDED.page_last, page_count=EXCLUDED.page_count,
