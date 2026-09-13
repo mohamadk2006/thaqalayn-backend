@@ -220,7 +220,14 @@ async def search(
     # this case: measured on that exact query, 11+s of recheck work dropped to ~175ms.
     # Verified this doesn't regress the already-fixed many-true-matches case (still
     # fills the full requested candidate set, timing unchanged within normal variance).
-    await session.execute(text("SET LOCAL statement_timeout = '8000'"))
+    # Raised from 8s: after the Sep-10/11 reimport churn scattered `pages`' physical row
+    # layout (concurrent per-book DELETE+INSERT across nearly the whole table), even
+    # already-fixed broad phrases like "الامام الصادق" now cost ~5s of genuine heap I/O
+    # instead of ~1.8s -- a physical-layout regression, not a new algorithmic failure
+    # mode, and not one gin_fuzzy_search_limit or the candidate cap address. 30s tolerates
+    # that until the table is compacted (VACUUM FULL / rebuild); still bounded, just wide
+    # enough not to fail queries that are merely slow right now rather than pathological.
+    await session.execute(text("SET LOCAL statement_timeout = '30000'"))
     await session.execute(text("SET LOCAL gin_fuzzy_search_limit = 100000"))
     rows = (await session.execute(stmt, params)).all()
     if not rows:

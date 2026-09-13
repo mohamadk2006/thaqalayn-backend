@@ -73,8 +73,11 @@ async def main() -> int:
         print("no matching books found", file=sys.stderr)
         return 1
 
+    print(f"{len(rows)} books to process", flush=True)
     updated = unchanged = skipped_missing = failed = 0
-    for row in rows:
+    for idx, row in enumerate(rows):
+        if idx % 1000 == 0:
+            print(f"  {idx}/{len(rows)}", flush=True)
         path = args.books_root / row.content_path
         if not path.is_file():
             skipped_missing += 1
