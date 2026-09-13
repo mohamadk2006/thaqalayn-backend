@@ -25,13 +25,13 @@ async def search(
     authorName: list[str] | None = Query(
         None, description="One or more author names (use when the ID isn't known)"
     ),
-    work: int | None = None,
+    work: list[int] | None = Query(None, description="One or more work IDs"),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> PageEnvelope[SearchHit]:
     items, total = await search_service.search(
         session, query=q, page=page, limit=limit, books_root=settings.books_root,
         subject_ids=subject, languages=language,
-        author_ids=author, author_names=authorName, work_id=work,
+        author_ids=author, author_names=authorName, work_ids=work,
     )
     return PageEnvelope(page=page, limit=limit, total=total, items=items)

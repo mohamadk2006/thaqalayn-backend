@@ -158,7 +158,7 @@ async def search(
     languages: list[str] | None = None,
     author_ids: list[int] | None = None,
     author_names: list[str] | None = None,
-    work_id: int | None = None,
+    work_ids: list[int] | None = None,
 ) -> tuple[list[SearchHit], int]:
     normalized_query = normalize(query)
     if not normalized_query:
@@ -195,9 +195,10 @@ async def search(
         conditions.append("a.name_norm IN :author_names")
         params["author_names"] = [normalize(name) for name in author_names]
         expanding.append("author_names")
-    if work_id:
-        conditions.append("b.work_id = :work_id")
-        params["work_id"] = work_id
+    if work_ids:
+        conditions.append("b.work_id IN :work_ids")
+        params["work_ids"] = work_ids
+        expanding.append("work_ids")
 
     sql = _CANDIDATES_CTE
     if conditions:
