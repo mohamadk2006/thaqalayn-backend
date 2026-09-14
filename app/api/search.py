@@ -20,6 +20,7 @@ async def search(
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
     subject: list[str] | None = Query(None, description="One or more subject category IDs"),
+    library: list[int] | None = Query(None, description="One or more library IDs"),
     language: list[str] | None = Query(None, description="One or more language codes"),
     author: list[int] | None = Query(None, description="One or more author IDs"),
     authorName: list[str] | None = Query(
@@ -31,7 +32,7 @@ async def search(
 ) -> PageEnvelope[SearchHit]:
     items, total = await search_service.search(
         session, query=q, page=page, limit=limit, books_root=settings.books_root,
-        subject_ids=subject, languages=language,
+        subject_ids=subject, library_ids=library, languages=language,
         author_ids=author, author_names=authorName, work_ids=work,
     )
     return PageEnvelope(page=page, limit=limit, total=total, items=items)

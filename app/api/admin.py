@@ -87,7 +87,8 @@ _PAGE = """<!doctype html>
 </style>
 </head>
 <body>
-<nav><a href="/admin">لوحة التحكم</a> &nbsp;|&nbsp; <a href="/admin/books/new">إضافة كتاب</a></nav>
+<nav><a href="/admin">لوحة التحكم</a> &nbsp;|&nbsp; <a href="/admin/libraries">المكتبات</a>
+&nbsp;|&nbsp; <a href="/admin/books/new">إضافة كتاب</a></nav>
 {body}
 </body>
 </html>"""
@@ -255,6 +256,113 @@ async def subject_detail(
     return _render(subject.title, body)
 
 
+# ── Libraries: open-ended, admin-creatable, independent of subjects ─────────
+
+
+@router.get("/libraries", response_class=HTMLResponse)
+async def library_list(
+    session: AsyncSession = Depends(get_session), _: None = Depends(_require_admin)
+) -> HTMLResponse:
+    rows = (await session.execute(text("""
+        SELECT l.id, l.title, l.parent_id, p.title AS parent_title,
+               count(DISTINCT lw.work_id) AS work_count
+        FROM libraries l
+        LEFT JOIN libraries p ON p.id = l.parent_id
+        LEFT JOIN library_works lw ON lw.library_id = l.id
+        GROUP BY l.id, l.title, l.parent_id, p.title
+        ORDER BY l.parent_id NULLS FIRST, l.sort_order
+    """))).all()
+    parent_options = "".join(
+        f'<option value="{r.id}">{escape(r.title)}</option>' for r in rows
+    )
+    rows_html = "".join(
+        f'<tr><td>{"&nbsp;&nbsp;&larr; " if r.parent_id else ""}'
+        f'<a href="/admin/libraries/{r.id}">{escape(r.title)}</a></td>'
+        f"<td>{escape(r.parent_title or '')}</td><td>{r.work_count}</td></tr>"
+        for r in rows
+    )
+    body = f"""
+    <h1>المكتبات</h1>
+    <table><tr><th>الاسم</th><th>المكتبة الأم</th><th>عدد العناوين</th></tr>
+      {rows_html or '<tr><td colspan="3">لا توجد مكتبات بعد</td></tr>'}
+    </table>
+    <h2>إضافة مكتبة جديدة</h2>
+    <form method="post" action="/admin/libraries/new">
+      <div class="row"><label>الاسم</label>
+        <input name="title" required></div>
+      <div class="row"><label>مكتبة أم (اختياري)</label>
+        <select name="parent_id"><option value="">-- بلا --</option>{parent_options}</select></div>
+      <button type="submit">إضافة</button>
+    </form>
+    """
+    return _render("المكتبات", body)
+
+
+@router.post("/libraries/new")
+async def library_create(
+    title: str = Form(...),
+    parent_id: str = Form(""),
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(_require_admin),
+) -> RedirectResponse:
+    parent = int(parent_id) if parent_id.strip().isdigit() else None
+    await session.execute(
+        text("INSERT INTO libraries (title, parent_id) VALUES (:title, :parent)"),
+        {"title": title, "parent": parent},
+    )
+    await session.commit()
+    return RedirectResponse("/admin/libraries", status_code=303)
+
+
+@router.get("/libraries/{library_id:int}", response_class=HTMLResponse)
+async def library_detail(
+    library_id: int,
+    page: int = 1,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(_require_admin),
+) -> HTMLResponse:
+    library = (await session.execute(
+        text("SELECT title FROM libraries WHERE id = :id"), {"id": library_id}
+    )).first()
+    if library is None:
+        raise HTTPException(status_code=404, detail="Unknown library")
+
+    page = max(1, page)
+    offset = (page - 1) * _PAGE_SIZE
+    rows = (await session.execute(
+        text("""
+            SELECT w.id AS work_id, w.title, a.name AS author, count(b.id) AS book_count
+            FROM works w
+            JOIN library_works lw ON lw.work_id = w.id AND lw.library_id = :lid
+            LEFT JOIN authors a ON a.id = w.author_id
+            LEFT JOIN books b ON b.work_id = w.id
+            GROUP BY w.id, w.title, a.name
+            ORDER BY w.title
+            LIMIT :limit OFFSET :offset
+        """),
+        {"lid": library_id, "limit": _PAGE_SIZE, "offset": offset},
+    )).all()
+
+    rows_html = "".join(
+        f"<tr><td>{escape(r.title)}</td><td>{escape(r.author or '')}</td>"
+        f"<td>{r.book_count}</td>"
+        f'<td><a href="/admin/works/{r.work_id}">عرض المجلدات</a></td></tr>'
+        for r in rows
+    )
+    pager = (
+        f'<div class="pager">'
+        + (f'<a href="?page={page - 1}">السابق</a>' if page > 1 else "")
+        + (f'<a href="?page={page + 1}">التالي</a>' if len(rows) == _PAGE_SIZE else "")
+        + "</div>"
+    )
+    body = (
+        f"<h1>{escape(library.title)}</h1>"
+        "<table><tr><th>العنوان</th><th>المؤلف</th><th>عدد المجلدات</th><th></th></tr>"
+        f"{rows_html or '<tr><td colspan=4>لا توجد عناوين في هذه المكتبة بعد</td></tr>'}</table>{pager}"
+    )
+    return _render(library.title, body)
+
+
 # ── Work detail: its volumes, each linking to the edit page ─────────────────
 
 
@@ -332,6 +440,42 @@ async def _set_work_subjects(session: AsyncSession, work_id: int, subject_ids: l
         )
 
 
+async def _library_checkboxes(session: AsyncSession, selected: set[int]) -> str:
+    """Same shape as _subject_checkboxes, but for the independent, open-ended library
+    system -- a work's libraries have nothing to do with its subjects."""
+    rows = (await session.execute(
+        text("SELECT id, title FROM libraries ORDER BY parent_id NULLS FIRST, sort_order")
+    )).all()
+    if not rows:
+        return "<p><small>لا توجد مكتبات بعد -- <a href=\"/admin/libraries\">أضف واحدة</a></small></p>"
+    return "".join(
+        f'<label class="checkbox-row"><input type="checkbox" name="library" '
+        f'value="{r.id}"{" checked" if r.id in selected else ""}> '
+        f"{escape(r.title)}</label>"
+        for r in rows
+    )
+
+
+async def _work_library_ids(session: AsyncSession, work_id: int) -> set[int]:
+    rows = (await session.execute(
+        text("SELECT library_id FROM library_works WHERE work_id = :wid"), {"wid": work_id}
+    )).scalars().all()
+    return set(rows)
+
+
+async def _set_work_libraries(session: AsyncSession, work_id: int, library_ids: list[int]) -> None:
+    """Replace a work's whole library set with `library_ids` -- same delete-then-
+    re-insert approach as _set_work_subjects, for the same reason."""
+    await session.execute(
+        text("DELETE FROM library_works WHERE work_id = :wid"), {"wid": work_id}
+    )
+    if library_ids:
+        await session.execute(
+            text("INSERT INTO library_works (work_id, library_id) VALUES (:wid, :lid)"),
+            [{"wid": work_id, "lid": lid} for lid in dict.fromkeys(library_ids)],
+        )
+
+
 @router.get("/books/{book_id:int}", response_class=HTMLResponse)
 async def book_edit_form(
     book_id: int,
@@ -355,6 +499,8 @@ async def book_edit_form(
 
     selected = await _work_subject_ids(session, row.work_id)
     options = await _subject_checkboxes(session, selected)
+    selected_libraries = await _work_library_ids(session, row.work_id)
+    library_options = await _library_checkboxes(session, selected_libraries)
     banner = _msg("تم الحفظ", True) if saved else ""
     body = f"""
     {banner}
@@ -367,6 +513,8 @@ async def book_edit_form(
         <input name="author" value="{escape(row.author or '')}"></div>
       <div class="row"><label>التصنيف (يطبق على كل مجلدات هذا العنوان -- يمكن اختيار أكثر من واحد)</label>
         <div class="checkbox-group">{options}</div></div>
+      <div class="row"><label>المكتبات (مستقلة عن التصنيف -- <a href="/admin/libraries">إدارة المكتبات</a>)</label>
+        <div class="checkbox-group">{library_options}</div></div>
       <div class="row"><label>رقم المجلد</label>
         <input name="volume" type="number" value="{row.volume or ''}"></div>
       <div class="row"><label>
@@ -388,6 +536,7 @@ async def book_edit_save(
     title: str = Form(...),
     author: str = Form(""),
     subject: list[str] = Form([]),
+    library: list[int] = Form([]),
     volume: str = Form(""),
     is_published: bool = Form(False),
     is_featured: bool = Form(False),
@@ -417,6 +566,7 @@ async def book_edit_save(
         {"feat": is_featured, "wid": exists},
     )
     await _set_work_subjects(session, exists, subject)
+    await _set_work_libraries(session, exists, library)
     await session.commit()
     return RedirectResponse(f"/admin/books/{book_id}?saved=1", status_code=303)
 

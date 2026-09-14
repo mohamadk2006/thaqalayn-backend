@@ -26,7 +26,7 @@ from pathlib import Path
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.schemas.catalog import SubjectOut
+from app.schemas.catalog import LibraryOut, SubjectOut
 from app.schemas.search import SearchHit
 from app.services.arabic import find_original_match, normalize
 from app.services.paging import page_text_and_offsets
@@ -136,6 +136,13 @@ _SEARCH_SQL_TAIL = f"""
         (SELECT json_agg(json_build_object('id', s.id, 'title', s.title) ORDER BY s.sort_order)
          FROM work_subjects ws JOIN subjects s ON s.id = ws.subject_id
          WHERE ws.work_id = w.id) AS subjects_json,
+        -- Same correlated-subquery reasoning as subjects_json, for the independent
+        -- library system (see app.models.library.Library) -- a work can belong to any
+        -- number of libraries regardless of its subjects.
+        (SELECT json_agg(json_build_object('id', lib.id, 'title', lib.title,
+                                            'parentId', lib.parent_id) ORDER BY lib.sort_order)
+         FROM library_works lw JOIN libraries lib ON lib.id = lw.library_id
+         WHERE lw.work_id = w.id) AS libraries_json,
         sec.title AS section_title, c.page_number, c.sequence,
         c.score,
         count(*) OVER () AS total_count
@@ -155,6 +162,7 @@ async def search(
     limit: int,
     books_root: Path,
     subject_ids: list[str] | None = None,
+    library_ids: list[int] | None = None,
     languages: list[str] | None = None,
     author_ids: list[int] | None = None,
     author_names: list[str] | None = None,
@@ -180,6 +188,13 @@ async def search(
         )
         params["subject_ids"] = subject_ids
         expanding.append("subject_ids")
+    if library_ids:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM library_works lw "
+            "WHERE lw.work_id = w.id AND lw.library_id IN :library_ids)"
+        )
+        params["library_ids"] = library_ids
+        expanding.append("library_ids")
     if languages:
         conditions.append("b.language_code IN :languages")
         params["languages"] = languages
@@ -249,6 +264,9 @@ async def search(
         subjects_raw = row.subjects_json
         if isinstance(subjects_raw, str):
             subjects_raw = json.loads(subjects_raw)
+        libraries_raw = row.libraries_json
+        if isinstance(libraries_raw, str):
+            libraries_raw = json.loads(libraries_raw)
         hits.append(
             SearchHit(
                 bookId=str(row.book_id),
@@ -258,6 +276,13 @@ async def search(
                 author=row.author or "",
                 volume=row.volume,
                 subjects=[SubjectOut(**s) for s in (subjects_raw or [])],
+                libraries=[
+                    LibraryOut(
+                        id=str(lib["id"]), title=lib["title"],
+                        parentId=str(lib["parentId"]) if lib["parentId"] is not None else None,
+                    )
+                    for lib in (libraries_raw or [])
+                ],
                 sectionTitle=row.section_title,
                 page=row.page_number,
                 snippet=snippet,

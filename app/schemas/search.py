@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from app.schemas.catalog import SubjectOut
+from app.schemas.catalog import LibraryOut, SubjectOut
 
 
 class SearchHit(BaseModel):
@@ -21,6 +21,7 @@ class SearchHit(BaseModel):
     author: str
     volume: int | None
     subjects: list[SubjectOut]  # a work may belong to more than one of the 39 categories
+    libraries: list[LibraryOut]  # independent of subjects -- see app.models.library.Library
     sectionTitle: str | None  # None when the source has no headings at all
     # A string, not an int: v2 page numbers include front matter's "0.1".."0.n" labels
     # and are not guaranteed unique within a book — see Page in app/models/library.py.

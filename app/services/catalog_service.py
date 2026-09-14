@@ -12,11 +12,12 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
-from app.models import Author, Book, Language, Subject, Work
+from app.models import Author, Book, Language, Library, Subject, Work
 from app.schemas.catalog import (
     AuthorOut,
     BookOut,
     LanguageOut,
+    LibraryOut,
     SubjectOut,
     WorkDetailOut,
     WorkOut,
@@ -27,6 +28,16 @@ def _subjects_out(work: Work | None) -> list[SubjectOut]:
     if work is None:
         return []
     return [SubjectOut(id=s.id, title=s.title) for s in work.subjects]
+
+
+def _libraries_out(work: Work | None) -> list[LibraryOut]:
+    if work is None:
+        return []
+    return [
+        LibraryOut(id=str(lib.id), title=lib.title,
+                    parentId=str(lib.parent_id) if lib.parent_id else None)
+        for lib in work.libraries
+    ]
 
 
 def _book_out(book: Book, work_title: str, collection_raw: str | None) -> BookOut:
@@ -40,6 +51,7 @@ def _book_out(book: Book, work_title: str, collection_raw: str | None) -> BookOu
         authorDeath=book.author.death_label if book.author else None,
         description=book.description,
         subjects=_subjects_out(book.work),
+        libraries=_libraries_out(book.work),
         language=book.language_code,
         publisher=book.publisher,
         shamelaCollection=collection_raw,
@@ -60,6 +72,7 @@ def _work_out(work: Work, volume_count: int, total_bytes: int,
         author=work.author.name if work.author else "",
         authorDeath=work.author.death_label if work.author else None,
         subjects=_subjects_out(work),
+        libraries=_libraries_out(work),
         language=work.language_code,
         volumeCount=volume_count,
         totalSizeBytes=total_bytes,
@@ -74,6 +87,7 @@ async def list_works(
     page: int,
     limit: int,
     subject_id: str | None = None,
+    library_id: int | None = None,
     language: str | None = None,
     author_id: int | None = None,
     featured: bool | None = None,
@@ -107,6 +121,8 @@ async def list_works(
     )
     if subject_id:
         query = query.where(Work.subjects.any(Subject.id == subject_id))
+    if library_id:
+        query = query.where(Work.libraries.any(Library.id == library_id))
     if language:
         query = query.where(Work.language_code == language)
     if author_id:
@@ -164,6 +180,7 @@ async def list_books(
     page: int,
     limit: int,
     subject_id: str | None = None,
+    library_id: int | None = None,
     language: str | None = None,
     author_id: int | None = None,
     work_id: int | None = None,
@@ -184,6 +201,8 @@ async def list_books(
     )
     if subject_id:
         query = query.where(Work.subjects.any(Subject.id == subject_id))
+    if library_id:
+        query = query.where(Work.libraries.any(Library.id == library_id))
 
     total = await session.scalar(select(func.count()).select_from(query.subquery()))
     rows = (
@@ -219,6 +238,22 @@ async def list_subjects(session: AsyncSession) -> list[SubjectOut]:
     return [SubjectOut(id=s.id, title=s.title) for s in rows]
 
 
+async def list_libraries(session: AsyncSession) -> list[LibraryOut]:
+    """Flat list, ordered so a parent always precedes its own children (parents sort
+    before children at the same sort_order, since NULLS come first by default) -- the
+    client groups by parentId to build whatever tree it wants to display."""
+    rows = (
+        await session.execute(
+            select(Library).order_by(Library.parent_id.nulls_first(), Library.sort_order)
+        )
+    ).scalars().all()
+    return [
+        LibraryOut(id=str(lib.id), title=lib.title,
+                    parentId=str(lib.parent_id) if lib.parent_id else None)
+        for lib in rows
+    ]
+
+
 async def list_languages(session: AsyncSession) -> list[LanguageOut]:
     rows = (await session.execute(select(Language).order_by(Language.code))).scalars().all()
     return [LanguageOut(code=lang.code, name=lang.name) for lang in rows]
@@ -227,17 +262,21 @@ async def list_languages(session: AsyncSession) -> list[LanguageOut]:
 # ── internals ──────────────────────────────────────────────────────────────────────
 
 def _work_load_options():
-    # subjects is to-many: selectinload issues its own separate query instead of
-    # joining, so it never multiplies rows in a query that also paginates with
-    # LIMIT/OFFSET the way a joinedload on a collection would.
-    return [joinedload(Work.author), selectinload(Work.subjects)]
+    # subjects/libraries are both to-many: selectinload issues its own separate query
+    # instead of joining, so it never multiplies rows in a query that also paginates
+    # with LIMIT/OFFSET the way a joinedload on a collection would.
+    return [joinedload(Work.author), selectinload(Work.subjects), selectinload(Work.libraries)]
 
 
 def _book_load_options():
     """Every field _book_out reads off `book.author` or `book.work` (including
-    `book.work.subjects`) must be eager-loaded here — there is no other query path that
-    populates them."""
-    return [joinedload(Book.author), joinedload(Book.work).selectinload(Work.subjects)]
+    `book.work.subjects`/`book.work.libraries`) must be eager-loaded here — there is no
+    other query path that populates them."""
+    return [
+        joinedload(Book.author),
+        joinedload(Book.work).selectinload(Work.subjects),
+        joinedload(Book.work).selectinload(Work.libraries),
+    ]
 
 
 async def _book_collection_raw(session: AsyncSession, book_ids: list[int]) -> dict[int, str]:

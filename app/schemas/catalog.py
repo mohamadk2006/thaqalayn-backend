@@ -50,6 +50,18 @@ class LanguageOut(BaseModel):
     name: str
 
 
+class LibraryOut(BaseModel):
+    """A curated grouping (see app.models.library.Library) -- independent of `subjects`.
+    Open-ended and admin-creatable, unlike the fixed 39 subjects. `parentId` supports
+    optional nesting; a flat list (not a tree) is returned from GET /api/libraries, the
+    same choice already made for subjects -- the client groups by parentId itself."""
+
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    title: str
+    parentId: str | None = None
+
+
 class BookOut(BaseModel):
     """One volume — the downloadable unit. Matches CatalogBook in the iOS brief."""
 
@@ -62,6 +74,7 @@ class BookOut(BaseModel):
     authorDeath: str | None
     description: str | None
     subjects: list[SubjectOut]
+    libraries: list[LibraryOut]
     language: str | None
     publisher: str | None
     shamelaCollection: str | None
@@ -84,6 +97,7 @@ class WorkOut(BaseModel):
     author: str
     authorDeath: str | None
     subjects: list[SubjectOut]
+    libraries: list[LibraryOut]
     language: str | None
     volumeCount: int
     totalSizeBytes: int

@@ -55,6 +55,13 @@ async def imported(tmp_path: Path):
             INSERT INTO work_subjects (work_id, subject_id)
             SELECT DISTINCT work_id, 'مصادر الحديث الشيعية - القسم العام' FROM books WHERE id = :i
         """), {"i": int(BOOK_ID)})
+        library_id = await session.scalar(
+            text("INSERT INTO libraries (title) VALUES ('مكتبة اختبار البحث') RETURNING id")
+        )
+        await session.execute(text("""
+            INSERT INTO library_works (library_id, work_id)
+            SELECT :lid, work_id FROM books WHERE id = :i
+        """), {"lid": library_id, "i": int(BOOK_ID)})
         await session.commit()
 
     app = create_app()
@@ -79,6 +86,7 @@ async def imported(tmp_path: Path):
         await session.execute(
             text("DELETE FROM authors WHERE name_norm = 'مؤلف الاختبار الثالث'")
         )
+        await session.execute(text("DELETE FROM libraries WHERE title = 'مكتبة اختبار البحث'"))
         await session.commit()
 
 
@@ -115,6 +123,7 @@ class TestSearchFindsUndiacriticizedQuery:
         assert hit["page"] == "1"
         assert hit["sectionTitle"] == "باب في فضل الإمام"
         assert [s["id"] for s in hit["subjects"]] == ["مصادر الحديث الشيعية - القسم العام"]
+        assert [lib["title"] for lib in hit["libraries"]] == ["مكتبة اختبار البحث"]
         assert hit["score"] > 0
 
     async def test_snippet_preserves_original_tashkeel(self, imported: AsyncClient):
@@ -174,6 +183,25 @@ class TestPaginationAndFilters:
         response = await imported.get(
             "/api/search",
             params={"q": "الامام الصادق", "work": work_id, "subject": "الطب"},
+        )
+        assert not any(h["bookId"] == BOOK_ID for h in response.json()["items"])
+
+    async def test_filters_by_library(self, imported: AsyncClient):
+        work_id = await _work_id(imported)
+        libraries = (await imported.get("/api/libraries")).json()
+        library_id = next(
+            lib["id"] for lib in libraries if lib["title"] == "مكتبة اختبار البحث"
+        )
+
+        response = await imported.get(
+            "/api/search",
+            params={"q": "الامام الصادق", "work": work_id, "library": library_id},
+        )
+        assert any(h["bookId"] == BOOK_ID for h in response.json()["items"])
+
+        response = await imported.get(
+            "/api/search",
+            params={"q": "الامام الصادق", "work": work_id, "library": 999999999},
         )
         assert not any(h["bookId"] == BOOK_ID for h in response.json()["items"])
 

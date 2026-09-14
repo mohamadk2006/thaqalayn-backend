@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.schemas.catalog import AuthorOut, LanguageOut, SubjectOut
+from app.schemas.catalog import AuthorOut, LanguageOut, LibraryOut, SubjectOut
 from app.services import catalog_service
 
 router = APIRouter(tags=["metadata"])
@@ -25,6 +25,11 @@ async def list_authors(session: AsyncSession = Depends(get_session)) -> list[Aut
 @router.get("/categories", response_model=list[SubjectOut])
 async def list_categories(session: AsyncSession = Depends(get_session)) -> list[SubjectOut]:
     return await catalog_service.list_subjects(session)
+
+
+@router.get("/libraries", response_model=list[LibraryOut])
+async def list_libraries(session: AsyncSession = Depends(get_session)) -> list[LibraryOut]:
+    return await catalog_service.list_libraries(session)
 
 
 @router.get("/languages", response_model=list[LanguageOut])

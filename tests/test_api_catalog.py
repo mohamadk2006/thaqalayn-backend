@@ -89,6 +89,16 @@ async def imported(tmp_path: Path):
             SELECT DISTINCT b.work_id, 'فقه المذهب الحنفي'
             FROM books b WHERE b.id = :b1
         """), {"b1": int(BOOK_B1)})
+
+        # A library is independent of subjects -- assign BOOK_A's work to one, to
+        # confirm libraries surface correctly and don't interfere with subject filters.
+        library_id = await session.scalar(
+            text("INSERT INTO libraries (title) VALUES ('مكتبة الاختبار') RETURNING id")
+        )
+        await session.execute(text("""
+            INSERT INTO library_works (library_id, work_id)
+            SELECT :lid, b.work_id FROM books b WHERE b.id = :a
+        """), {"lid": library_id, "a": int(BOOK_A)})
         await session.commit()
 
     app = create_app()
@@ -118,6 +128,7 @@ async def imported(tmp_path: Path):
         await session.execute(
             text("DELETE FROM authors WHERE name_norm IN ('مؤلف الاختبار', 'مؤلف اخر')")
         )
+        await session.execute(text("DELETE FROM libraries WHERE title = 'مكتبة الاختبار'"))
         await session.commit()
 
 
@@ -150,6 +161,18 @@ class TestBooksList:
         response = await imported.get("/api/books", params={"limit": 1000})
         assert response.status_code == 422
 
+    async def test_filters_by_library_independently_of_subject(self, imported: AsyncClient):
+        """A library is orthogonal to subject: BOOK_A is filed under a subject BOOK_B1
+        isn't, and joins a library BOOK_B1 doesn't -- each filter must narrow on its own
+        axis, not accidentally couple the two."""
+        libraries = (await imported.get("/api/libraries")).json()
+        library_id = next(lib["id"] for lib in libraries if lib["title"] == "مكتبة الاختبار")
+
+        response = await imported.get("/api/books", params={"library": library_id})
+        book_ids = {item["bookId"] for item in response.json()["items"]}
+        assert BOOK_A in book_ids
+        assert BOOK_B1 not in book_ids and BOOK_B2 not in book_ids
+
 
 class TestBookDetail:
     async def test_returns_full_contract_shape(self, imported: AsyncClient):
@@ -159,6 +182,7 @@ class TestBookDetail:
         assert body["bookId"] == BOOK_A
         assert body["title"] == "كتاب الاختبار الأول"
         assert [s["id"] for s in body["subjects"]] == ["مصادر التفسير عند الشيعة"]
+        assert [lib["title"] for lib in body["libraries"]] == ["مكتبة الاختبار"]
         assert body["volume"] is None  # no جزء tag on this source
 
     async def test_unknown_id_is_404(self, imported: AsyncClient):
@@ -247,6 +271,24 @@ class TestDownload:
                     {"p": f"{BOOK_A}.json", "i": int(BOOK_A)},
                 )
                 await session.commit()
+
+
+class TestLibraries:
+    async def test_lists_created_library(self, imported: AsyncClient):
+        response = await imported.get("/api/libraries")
+        assert response.status_code == 200
+        titles = {lib["title"] for lib in response.json()}
+        assert "مكتبة الاختبار" in titles
+
+    async def test_work_shows_its_library_membership(self, imported: AsyncClient):
+        detail = await imported.get(f"/api/books/{BOOK_A}")
+        work_id = detail.json()["workId"]
+
+        response = await imported.get(f"/api/works/{work_id}")
+        assert [lib["title"] for lib in response.json()["libraries"]] == ["مكتبة الاختبار"]
+        # B1's work never joined the library -- must not pick it up by accident.
+        other_detail = await imported.get(f"/api/books/{BOOK_B1}")
+        assert other_detail.json()["libraries"] == []
 
 
 class TestMetadata:

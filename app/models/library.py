@@ -123,6 +123,53 @@ class WorkSubject(Base):
     __table_args__ = (Index("ix_work_subjects_subject", "subject_id"),)
 
 
+class Library(Base):
+    """A named, curated grouping of works -- e.g. "المكتبة الحسينية" -- completely
+    orthogonal to Subject. A work's subject classification (its genre, from the fixed
+    39-row set) and its library membership are independent: a work can belong to any
+    number of libraries regardless of which subjects it's already filed under, and
+    joining a library never changes or replaces its subjects.
+
+    Unlike Subject's closed, hand-enumerated 39 rows, libraries are open-ended and
+    admin-creatable at any time, so `id` is a normal auto-increment integer rather than
+    the string-as-id pattern Subject uses (a library's title can be corrected later
+    without needing to touch every foreign key pointing at it).
+
+    `parent_id` supports nesting a library under another one (e.g. a future sub-library
+    inside "المكتبة الحسينية") -- optional and unused by default; most libraries have no
+    parent. Nesting is exposed as a flat list with `parentId` rather than a nested tree,
+    the same choice already made for Subject: the client groups by parent itself, which
+    stays simple regardless of how deep nesting eventually goes.
+    """
+
+    __tablename__ = "libraries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("libraries.id", ondelete="SET NULL"))
+    sort_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
+    __table_args__ = (Index("ix_libraries_parent", "parent_id"),)
+
+
+class LibraryWork(Base):
+    """One (library, work) membership -- the many-to-many a work's library list is built
+    from, the same shape as WorkSubject."""
+
+    __tablename__ = "library_works"
+
+    library_id: Mapped[int] = mapped_column(
+        ForeignKey("libraries.id", ondelete="CASCADE"), primary_key=True
+    )
+    work_id: Mapped[int] = mapped_column(
+        ForeignKey("works.id", ondelete="CASCADE"), primary_key=True
+    )
+
+    __table_args__ = (Index("ix_library_works_work", "work_id"),)
+
+
 class ShamelaCollection(Base):
     """One row per distinct `< مجموعة >` string in the sources (530 distinct raw values
     found by the full scan: orthographic variants like عربى vs عربي, separator variants,
@@ -190,6 +237,9 @@ class Work(Base):
     # A work belongs to zero or more of the 39 subjects (see WorkSubject) -- zero is a
     # real, valid state (unclassified), not an error.
     subjects: Mapped[list[Subject]] = relationship(secondary="work_subjects", order_by="Subject.sort_order")
+    # A work belongs to zero or more libraries (see LibraryWork) -- independent of, and
+    # additive to, its subjects.
+    libraries: Mapped[list[Library]] = relationship(secondary="library_works", order_by="Library.sort_order")
 
     __table_args__ = (
         UniqueConstraint(
