@@ -226,6 +226,11 @@ class Work(Base):
     is_featured: Mapped[bool] = mapped_column(
         nullable=False, default=False, server_default="false"
     )
+    # Rank within the featured set (lower first) -- only meaningful while is_featured is
+    # true, set from the admin panel's reorder view.
+    featured_sort_order: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     # Set by the importer when the (title, author) grouping heuristic produced something
     # suspicious — a volume sequence with gaps or duplicates. Surfaces a review list

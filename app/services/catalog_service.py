@@ -132,9 +132,14 @@ async def list_works(
 
     total = await session.scalar(select(func.count()).select_from(query.subquery()))
 
+    # The featured shelf has an explicit, admin-curated order; everywhere else stays
+    # alphabetical, since featured_sort_order is meaningless outside that set.
+    order = (
+        (Work.featured_sort_order, Work.title_norm) if featured else (Work.title_norm,)
+    )
     rows = (
         await session.execute(
-            query.order_by(Work.title_norm).offset((page - 1) * limit).limit(limit)
+            query.order_by(*order).offset((page - 1) * limit).limit(limit)
         )
     ).all()
 

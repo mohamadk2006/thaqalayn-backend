@@ -88,7 +88,10 @@ _PAGE = """<!doctype html>
 </head>
 <body>
 <nav><a href="/admin">لوحة التحكم</a> &nbsp;|&nbsp; <a href="/admin/libraries">المكتبات</a>
-&nbsp;|&nbsp; <a href="/admin/books/new">إضافة كتاب</a></nav>
+&nbsp;|&nbsp; <a href="/admin/books/new">إضافة كتاب</a>
+&nbsp;|&nbsp; <form method="get" action="/admin/search" style="display:inline">
+<input name="q" placeholder="بحث بالعنوان أو المؤلف..." style="width:16rem; display:inline; margin:0">
+</form></nav>
 {body}
 </body>
 </html>"""
@@ -187,20 +190,69 @@ async def featured_list(
         LEFT JOIN work_subjects ws ON ws.work_id = w.id
         LEFT JOIN subjects s ON s.id = ws.subject_id
         WHERE w.is_featured
-        GROUP BY w.id, w.title, a.name
-        ORDER BY w.title_norm
+        GROUP BY w.id, w.title, a.name, w.featured_sort_order
+        ORDER BY w.featured_sort_order, w.title_norm
     """))).all()
+    last = len(rows) - 1
+
+    def _move_form(work_id: int, direction: str, disabled: bool) -> str:
+        if disabled:
+            return f'<button type="button" disabled>{"▲" if direction == "up" else "▼"}</button>'
+        return (
+            f'<form method="post" action="/admin/featured/{work_id}/move" style="display:inline; '
+            f'background:none; border:none; padding:0; margin:0">'
+            f'<input type="hidden" name="direction" value="{direction}">'
+            f'<button type="submit">{"▲" if direction == "up" else "▼"}</button></form>'
+        )
+
     rows_html = "".join(
-        f'<tr><td><a href="/admin/works/{r.work_id}">{escape(r.title)}</a></td>'
+        "<tr>"
+        f'<td>{_move_form(r.work_id, "up", i == 0)} {_move_form(r.work_id, "down", i == last)}</td>'
+        f'<td><a href="/admin/works/{r.work_id}">{escape(r.title)}</a></td>'
         f"<td>{escape(r.author or '')}</td><td>{escape(r.subject_titles or '')}</td></tr>"
-        for r in rows
+        for i, r in enumerate(rows)
     )
     body = (
         f"<h1>الكتب المختارة ({len(rows)})</h1>"
-        "<table><tr><th>العنوان</th><th>المؤلف</th><th>التصنيف</th></tr>"
+        "<p><small>يحدد هذا الترتيب تسلسل ظهور الكتب في واجهة \"المختارات\" داخل التطبيق.</small></p>"
+        "<table><tr><th>الترتيب</th><th>العنوان</th><th>المؤلف</th><th>التصنيف</th></tr>"
         f"{rows_html}</table>"
     )
     return _render("الكتب المختارة", body)
+
+
+@router.post("/featured/{work_id:int}/move")
+async def featured_move(
+    work_id: int,
+    direction: str = Form(...),
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(_require_admin),
+) -> RedirectResponse:
+    """Swap this work's featured_sort_order with its immediate neighbor in the current
+    featured ordering -- simplest reorder primitive that needs no drag-and-drop JS, and
+    is naturally idempotent-safe against a double click (a neighbor missing at either
+    end is just a no-op)."""
+    rows = (await session.execute(text("""
+        SELECT id, featured_sort_order FROM works
+        WHERE is_featured ORDER BY featured_sort_order, title_norm
+    """))).all()
+    ids = [r.id for r in rows]
+    if work_id not in ids:
+        raise HTTPException(status_code=404, detail="Not in featured set")
+
+    idx = ids.index(work_id)
+    neighbor_idx = idx - 1 if direction == "up" else idx + 1
+    if 0 <= neighbor_idx < len(rows):
+        a, b = rows[idx], rows[neighbor_idx]
+        await session.execute(
+            text("UPDATE works SET featured_sort_order = :order WHERE id = :id"),
+            [
+                {"id": a.id, "order": b.featured_sort_order},
+                {"id": b.id, "order": a.featured_sort_order},
+            ],
+        )
+        await session.commit()
+    return RedirectResponse("/admin/featured", status_code=303)
 
 
 # ── Subject detail: paginated works list ─────────────────────────────────────
@@ -401,6 +453,50 @@ async def work_detail(
     return _render(work.title, body)
 
 
+# ── Search by title/author ────────────────────────────────────────────────────
+
+
+@router.get("/search", response_class=HTMLResponse)
+async def search_works(
+    q: str = "",
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(_require_admin),
+) -> HTMLResponse:
+    q = q.strip()
+    if not q:
+        return _render("بحث", "<h1>بحث</h1><p>اكتب عنوان كتاب أو اسم مؤلف للبحث.</p>")
+
+    # Escaped so a literal % or _ typed by the admin can't act as a LIKE wildcard.
+    pattern = "%" + normalize(q).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    rows = (await session.execute(
+        text("""
+            SELECT w.id AS work_id, w.title, a.name AS author,
+                   count(b.id) AS book_count
+            FROM works w
+            LEFT JOIN authors a ON a.id = w.author_id
+            LEFT JOIN books b ON b.work_id = w.id
+            WHERE w.title_norm ILIKE :pattern ESCAPE '\\'
+               OR a.name_norm ILIKE :pattern ESCAPE '\\'
+            GROUP BY w.id, w.title, a.name
+            ORDER BY w.title
+            LIMIT 200
+        """),
+        {"pattern": pattern},
+    )).all()
+
+    rows_html = "".join(
+        f'<tr><td><a href="/admin/works/{r.work_id}">{escape(r.title)}</a></td>'
+        f"<td>{escape(r.author or '')}</td><td>{r.book_count}</td></tr>"
+        for r in rows
+    )
+    body = (
+        f"<h1>نتائج البحث عن &laquo;{escape(q)}&raquo; ({len(rows)})</h1>"
+        + ("<table><tr><th>العنوان</th><th>المؤلف</th><th>عدد المجلدات</th></tr>"
+           f"{rows_html}</table>" if rows else "<p>لا توجد نتائج.</p>")
+    )
+    return _render(f"بحث: {q}", body)
+
+
 # ── Book edit ────────────────────────────────────────────────────────────────
 
 
@@ -561,8 +657,18 @@ async def book_edit_save(
         {"title": title, "norm": normalize(title), "author": author_id,
          "vol": volume_int, "pub": is_published, "id": book_id},
     )
+    # Newly featured (was false, now true) goes to the end of the featured order,
+    # rather than defaulting to 0 and colliding with everything else already there.
     await session.execute(
-        text("UPDATE works SET is_featured = :feat WHERE id = :wid"),
+        text("""
+            UPDATE works SET is_featured = :feat,
+                featured_sort_order = CASE
+                    WHEN :feat AND NOT is_featured
+                    THEN (SELECT COALESCE(MAX(featured_sort_order), 0) + 1 FROM works WHERE is_featured)
+                    ELSE featured_sort_order
+                END
+            WHERE id = :wid
+        """),
         {"feat": is_featured, "wid": exists},
     )
     await _set_work_subjects(session, exists, subject)
