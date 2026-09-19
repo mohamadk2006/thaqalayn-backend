@@ -285,6 +285,7 @@ async def search(
                 ],
                 sectionTitle=row.section_title,
                 page=row.page_number,
+                pageSequence=row.sequence,
                 snippet=snippet,
                 matchStart=match_start,
                 matchEnd=match_end,

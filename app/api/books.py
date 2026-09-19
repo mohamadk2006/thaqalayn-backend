@@ -1,4 +1,5 @@
-"""GET /api/books, /api/books/{id}, /api/books/{id}/download, /api/books/{id}/cover."""
+"""GET /api/books, /api/books/{id}, /api/books/{id}/download, /api/books/{id}/cover,
+/api/books/{id}/toc, /api/books/{id}/pages/{sequence}."""
 
 from __future__ import annotations
 
@@ -13,7 +14,8 @@ from app.config import Settings, get_settings
 from app.db import get_session
 from app.models import Book
 from app.schemas.catalog import BookOut, PageEnvelope
-from app.services import catalog_service
+from app.schemas.reader import PageResponse, TocResponse
+from app.services import catalog_service, reader_service
 
 router = APIRouter(tags=["books"])
 
@@ -107,3 +109,55 @@ async def download_cover(
         raise HTTPException(404, detail="cover file missing on disk")
 
     return FileResponse(path)
+
+
+async def _load_published_book(session: AsyncSession, settings: Settings, book_id: int):
+    row = (
+        await session.execute(
+            select(Book.content_path, Book.content_version, Book.page_count).where(
+                Book.id == book_id, Book.is_published.is_(True)
+            )
+        )
+    ).first()
+    if row is None or not row.content_path:
+        raise HTTPException(404, detail="book not found")
+    path = _resolve_under_root(settings.books_root, row.content_path)
+    parsed = await reader_service.load_book(path)
+    if parsed is None:
+        raise HTTPException(404, detail="content file missing or unreadable on disk")
+    return row, parsed
+
+
+@router.get("/books/{book_id}/pages/{sequence}", response_model=PageResponse)
+async def get_book_page(
+    book_id: int,
+    sequence: int,
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> PageResponse:
+    """One page of a book, for reading without downloading it. `sequence` is the page's
+    position in the book (the `sequence` field of a search hit / of the book JSON), not
+    its printed label, which is not unique within a book."""
+    row, parsed = await _load_published_book(session, settings, book_id)
+    found = reader_service.get_page(parsed, sequence)
+    if found is None:
+        raise HTTPException(404, detail="page not found")
+    page, prev_seq, next_seq, section_title = found
+    return PageResponse(
+        bookId=str(book_id), contentVersion=row.content_version,
+        pageCount=len(parsed.pages), page=page, sectionTitle=section_title,
+        prevSequence=prev_seq, nextSequence=next_seq,
+    )
+
+
+@router.get("/books/{book_id}/toc", response_model=TocResponse)
+async def get_book_toc(
+    book_id: int,
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> TocResponse:
+    row, parsed = await _load_published_book(session, settings, book_id)
+    return TocResponse(
+        bookId=str(book_id), contentVersion=row.content_version,
+        pageCount=len(parsed.pages), entries=reader_service.get_toc(parsed),
+    )

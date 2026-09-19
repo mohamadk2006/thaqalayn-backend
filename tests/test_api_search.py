@@ -121,6 +121,7 @@ class TestSearchFindsUndiacriticizedQuery:
         assert hit["workTitle"] == "كتاب اختبار البحث"
         assert hit["author"] == "مؤلف الاختبار الثالث"
         assert hit["page"] == "1"
+        assert hit["pageSequence"] == 1
         assert hit["sectionTitle"] == "باب في فضل الإمام"
         assert [s["id"] for s in hit["subjects"]] == ["مصادر الحديث الشيعية - القسم العام"]
         assert [lib["title"] for lib in hit["libraries"]] == ["مكتبة اختبار البحث"]
@@ -231,3 +232,61 @@ class TestValidation:
         assert response.status_code == 200
         assert response.json()["items"] == []
         assert response.json()["total"] == 0
+
+
+class TestReadingWithoutDownload:
+    async def test_page_endpoint_returns_page_with_neighbours(self, imported: AsyncClient):
+        response = await imported.get(f"/api/books/{BOOK_ID}/pages/1")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["bookId"] == BOOK_ID
+        assert body["pageCount"] == 2
+        assert body["prevSequence"] is None
+        assert body["nextSequence"] == 2
+        assert body["sectionTitle"] == "باب في فضل الإمام"
+        assert body["page"]["sequence"] == 1
+        texts = [b["text"] for b in body["page"]["blocks"]]
+        assert any("الصادق" in t for t in texts)
+
+    async def test_last_page_has_no_next(self, imported: AsyncClient):
+        body = (await imported.get(f"/api/books/{BOOK_ID}/pages/2")).json()
+        assert body["prevSequence"] == 1
+        assert body["nextSequence"] is None
+
+    async def test_page_matches_the_downloaded_json(self, imported: AsyncClient):
+        downloaded = (await imported.get(f"/api/books/{BOOK_ID}/download")).json()
+        served = (await imported.get(f"/api/books/{BOOK_ID}/pages/1")).json()["page"]
+        assert served == next(p for p in downloaded["pages"] if p["sequence"] == 1)
+
+    async def test_search_hit_sequence_resolves_to_its_page(self, imported: AsyncClient):
+        work_id = await _work_id(imported)
+        hit = next(
+            h for h in (await imported.get(
+                "/api/search", params={"q": "الامام الصادق", "work": work_id}
+            )).json()["items"] if h["bookId"] == BOOK_ID
+        )
+        page = (await imported.get(
+            f"/api/books/{BOOK_ID}/pages/{hit['pageSequence']}"
+        )).json()["page"]
+        assert page["pageNumber"] == hit["page"]
+
+    async def test_unknown_page_and_book_are_404(self, imported: AsyncClient):
+        assert (await imported.get(f"/api/books/{BOOK_ID}/pages/999")).status_code == 404
+        assert (await imported.get("/api/books/1/pages/1")).status_code in (404,)
+        assert (await imported.get("/api/books/999999999/pages/1")).status_code == 404
+
+    async def test_unpublished_book_is_not_served(self, imported: AsyncClient):
+        async with get_sessionmaker()() as session:
+            await session.execute(
+                text("UPDATE books SET is_published = false WHERE id = :i"), {"i": int(BOOK_ID)}
+            )
+            await session.commit()
+        assert (await imported.get(f"/api/books/{BOOK_ID}/pages/1")).status_code == 404
+        assert (await imported.get(f"/api/books/{BOOK_ID}/toc")).status_code == 404
+
+    async def test_toc_lists_sections_with_page_sequence(self, imported: AsyncClient):
+        body = (await imported.get(f"/api/books/{BOOK_ID}/toc")).json()
+        assert body["pageCount"] == 2
+        assert [(e["title"], e["pageSequence"]) for e in body["entries"]] == [
+            ("باب في فضل الإمام", 1)
+        ]
