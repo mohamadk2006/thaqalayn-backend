@@ -421,6 +421,8 @@ async def library_detail(
 @router.get("/works/{work_id}", response_class=HTMLResponse)
 async def work_detail(
     work_id: int,
+    ok: str | None = None,
+    err: str | None = None,
     session: AsyncSession = Depends(get_session),
     _: None = Depends(_require_admin),
 ) -> HTMLResponse:
@@ -445,10 +447,23 @@ async def work_detail(
         f'<a href="/admin/books/{r.id}/content">عرض المحتوى</a></td></tr>'
         for r in rows
     )
+    next_volume = max((r.volume or 0 for r in rows), default=0) + 1
+    banner = _msg(ok, True) if ok else (_msg(err, False) if err else "")
     body = (
-        f"<h1>{escape(work.title)}</h1>"
+        f"{banner}<h1>{escape(work.title)}</h1>"
         "<table><tr><th>المجلد</th><th>العنوان</th><th>الحالة</th><th>الصفحات</th><th></th></tr>"
         f"{rows_html}</table>"
+        "<h2>إضافة مجلد جديد من ملف JSON</h2>"
+        "<p><small>يأخذ المجلد عنوان هذا العمل ومؤلفه تلقائياً (فيُجمع معه دائماً)، ويُعطى رقماً جديداً.</small></p>"
+        '<form method="post" action="/admin/books/new/json" enctype="multipart/form-data">'
+        f'<input type="hidden" name="work_id" value="{work_id}">'
+        '<div class="row"><label>ملف .json</label>'
+        '<input name="file" type="file" accept=".json,application/json" required></div>'
+        f'<div class="row"><label>رقم المجلد</label>'
+        f'<input name="volume" type="number" min="1" value="{next_volume}" required></div>'
+        '<div class="row"><label>رقم الكتاب (اختياري -- يُخصص تلقائياً إذا ترك فارغاً)</label>'
+        '<input name="book_id" type="number"></div>'
+        '<button type="submit">رفع واستيراد</button></form>'
     )
     return _render(work.title, body)
 
@@ -948,6 +963,7 @@ async def new_book_form(
     _: None = Depends(_require_admin),
 ) -> HTMLResponse:
     options = await _subject_checkboxes(session, set())
+    library_options = await _library_checkboxes(session, set())
     banner = _msg(ok, True) if ok else (_msg(err, False) if err else "")
     body = f"""
     {banner}
@@ -958,6 +974,25 @@ async def new_book_form(
         <input name="file" type="file" accept=".abx" required></div>
       <div class="row"><label>رقم الكتاب (اختياري -- يُخصص تلقائياً إذا ترك فارغاً)</label>
         <input name="book_id" type="number"></div>
+      <button type="submit">رفع واستيراد</button>
+    </form>
+
+    <h1>رفع ملف JSON (v2)</h1>
+    <p><small>ملف كتاب جاهز بصيغة v2 (ناتج المحوّل أو محرر JSON). يمر عبر نفس التحقق والاستيراد.
+    <b>الكتاب متعدد المجلدات:</b> كل مجلد ملف JSON مستقل، بالعنوان والمؤلف نفسيهما تماماً ورقم مجلد مختلف --
+    ارفع المجلد الأول من هنا، ثم أضف بقية المجلدات من زر «إضافة مجلد جديد» في صفحة العمل
+    (يضمن تطابق العنوان والمؤلف). رقم الكتاب الموجود في الملف يُتجاهل ويُخصص رقم جديد.</small></p>
+    <form method="post" action="/admin/books/new/json" enctype="multipart/form-data">
+      <div class="row"><label>ملف .json</label>
+        <input name="file" type="file" accept=".json,application/json" required></div>
+      <div class="row"><label>رقم المجلد (اختياري -- للكتب متعددة المجلدات)</label>
+        <input name="volume" type="number" min="1"></div>
+      <div class="row"><label>رقم الكتاب (اختياري -- يُخصص تلقائياً إذا ترك فارغاً)</label>
+        <input name="book_id" type="number"></div>
+      <div class="row"><label>التصنيف (اختياري)</label>
+        <div class="checkbox-group">{options}</div></div>
+      <div class="row"><label>المكتبات (اختياري)</label>
+        <div class="checkbox-group">{library_options}</div></div>
       <button type="submit">رفع واستيراد</button>
     </form>
 
@@ -1026,6 +1061,114 @@ async def new_book_upload(
     return RedirectResponse(
         f"/admin/books/new?err=فشل الاستيراد ({result}) -- راجع سجل الاستيراد لمعرفة السبب",
         status_code=303,
+    )
+
+
+@router.post("/books/new/json")
+async def new_book_json(
+    file: UploadFile,
+    book_id: str = Form(""),
+    volume: str = Form(""),
+    work_id: str = Form(""),
+    subject: list[str] = Form([]),
+    library: list[int] = Form([]),
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(_require_admin),
+) -> RedirectResponse:
+    """Import an already-converted v2 book JSON through the same validate + upsert path
+    as every other book. A multi-volume book is one file per volume, grouped into a work
+    by identical (title, author): when `work_id` is given the volume is forced onto that
+    work's own title/author/death label so it can never split off into a new work."""
+    settings = get_settings()
+    back = f"/admin/works/{work_id}" if work_id.strip().isdigit() else "/admin/books/new"
+
+    def fail(message: str) -> RedirectResponse:
+        return RedirectResponse(f"{back}?err={message}", status_code=303)
+
+    try:
+        content = json.loads((await file.read()).decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return fail(f"الملف ليس JSON صالحاً: {exc}")
+    if not isinstance(content, dict):
+        return fail("الملف ليس كتاباً بصيغة v2")
+
+    metadata = content.setdefault("metadata", {})
+    if not isinstance(metadata, dict):
+        return fail("حقل metadata غير صالح")
+
+    forced_work: int | None = None
+    if work_id.strip().isdigit():
+        row = (await session.execute(
+            text("""
+                SELECT w.id, w.title, a.name AS author, a.death_label
+                FROM works w LEFT JOIN authors a ON a.id = w.author_id WHERE w.id = :id
+            """),
+            {"id": int(work_id)},
+        )).first()
+        if row is None:
+            return fail("العمل غير موجود")
+        forced_work = row.id
+        content["title"] = row.title
+        content["author"] = row.author or ""
+        if row.death_label:
+            metadata["authorDeath"] = row.death_label
+        else:
+            metadata.pop("authorDeath", None)
+        if not volume.strip().isdigit():
+            return fail("رقم المجلد مطلوب عند إضافة مجلد إلى عمل")
+
+    if volume.strip().isdigit():
+        metadata["volume"] = str(int(volume))
+
+    resolved_id = int(book_id) if book_id.strip().isdigit() else await _next_manual_id(session)
+    content["bookId"] = str(resolved_id)
+
+    importer = _importer()
+    errors = [i for i in importer.val.validate(content) if i.severity == "error"]
+    if errors:
+        detail = "؛ ".join(f"{i.code}: {i.detail}" for i in errors[:4])
+        return fail(f"الملف غير صالح ({len(errors)} خطأ): {detail}")
+
+    # Same (title, author) as an existing work means this file would join it: refuse a
+    # second copy of the same volume, and refuse an unnumbered volume next to real ones.
+    title_norm = normalize(content.get("title", ""))
+    author_norm = normalize(content.get("author", ""))
+    existing = (await session.execute(
+        text("""
+            SELECT b.id, b.volume FROM books b
+            JOIN works w ON w.id = b.work_id
+            LEFT JOIN authors a ON a.id = w.author_id
+            WHERE w.title_norm = :tn AND COALESCE(a.name_norm, '') = :an AND b.id <> :me
+        """),
+        {"tn": title_norm, "an": author_norm, "me": resolved_id},
+    )).all()
+    vol_int = int(metadata["volume"]) if str(metadata.get("volume", "")).isdigit() else None
+    if existing:
+        if vol_int is None:
+            return fail(
+                "يوجد كتاب بالعنوان والمؤلف نفسيهما: حدّد رقم المجلد، أو استخدم «إضافة مجلد جديد» في صفحة العمل"
+            )
+        clash = next((r for r in existing if r.volume == vol_int), None)
+        if clash:
+            return fail(f"المجلد {vol_int} موجود مسبقاً (كتاب #{clash.id})")
+
+    result = await importer._import_content(
+        session, content, str(resolved_id), f"{resolved_id}.json", "admin-panel-json",
+        settings.books_root, True,
+    )
+    if result != "ok":
+        return fail(f"فشل الاستيراد ({result}) -- راجع سجل الاستيراد لمعرفة السبب")
+
+    new_work = forced_work or await session.scalar(
+        text("SELECT work_id FROM books WHERE id = :id"), {"id": resolved_id}
+    )
+    if subject and not forced_work:
+        await _set_work_subjects(session, new_work, subject)
+    if library and not forced_work:
+        await _set_work_libraries(session, new_work, library)
+    await session.commit()
+    return RedirectResponse(
+        f"/admin/works/{new_work}?ok=تم استيراد الكتاب رقم {resolved_id}", status_code=303
     )
 
 
