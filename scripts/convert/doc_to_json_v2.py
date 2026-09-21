@@ -170,7 +170,9 @@ def _clean_text(raw: str) -> str:
             continue
         elif ch in ("\r", "\x0c"):
             out.append(ch)
-        elif ch in ("\x07", "\x0b", "\t"):
+        elif ch == "\x0b":
+            out.append("\u2028")  # soft line break: kept so an inline heading can be split out
+        elif ch in ("\x07", "\t"):
             out.append(" ")
         elif ch == "\x1e":
             out.append("-")
@@ -250,6 +252,7 @@ _LEAD_NUM_RE = re.compile(r"^[\s(\[]*\d+\s*[ـ\-–.)]\s*")
 def _key(text: str) -> str:
     from app.services.arabic import normalize
 
+    text = text.replace("\u2028", " ")
     text = re.sub(r"\(\s*\d+\s*\)", " ", text)  # footnote markers such as "(4)"
     return re.sub(r"\s+", " ", normalize(_LEAD_NUM_RE.sub("", text))).strip("( [")
 
@@ -262,21 +265,30 @@ def anchor_toc(pages: list[list[Para]]):
     merged back into one heading."""
     toc_pages = [k for k, ps in enumerate(pages, 1) if any(p.style.upper().startswith("TOC") for p in ps)]
     if not toc_pages:
-        return [], []
+        return [], [], []
     first_toc = toc_pages[0]
     entries = []
+    pending: list[str] = []  # unnumbered first lines of a wrapped TOC 2 title
     for k in toc_pages:
         for p in pages[k - 1]:
             if p.style.upper().startswith("TOC"):
-                m = _TOC_LINE_RE.match(p.text.strip())
+                text = p.text.replace("\u2028", " ").strip()
+                if p.style.upper().startswith("TOC 1"):
+                    pending = []
+                    continue
+                m = _TOC_LINE_RE.match(text)
                 if m and _key(m.group(1)):
-                    entries.append((_key(m.group(1)), int(m.group(2))))
+                    title = " ".join([*pending, m.group(1).strip()])
+                    entries.append((_key(m.group(1)), int(m.group(2)), title))
+                    pending = []
+                elif text:
+                    pending.append(text)
 
     anchors: list[tuple[int, int]] = []
     last_page, last_idx = 1, -1
     prev_match: Para | None = None
-    unmatched: list[tuple[str, int]] = []
-    for key, number in entries:
+    unmatched: list[tuple[str, int, str]] = []
+    for key, number, title in entries:
         probe = key[:22]
         found = None
         for k in range(last_page, first_toc):
@@ -291,7 +303,7 @@ def anchor_toc(pages: list[list[Para]]):
             if found:
                 break
         if not found:
-            unmatched.append((probe, number))
+            unmatched.append((probe, number, title))
             continue
         k, i, p = found
         anchors.append((k, number))
@@ -304,9 +316,10 @@ def anchor_toc(pages: list[list[Para]]):
             p.heading = True
             prev_match = p
     anchors = _drop_outlier_anchors(anchors)
-    _fuzzy_headings(pages, anchors, unmatched)
+    leftovers = _fuzzy_headings(pages, anchors, unmatched)
     _complete_chapter_titles(pages, toc_pages)
-    return anchors, toc_pages
+    recovered = _recover_missing(pages, anchors, leftovers, toc_pages[0])
+    return anchors, toc_pages, recovered
 
 
 def _complete_chapter_titles(pages, toc_pages) -> None:
@@ -343,7 +356,8 @@ def _fuzzy_headings(pages, anchors, unmatched) -> None:
     from difflib import SequenceMatcher
 
     by_number = sorted((num, seq - num) for seq, num in anchors)
-    for probe, number in unmatched:
+    leftovers = []
+    for probe, number, title in unmatched:
         before = [off for num, off in by_number if num <= number]
         offset = before[-1] if before else (by_number[0][1] if by_number else 0)
         expected = number + offset
@@ -357,6 +371,75 @@ def _fuzzy_headings(pages, anchors, unmatched) -> None:
                     best, target = score, p
         if target is not None and best >= 0.7:
             target.heading = True
+        else:
+            leftovers.append((probe, number, title, expected))
+    return leftovers
+
+
+def _recover_missing(pages, anchors, leftovers, first_toc):
+    """Index entries with no heading paragraph of their own. Each is one of:
+    a continuation line of a title the index wrapped (merged into that heading), a title
+    glued into another paragraph after a soft line break (that paragraph is split so the
+    heading lands where it really is), or absent from the body (a heading with the
+    index's title is inserted at the top of the page the number points to). Returns
+    (printed number, title, how) for each, so a caller can report them."""
+    from difflib import SequenceMatcher
+
+    report = []
+    for probe, number, title, expected in leftovers:
+        lo, hi = max(1, expected - 1), min(first_toc - 1, expected + 2)
+        done = False
+        # (a) continuation of a wrapped title already present as a heading
+        for k in range(lo, hi + 1):
+            ps = pages[k - 1]
+            for i, q in enumerate(ps):
+                if q.heading and probe in _key(q.text):
+                    done = True
+                elif (i > 0 and ps[i - 1].heading and q.text and not q.heading
+                      and (_key(q.text).startswith(probe[:14])
+                           or SequenceMatcher(None, probe, _key(q.text)[:len(probe)]).ratio() >= 0.75)):
+                    ps[i - 1].text = f"{ps[i - 1].text} {q.text}"
+                    q.text = ""
+                    done = True
+                if done:
+                    break
+            if done:
+                break
+        if done:
+            report.append((number, title, "continuation of the previous heading"))
+            continue
+        # (b) heading glued into a longer paragraph after a soft line break
+        for k in range(lo, hi + 1):
+            ps = pages[k - 1]
+            for i, q in enumerate(ps):
+                if q.heading or "\u2028" not in q.text or q.style.lower().startswith("rfdfootnote"):
+                    continue
+                segs = q.text.split("\u2028")
+                for j, seg in enumerate(segs):
+                    sk = _key(seg)
+                    if sk and (sk.startswith(probe[:16])
+                               or SequenceMatcher(None, probe, sk[:len(probe)]).ratio() >= 0.8):
+                        parts = []
+                        if segs[:j]:
+                            parts.append(Para(" ".join(x.strip() for x in segs[:j] if x.strip()), q.style))
+                        parts.append(Para(seg.strip(), q.style, heading=True))
+                        if segs[j + 1:]:
+                            parts.append(Para(" ".join(x.strip() for x in segs[j + 1:] if x.strip()), q.style))
+                        ps[i:i + 1] = [x for x in parts if x.text]
+                        done = True
+                        break
+                if done:
+                    break
+            if done:
+                break
+        if done:
+            report.append((number, title, "split out of the paragraph it was glued into"))
+            continue
+        # (c) not in the body at all: heading with the index's title at the page's top
+        target = max(1, min(first_toc - 1, expected))
+        pages[target - 1].insert(0, Para(title, "toc-inserted", heading=True))
+        report.append((number, title, f"inserted at the top of page {target}"))
+    return report
 
 
 _HEADING_LIKE_RE = re.compile(r"^(heading|title|rfdcenterbold|rfdbold)", re.IGNORECASE)
@@ -442,7 +525,7 @@ def build_abx(pages, title, author, front_pages, labels, heading_re) -> str:
         lines.append(f"< صفحة > {label} < / صفحة >")
         in_footnotes = False
         for p in paras:
-            text = _strip_angles(p.text).strip()
+            text = _strip_angles(p.text).replace("\u2028", " ").strip()
             if not text:
                 continue
             if SEPARATOR_RE.match(text):
@@ -462,9 +545,9 @@ def convert_doc(path, title, author, front_pages, first_printed, heading_re, boo
                 use_toc=True):
     items = read_doc(path)
     pages = _split_pages(items)
-    anchors = []
+    anchors, recovered = [], []
     if use_toc:
-        anchors, _ = anchor_toc(pages)
+        anchors, _, recovered = anchor_toc(pages)
     if anchors:
         drop = artifact_pages(pages, anchors)
         if drop:
@@ -496,6 +579,7 @@ def convert_doc(path, title, author, front_pages, first_printed, heading_re, boo
     for entry in content["toc"]:
         entry["pageNumber"] = numbers[entry["pageId"]]
     content["_anchors"] = anchors
+    content["_recovered"] = recovered
     return content, items
 
 
@@ -539,6 +623,7 @@ def main() -> int:
             heading_re, args.book_id, use_toc=not args.no_toc,
         )
         anchors = content.pop("_anchors")
+        recovered = content.pop("_recovered")
     except (DocError, conv.ConversionError) as exc:
         print(f"✗ {exc}", file=sys.stderr)
         return 2
@@ -561,6 +646,10 @@ def main() -> int:
               f"changes: " + ", ".join(f"pos {a}→p.{b} (offset {c})" for a, b, c in offs))
     else:
         print("page numbers: sequential (no usable TOC in the file)")
+    if recovered:
+        print(f"index entries added without their own heading paragraph ({len(recovered)}):")
+        for number, title, how in recovered:
+            print(f"   p.{number}  {title[:55]}  -> {how}")
     for e in toc[:12]:
         print(f"   {e['order']:>3}. {e['title'][:60]}  (p. {e['pageNumber']})")
     if len(toc) > 12:
