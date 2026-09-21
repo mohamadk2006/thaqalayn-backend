@@ -221,7 +221,8 @@ def read_doc(path: Path) -> list[Para | None]:
     for m in re.finditer("\r", raw):
         end = m.start()
         style = style_at(end)  # the style lives on the paragraph mark
-        text = _clean_text(raw[start:end])
+        segment = raw[start:end]
+        text = _clean_text(segment)
         parts = text.split("\x0c")
         for k, part in enumerate(parts):
             if k > 0:
@@ -229,6 +230,10 @@ def read_doc(path: Path) -> list[Para | None]:
             part = re.sub(r"[  ]+", " ", part).strip()
             if part:
                 result.append(Para(part, style))
+            elif "\x01" in segment and len(parts) == 1:
+                # A picture-only paragraph (e.g. a cover image): no text, but the page
+                # it sits on is real, so it must not be mistaken for a break artifact.
+                result.append(Para("", "picture"))
         start = end + 1
     tail = _clean_text(raw[start:]).strip()
     if tail:
@@ -316,6 +321,24 @@ def _drop_outlier_anchors(anchors: list[tuple[int, int]]) -> list[tuple[int, int
     return kept
 
 
+def artifact_pages(pages: list[list[Para]], anchors: list[tuple[int, int]]) -> set[int]:
+    """Positions of completely empty pages that are page-break artifacts, not printed pages.
+
+    Two back-to-back break characters leave an empty "page" in the split. Sometimes that
+    is a real blank page in the printed book (chapter separators -- the numbering keeps
+    counting it) and sometimes an artifact (numbering skips it). The book's TOC decides:
+    between two consecutive anchors, if position runs ahead of the printed number by N
+    more than before, exactly N empty pages in that stretch are artifacts."""
+    drop: set[int] = set()
+    for (sa, na), (sb, nb) in zip(anchors, anchors[1:]):
+        extra = (sb - nb) - (sa - na)
+        if extra <= 0:
+            continue
+        empties = [k for k in range(sa + 1, sb) if not pages[k - 1]]
+        drop.update(empties[:extra])
+    return drop
+
+
 def page_labels(count: int, anchors: list[tuple[int, int]]) -> list[int]:
     """Printed number for every page: seq minus the offset of the latest anchor at or
     before it (the first anchor's offset for pages before it)."""
@@ -384,6 +407,11 @@ def convert_doc(path, title, author, front_pages, first_printed, heading_re, boo
     if use_toc:
         anchors, _ = anchor_toc(pages)
     if anchors:
+        drop = artifact_pages(pages, anchors)
+        if drop:
+            shift = lambda pos: pos - sum(1 for d in drop if d < pos)  # noqa: E731
+            anchors = [(shift(seq), num) for seq, num in anchors]
+            pages = [pg for k, pg in enumerate(pages, 1) if k not in drop]
         labels = page_labels(len(pages), anchors)
     else:
         labels = [first_printed + (k - front_pages - 1) for k in range(1, len(pages) + 1)]
