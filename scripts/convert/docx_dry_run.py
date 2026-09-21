@@ -56,6 +56,15 @@ def main() -> int:
             print(f"✗ conversion failed: {exc}", file=sys.stderr)
             return 1
 
+    import docx as _docx
+
+    tables = _docx.Document(str(args.docx)).tables
+    table_chars = sum(len(c.text) for t in tables for r in t.rows for c in r.cells)
+    if table_chars:
+        print(f"⚠ WARNING: this file has {len(tables)} tables holding {table_chars} characters of text "
+              "(verses, columns...). This preview and the admin Word upload SKIP tables, so that text "
+              "is missing below. Use scripts/convert/doc_to_json_v2.py, which reads tables in order.\n")
+
     pages = content.get("pages", [])
     toc = content.get("toc", [])
     blocks = sum(len(p.get("blocks", [])) for p in pages)

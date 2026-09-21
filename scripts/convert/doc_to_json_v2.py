@@ -27,7 +27,12 @@ Usage:
     python scripts/convert/doc_to_json_v2.py book.doc --title "..." [--author "..."]
         [--out book.json] [--dump-styles] [--no-toc --front-pages N --first-printed N]
 
-Needs `olefile` (uv run --with olefile python scripts/convert/doc_to_json_v2.py ...).
+Also reads a .docx (paragraphs AND tables, in order -- a table row of several cells is a
+verse, joined with " * " like the library's other poetry).
+
+Needs `olefile` for .doc and `python-docx` for .docx:
+    uv run --with olefile --with python-docx python scripts/convert/doc_to_json_v2.py book.doc \\
+        --readme readme.txt
 """
 
 from __future__ import annotations
@@ -241,6 +246,90 @@ def read_doc(path: Path) -> list[Para | None]:
     if tail:
         result.append(Para(tail, ""))
     return result
+
+
+# ── .docx reading ───────────────────────────────────────────────────────────────
+
+VERSE_JOINER = " * "  # the library's convention: one block per verse, hemistichs joined by " * "
+
+
+def read_docx(path: Path) -> list[Para | None]:
+    """Same output as read_doc for a .docx: paragraphs in order (style names kept), `None`
+    at each page boundary (a manual page break, or a next-page section break).
+
+    Tables are read in place, in document order. A row of several cells is a verse -- the
+    non-empty cells joined with " * " -- and a row with one cell is plain text. Skipping
+    tables would silently drop the poems of a diwan (89% of one real book's text)."""
+    try:
+        import docx
+        from docx.oxml.ns import qn
+        from docx.table import Table
+        from docx.text.paragraph import Paragraph
+    except ImportError as exc:
+        raise DocError("python-docx is required: uv run --with olefile --with python-docx ...") from exc
+    try:
+        document = docx.Document(str(path))
+    except Exception as exc:
+        raise DocError(f"not a .docx file: {exc}") from exc
+
+    w_t, w_tab, w_br = qn("w:t"), qn("w:tab"), qn("w:br")
+    result: list[Para | None] = []
+
+    def paragraph(p_el) -> None:
+        para = Paragraph(p_el, document)
+        style = para.style.name if para.style is not None else ""
+        segments = [""]
+        for run in para.runs:
+            for child in run._element:
+                if child.tag == w_t:
+                    segments[-1] += child.text or ""
+                elif child.tag == w_tab:
+                    segments[-1] += " "
+                elif child.tag == w_br:
+                    if child.get(qn("w:type")) == "page":
+                        segments.append("")
+                    else:
+                        segments[-1] += "\u2028"  # soft line break, kept for heading recovery
+        has_picture = bool(p_el.findall(".//" + qn("w:drawing")) or p_el.findall(".//" + qn("w:pict")))
+        for k, seg in enumerate(segments):
+            if k > 0:
+                result.append(None)
+            seg = re.sub(r"[ \u00a0]+", " ", seg).strip(" ")
+            if seg.strip():
+                result.append(Para(seg.strip(), style))
+            elif has_picture and len(segments) == 1:
+                result.append(Para("", "picture"))
+        ppr = p_el.find(qn("w:pPr"))
+        sect = ppr.find(qn("w:sectPr")) if ppr is not None else None
+        if sect is not None:
+            kind = sect.find(qn("w:type"))
+            if kind is None or kind.get(qn("w:val")) != "continuous":
+                result.append(None)  # a next-page section break starts a new page
+
+    def table(tbl_el) -> None:
+        tbl = Table(tbl_el, document)
+        for row in tbl.rows:
+            seen, cells = set(), []
+            for cell in row.cells:
+                if id(cell._tc) in seen:  # a merged cell is reported once per grid column
+                    continue
+                seen.add(id(cell._tc))
+                text = " ".join(t.strip() for t in cell.text.split("\n") if t.strip())
+                if text:
+                    cells.append(re.sub(r"[ \u00a0]+", " ", text))
+            if cells:
+                result.append(Para(VERSE_JOINER.join(cells), "table-verse" if len(cells) > 1 else "table-text"))
+
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            paragraph(child)
+        elif child.tag == qn("w:tbl"):
+            table(child)
+    return result
+
+
+def read_any(path: Path) -> list[Para | None]:
+    return read_docx(path) if path.suffix.lower() == ".docx" else read_doc(path)
 
 
 # ── Recover printed page numbers + headings from the book's own table of contents ──
@@ -522,6 +611,38 @@ def page_labels(count: int, anchors: list[tuple[int, int]]) -> list[int]:
     return labels
 
 
+# ── readme.txt (rafed.net downloads) → title / author / publication details ─────────
+
+_README_KEYS = {
+    "المؤلف": "author", "الناشر": "publisher", "الطبعة": "edition",
+    "تاريخ النشر": "publicationYear", "المحقق": "editor",
+}
+
+
+def read_readme(path: Path) -> dict[str, str]:
+    """Title (first real line) and the labelled fields the download's readme carries.
+    A publication date of 0 means "unknown" and is dropped; a Hijri year has its ".ق"
+    suffix trimmed ("1432 هـ.ق" -> "1432 هـ")."""
+    out: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith(("!!", "_", "http")):
+            continue
+        m = re.match(r"^([^:：]+?)\s*[:：]\s*(.+)$", line)
+        if m and m.group(1).strip() in _README_KEYS:
+            out[_README_KEYS[m.group(1).strip()]] = m.group(2).strip()
+        elif "title" not in out and not m:
+            out["title"] = line
+    year = out.get("publicationYear", "")
+    if year:
+        year = re.sub(r"\.\s*ق\b", "", year).strip()
+        if re.match(r"^0+\b", year):
+            out.pop("publicationYear")
+        else:
+            out["publicationYear"] = year
+    return out
+
+
 # ── Build the v2 book ─────────────────────────────────────────────────────────
 
 
@@ -591,8 +712,8 @@ def build_abx(pages, title, author, front_pages, labels, heading_re) -> str:
 
 
 def convert_doc(path, title, author, front_pages, first_printed, heading_re, book_id="900001",
-                use_toc=True):
-    items = read_doc(path)
+                use_toc=True, extra_metadata=None):
+    items = read_any(path)
     pages = _split_pages(items)
     anchors, recovered = [], []
     if use_toc:
@@ -627,6 +748,7 @@ def convert_doc(path, title, author, front_pages, first_printed, heading_re, boo
     numbers = {p["id"]: p["pageNumber"] for p in content["pages"]}
     for entry in content["toc"]:
         entry["pageNumber"] = numbers[entry["pageId"]]
+    content["metadata"].update({k: v for k, v in (extra_metadata or {}).items() if v})
     content["_anchors"] = anchors
     content["_recovered"] = recovered
     return content, items
@@ -635,8 +757,19 @@ def convert_doc(path, title, author, front_pages, first_printed, heading_re, boo
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("doc", type=Path)
-    ap.add_argument("--title", required=True)
+    ap.add_argument("--title", help="book title (default: the first line of --readme)")
     ap.add_argument("--author", default="")
+    ap.add_argument("--readme", type=Path, help="the download's readme.txt: fills title, author, "
+                    "publisher, edition and year unless given explicitly")
+    ap.add_argument("--publisher", default="")
+    ap.add_argument("--edition", default="")
+    ap.add_argument("--year", default="", help="publication year (metadata.publicationYear)")
+    ap.add_argument("--death", default="", help="author's death date (metadata.authorDeath)")
+    ap.add_argument("--editor", default="")
+    ap.add_argument("--isbn", default="")
+    ap.add_argument("--language", default="", choices=["", "ar", "fa"])
+    ap.add_argument("--volume", default="", help="volume number (digits only)")
+    ap.add_argument("--notes", default="")
     ap.add_argument("--front-pages", type=int, default=0, help="leading pages that are front matter")
     ap.add_argument("--first-printed", type=int, default=1, help="printed number of the first main page "
                     "(only used when the book's own TOC can't be used)")
@@ -652,7 +785,7 @@ def main() -> int:
 
     try:
         if args.dump_styles:
-            items = read_doc(args.doc)
+            items = read_any(args.doc)
             count = collections.Counter(p.style for p in items if p)
             samples: dict[str, str] = {}
             for p in items:
@@ -662,14 +795,26 @@ def main() -> int:
                 print(f"{n:>6}  {style or '(none)':<30} e.g. {samples[style]}")
             return 0
 
+        readme = read_readme(args.readme) if args.readme else {}
+        title = args.title or readme.get("title")
+        if not title:
+            raise DocError("give --title (or a --readme that starts with the title)")
+        author = args.author or readme.get("author", "")
+        extra = {
+            "publisher": args.publisher or readme.get("publisher", ""),
+            "edition": args.edition or readme.get("edition", ""),
+            "publicationYear": args.year or readme.get("publicationYear", ""),
+            "authorDeath": args.death, "editor": args.editor, "isbn": args.isbn,
+            "language": args.language, "volume": args.volume, "notes": args.notes,
+        }
         if args.heading_styles:
             wanted = {s.strip() for s in args.heading_styles.split(",")}
             heading_re = re.compile("^(" + "|".join(re.escape(s) for s in wanted) + ")$")
         else:
             heading_re = HEADING_STYLE_RE
         content, _ = convert_doc(
-            args.doc, args.title, args.author, args.front_pages, args.first_printed,
-            heading_re, args.book_id, use_toc=not args.no_toc,
+            args.doc, title, author, args.front_pages, args.first_printed,
+            heading_re, args.book_id, use_toc=not args.no_toc, extra_metadata=extra,
         )
         anchors = content.pop("_anchors")
         recovered = content.pop("_recovered")
@@ -681,6 +826,9 @@ def main() -> int:
     kinds = collections.Counter(b["type"] for p in pages for b in p["blocks"])
     main_pages = [p for p in pages if p["pageType"] == "main"]
     print(f"title:    {content['title']}")
+    print(f"author:   {content['author'] or '(none)'}")
+    if content["metadata"]:
+        print(f"metadata: {content['metadata']}")
     print(f"pages:    {len(pages)} ({len(pages) - len(main_pages)} front matter, {len(main_pages)} main)")
     if main_pages:
         print(f"printed:  {main_pages[0]['pageNumber']} … {main_pages[-1]['pageNumber']}")
