@@ -115,6 +115,7 @@
   <input type="file" id="fileInput" accept="application/json,.json">
   <input type="text" id="titleField" class="title-field" placeholder="عنوان الكتاب" disabled>
   <input type="text" id="authorField" class="title-field" placeholder="المؤلف" disabled>
+  <button id="metaBtn" disabled>بيانات الكتاب</button>
   <span class="spacer"></span>
   <span id="status"></span>
   <button id="downloadBtn" class="primary" disabled>تنزيل الملف المعدّل</button>
@@ -141,6 +142,20 @@
     <div id="content"></div>
   </div>
 </main>
+
+<dialog id="metaDialog" style="max-width:620px; width:94vw">
+  <div class="inner">
+    <h3 style="margin-top:0">بيانات الكتاب (metadata)</h3>
+    <p><small class="hint">تُحفظ داخل ملف JSON (<code>metadata</code>) وينسخها المستورد إلى قاعدة البيانات عند أول استيراد.
+    الحقل الفارغ لا يُكتب في الملف. العنوان والمؤلف يُعدَّلان من الشريط العلوي.</small></p>
+    <div class="meta-grid" id="metaGrid" style="max-width:none"></div>
+    <div id="metaOther" style="margin-top:12px"></div>
+    <div class="btns">
+      <button id="metaCancel">إلغاء</button>
+      <button id="metaSave" class="primary">حفظ</button>
+    </div>
+  </div>
+</dialog>
 
 <dialog id="draftDialog">
   <div class="inner">
@@ -207,6 +222,7 @@ function loadBook(parsed) {
   $("titleField").disabled = false;
   $("authorField").disabled = false;
   $("downloadBtn").disabled = false;
+  $("metaBtn").disabled = false;
   $("titleField").value = book.title || "";
   $("authorField").value = book.author || "";
 
@@ -251,6 +267,82 @@ function setStatus(msg, cls) {
   el.textContent = msg;
   el.className = cls || "";
 }
+
+// ── book-level metadata ──────────────────────────────────────────────────────
+// Keys are exactly the ones the importer reads (scripts/import/import_books.py
+// _book_summary). Any other key already in the file (collection, libraries, sourceDate,
+// pageMatched, ...) is left untouched and only listed, never edited or dropped.
+
+const META_FIELDS = [
+  { key: "authorDeath",     label: "سنة وفاة المؤلف", type: "text", ph: "مثال: ت 413 هـ" },
+  { key: "publisher",       label: "الناشر",           type: "text" },
+  { key: "edition",         label: "الطبعة",           type: "text" },
+  { key: "publicationYear", label: "سنة النشر",        type: "text" },
+  { key: "printer",         label: "المطبعة",          type: "text" },
+  { key: "editor",          label: "المحقق",           type: "text" },
+  { key: "isbn",            label: "ISBN",             type: "text" },
+  { key: "volume",          label: "رقم المجلد",       type: "text", ph: "أرقام فقط" },
+  { key: "language",        label: "اللغة",            type: "select",
+    options: [["", "— (افتراضي: عربي)"], ["ar", "عربي"], ["fa", "فارسي"]] },
+  { key: "attachedFile",    label: "ملف المصدر (PDF)", type: "text" },
+  { key: "notes",           label: "ملاحظات",          type: "textarea" },
+  { key: "trusted",         label: "موثّق",            type: "checkbox" },
+];
+
+function openMeta() {
+  const md = book.metadata || {};
+  const grid = $("metaGrid");
+  grid.innerHTML = "";
+  for (const f of META_FIELDS) {
+    const label = document.createElement("label");
+    label.textContent = f.label;
+    let input;
+    if (f.type === "select") {
+      input = document.createElement("select");
+      for (const [v, t] of f.options) {
+        const o = document.createElement("option"); o.value = v; o.textContent = t; input.appendChild(o);
+      }
+      input.value = md[f.key] ?? "";
+    } else if (f.type === "textarea") {
+      input = document.createElement("textarea"); input.rows = 3; input.value = md[f.key] ?? "";
+    } else if (f.type === "checkbox") {
+      input = document.createElement("input"); input.type = "checkbox"; input.checked = !!md[f.key];
+      input.style.width = "auto";
+    } else {
+      input = document.createElement("input"); input.type = "text"; input.value = md[f.key] ?? "";
+      if (f.ph) input.placeholder = f.ph;
+    }
+    input.dataset.key = f.key;
+    grid.append(label, input);
+  }
+  const known = new Set(META_FIELDS.map(f => f.key));
+  const others = Object.entries(md).filter(([k]) => !known.has(k));
+  $("metaOther").innerHTML = others.length
+    ? `<small class="hint">حقول أخرى في الملف (تبقى كما هي): ` +
+      others.map(([k, v]) => `<code>${escapeHtml(k)}</code>=${escapeHtml(JSON.stringify(v))}`).join("، ") + `</small>`
+    : "";
+  $("metaDialog").showModal();
+}
+
+function saveMeta() {
+  const md = book.metadata ? { ...book.metadata } : {};
+  for (const input of $("metaGrid").querySelectorAll("[data-key]")) {
+    const key = input.dataset.key;
+    if (input.type === "checkbox") {
+      if (input.checked) md[key] = true; else delete md[key];
+    } else {
+      const v = input.value.trim();
+      if (v) md[key] = v; else delete md[key];   // an empty field is omitted, never written as ""
+    }
+  }
+  book.metadata = md;
+  markDirty();
+  $("metaDialog").close();
+}
+
+$("metaBtn").addEventListener("click", openMeta);
+$("metaCancel").addEventListener("click", () => $("metaDialog").close());
+$("metaSave").addEventListener("click", saveMeta);
 
 $("titleField").addEventListener("input", (e) => { book.title = e.target.value; markDirty(); });
 $("authorField").addEventListener("input", (e) => { book.author = e.target.value; markDirty(); });
@@ -548,6 +640,10 @@ function validateExport(out) {
   const issues = [];
   if (!out.title.trim()) issues.push({ sev: "error", msg: "لا يوجد عنوان للكتاب." });
   if (!out.author.trim()) issues.push({ sev: "warning", msg: "لا يوجد اسم مؤلف." });
+  const vol = out.metadata && out.metadata.volume;
+  if (vol && !/^\d+$/.test(String(vol))) {
+    issues.push({ sev: "warning", msg: `رقم المجلد "${vol}" ليس أرقاماً فقط — سيتجاهله المستورد.` });
+  }
   if (!out.pages.length) issues.push({ sev: "error", msg: "لا توجد صفحات." });
   const totalBlocks = out.pages.reduce((n, p) => n + p.blocks.length, 0);
   if (totalBlocks === 0) issues.push({ sev: "error", msg: "لا توجد أي فقرة/محتوى في كامل الكتاب." });
