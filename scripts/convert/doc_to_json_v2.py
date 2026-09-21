@@ -712,12 +712,22 @@ def build_abx(pages, title, author, front_pages, labels, heading_re) -> str:
 
 
 def convert_doc(path, title, author, front_pages, first_printed, heading_re, book_id="900001",
-                use_toc=True, extra_metadata=None):
+                use_toc=True, extra_metadata=None, blank_pages=()):
     items = read_any(path)
     pages = _split_pages(items)
+    # A blank page the source file cannot show (Word pushes a break paragraph onto a fresh
+    # page when the page before it is full, leaving nothing in the file) -- stated by the
+    # caller, given as its final page number. Held as a picture-style paragraph so it is a
+    # real, never-dropped page.
+    blanks = sorted({int(b) for b in blank_pages})
+    for b in blanks:
+        pages.insert(min(max(b, 1), len(pages) + 1) - 1, [Para("", "picture")])
     anchors, recovered = [], []
     if use_toc:
         anchors, _, recovered = anchor_toc(pages)
+        # The index was numbered without those blank pages; restate its numbers in the
+        # book's real numbering so every later page still agrees with its own entry.
+        anchors = [(seq, num + sum(1 for b in blanks if b < seq)) for seq, num in anchors]
     if anchors:
         drop = artifact_pages(pages, anchors)
         if drop:
@@ -770,6 +780,8 @@ def main() -> int:
     ap.add_argument("--language", default="", choices=["", "ar", "fa"])
     ap.add_argument("--volume", default="", help="volume number (digits only)")
     ap.add_argument("--notes", default="")
+    ap.add_argument("--blank-page", default="", help="comma-separated printed page numbers that are "
+                    "blank in the original but invisible in the file (inserted as empty pages)")
     ap.add_argument("--front-pages", type=int, default=0, help="leading pages that are front matter")
     ap.add_argument("--first-printed", type=int, default=1, help="printed number of the first main page "
                     "(only used when the book's own TOC can't be used)")
@@ -815,6 +827,7 @@ def main() -> int:
         content, _ = convert_doc(
             args.doc, title, author, args.front_pages, args.first_printed,
             heading_re, args.book_id, use_toc=not args.no_toc, extra_metadata=extra,
+            blank_pages=[x for x in args.blank_page.split(",") if x.strip()],
         )
         anchors = content.pop("_anchors")
         recovered = content.pop("_recovered")
