@@ -316,7 +316,8 @@ def anchor_toc(pages: list[list[Para]]):
             p.heading = True
             prev_match = p
     anchors = _drop_outlier_anchors(anchors)
-    leftovers = _fuzzy_headings(pages, anchors, unmatched)
+    leftovers, soft = _fuzzy_headings(pages, anchors, unmatched)
+    anchors = _drop_outlier_anchors(sorted({*anchors, *soft}))
     _complete_chapter_titles(pages, toc_pages)
     recovered = _recover_missing(pages, anchors, leftovers, toc_pages[0])
     return anchors, toc_pages, recovered
@@ -357,23 +358,48 @@ def _fuzzy_headings(pages, anchors, unmatched) -> None:
 
     by_number = sorted((num, seq - num) for seq, num in anchors)
     leftovers = []
+    soft: list[tuple[int, int]] = []  # (position, printed number) from these matches
     for probe, number, title in unmatched:
         before = [off for num, off in by_number if num <= number]
         offset = before[-1] if before else (by_number[0][1] if by_number else 0)
         expected = number + offset
-        best, target = 0.0, None
+        best, target, target_k = 0.0, None, 0
         for k in range(max(1, expected - 1), min(len(pages), expected + 2) + 1):
             for p in pages[k - 1]:
                 if p.heading or not p.text or not _HEADING_LIKE_RE.match(p.style):
                     continue
                 score = SequenceMatcher(None, probe, _key(p.text)[: len(probe)]).ratio()
                 if score > best:
-                    best, target = score, p
+                    best, target, target_k = score, p, k
         if target is not None and best >= 0.7:
             target.heading = True
+            soft.append((target_k, number))
+            continue
+        # The index often words an entry differently from the heading printed in the body
+        # ("سياسة معاوية : الارهاب والتجويع" vs "أ ـ الإرهاب والتجويع"). Compare by shared
+        # words instead, still limited to heading-styled paragraphs on the pages around
+        # where the printed number points.
+        words = _words(title)
+        best, target, target_k = 0.0, None, 0
+        for k in range(max(1, expected - 1), min(len(pages), expected + 1) + 1):
+            for p in pages[k - 1]:
+                if p.heading or not p.text or not _HEADING_LIKE_RE.match(p.style):
+                    continue
+                other = _words(p.text)
+                shared = len(words & other)
+                score = shared / min(len(words), len(other)) if words and other else 0.0
+                if shared >= 2 and score > best:
+                    best, target, target_k = score, p, k
+        if target is not None and best >= 0.6:
+            target.heading = True
+            soft.append((target_k, number))
         else:
             leftovers.append((probe, number, title, expected))
-    return leftovers
+    return leftovers, soft
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in _key(text).split() if len(w) >= 3}
 
 
 def _recover_missing(pages, anchors, leftovers, first_toc):
@@ -506,7 +532,30 @@ def _split_pages(items: list[Para | None]) -> list[list[Para]]:
             pages.append([])
         else:
             pages[-1].append(it)
-    return pages
+    return _split_merged_pages(pages)
+
+
+def _split_merged_pages(pages: list[list[Para]]) -> list[list[Para]]:
+    """A Word page holding two footnote bars is two printed pages laid out without a break
+    character between them: [text][footnotes][text][footnotes]. Footnotes end a printed
+    page, so the first body paragraph after the first page's footnotes starts a new one.
+    Requiring the second bar keeps a footnote that merely continues in a plain style (no
+    bar after it) from being mistaken for a new page."""
+    out: list[list[Para]] = []
+    for ps in pages:
+        bars = [i for i, p in enumerate(ps) if SEPARATOR_RE.match(p.text)]
+        cuts = []
+        for a, b in zip(bars, bars[1:]):
+            j = next((i for i in range(a + 1, b)
+                      if ps[i].text and not ps[i].style.lower().startswith("rfdfootnote")), None)
+            if j is not None:
+                cuts.append(j)
+        start = 0
+        for c in cuts:
+            out.append(ps[start:c])
+            start = c
+        out.append(ps[start:])
+    return out
 
 
 def _strip_angles(s: str) -> str:
