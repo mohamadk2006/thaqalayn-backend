@@ -250,7 +250,8 @@ _LEAD_NUM_RE = re.compile(r"^[\s(\[]*\d+\s*[ـ\-–.)]\s*")
 def _key(text: str) -> str:
     from app.services.arabic import normalize
 
-    return normalize(_LEAD_NUM_RE.sub("", text)).lstrip("( [")
+    text = re.sub(r"\(\s*\d+\s*\)", " ", text)  # footnote markers such as "(4)"
+    return re.sub(r"\s+", " ", normalize(_LEAD_NUM_RE.sub("", text))).strip("( [")
 
 
 def anchor_toc(pages: list[list[Para]]):
@@ -274,6 +275,7 @@ def anchor_toc(pages: list[list[Para]]):
     anchors: list[tuple[int, int]] = []
     last_page, last_idx = 1, -1
     prev_match: Para | None = None
+    unmatched: list[tuple[str, int]] = []
     for key, number in entries:
         probe = key[:22]
         found = None
@@ -289,6 +291,7 @@ def anchor_toc(pages: list[list[Para]]):
             if found:
                 break
         if not found:
+            unmatched.append((probe, number))
             continue
         k, i, p = found
         anchors.append((k, number))
@@ -300,7 +303,63 @@ def anchor_toc(pages: list[list[Para]]):
         else:
             p.heading = True
             prev_match = p
-    return _drop_outlier_anchors(anchors), toc_pages
+    anchors = _drop_outlier_anchors(anchors)
+    _fuzzy_headings(pages, anchors, unmatched)
+    _complete_chapter_titles(pages, toc_pages)
+    return anchors, toc_pages
+
+
+def _complete_chapter_titles(pages, toc_pages) -> None:
+    """A chapter title that wraps ("الفصل الأول : في مجربات ..." + "... لطلب الرزق") is one
+    Heading paragraph plus the paragraphs carrying its remaining lines. The index's TOC 1
+    lines hold the full text, so pull in any directly following paragraph that appears in
+    them."""
+    blob = " ".join(
+        _key(p.text) for k in toc_pages for p in pages[k - 1] if p.style.upper().startswith("TOC 1")
+    )
+    if not blob:
+        return
+    for k in range(1, toc_pages[0]):
+        ps = pages[k - 1]
+        for i, p in enumerate(ps):
+            if not (p.text and p.style.lower().startswith("heading")):
+                continue
+            j = i + 1
+            while j < len(ps):
+                q = ps[j]
+                qk = _key(q.text)
+                if q.heading or len(qk) < 8 or qk[:24] not in blob:
+                    break
+                p.text = f"{p.text} {q.text}"
+                q.text = ""
+                j += 1
+
+
+def _fuzzy_headings(pages, anchors, unmatched) -> None:
+    """Index entries the exact prefix match missed (a typo or spelling difference between
+    the index and the body). Done after the main pass so a wrong guess cannot derail it:
+    look only at heading-styled paragraphs on the few pages the printed number points to,
+    and accept a close-enough match."""
+    from difflib import SequenceMatcher
+
+    by_number = sorted((num, seq - num) for seq, num in anchors)
+    for probe, number in unmatched:
+        before = [off for num, off in by_number if num <= number]
+        offset = before[-1] if before else (by_number[0][1] if by_number else 0)
+        expected = number + offset
+        best, target = 0.0, None
+        for k in range(max(1, expected - 1), min(len(pages), expected + 2) + 1):
+            for p in pages[k - 1]:
+                if p.heading or not p.text or not _HEADING_LIKE_RE.match(p.style):
+                    continue
+                score = SequenceMatcher(None, probe, _key(p.text)[: len(probe)]).ratio()
+                if score > best:
+                    best, target = score, p
+        if target is not None and best >= 0.7:
+            target.heading = True
+
+
+_HEADING_LIKE_RE = re.compile(r"^(heading|title|rfdcenterbold|rfdbold)", re.IGNORECASE)
 
 
 def _drop_outlier_anchors(anchors: list[tuple[int, int]]) -> list[tuple[int, int]]:
