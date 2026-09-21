@@ -875,7 +875,9 @@ def main() -> int:
     for i in issues:
         print(f"  {'✗' if i.severity == 'error' else '⚠'} {i.code}: {i.detail}")
 
-    out = args.out or args.doc.with_suffix(".json")
+    # Named after the book, not the input file (a download is often just "book.doc").
+    safe_title = re.sub(r'[\\/:*?"<>|\n\r\t]+', " ", content["title"]).strip(" .")[:120] or args.doc.stem
+    out = args.out or args.doc.with_name(f"{safe_title}.json")
     out.write_text(json.dumps(content, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     print(f"\nwrote {out}")
     return 1 if errors else 0
