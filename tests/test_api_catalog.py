@@ -295,7 +295,7 @@ class TestMetadata:
     async def test_categories_lists_all_subjects(self, imported: AsyncClient):
         response = await imported.get("/api/categories")
         assert response.status_code == 200
-        assert len(response.json()) == 39  # no 40th catch-all any more
+        assert len(response.json()) == 40
 
     async def test_languages(self, imported: AsyncClient):
         response = await imported.get("/api/languages")

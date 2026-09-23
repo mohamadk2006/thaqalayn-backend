@@ -75,7 +75,7 @@ class TestSeedData:
         assert codes == ["ar", "fa"]
 
     async def test_subjects_seeded(self, session):
-        """Asserts the exact 39 strings, not just the count. `id` is the category's own
+        """Asserts the exact 40 strings, not just the count. `id` is the category's own
         Arabic string verbatim (given directly by the project owner as ground truth,
         not derived from anything) — a renamed or dropped one is a breaking change,
         adding one is not. No 40th catch-all any more: a work with none of these is
@@ -98,7 +98,19 @@ class TestSeedData:
             "أصول الفقه عند الشيعة", "أصول الفقه عند المذاهب السنية",
             "الأخلاق والعرفان", "الأدعية والزيارات", "الأنساب والتراجم",
             "الطب", "الفرق والمذاهب", "القرآن الكريم وعلومه",
+            "القرآن الكريم وعلومه عند السنة",
         }
+
+    async def test_quran_sunni_subject_sits_right_after_fiqhi_terms(self, session):
+        """The app's "الكتب الأخرى" section starts right after "مصطلحات ومفردات فقهية";
+        the Sunni Quran subject is its first entry, and the order stays gap-free."""
+        rows = (await session.execute(
+            select(Subject.id, Subject.sort_order).order_by(Subject.sort_order)
+        )).all()
+        ids = [r.id for r in rows]
+        assert ids[ids.index("مصطلحات ومفردات فقهية") + 1] == "القرآن الكريم وعلومه عند السنة"
+        assert ids[ids.index("القرآن الكريم وعلومه عند السنة") + 1] == "مخطوطات"
+        assert [r.sort_order for r in rows] == list(range(1, len(rows) + 1))
 
 
 class TestGeneratedSearchVector:
