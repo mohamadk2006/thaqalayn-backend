@@ -38,6 +38,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -388,6 +389,10 @@ class Section(Base):
     __table_args__ = (
         UniqueConstraint("book_id", "ord", name="uq_sections_book_ord"),
         Index("ix_sections_book", "book_id"),
+        Index(
+            "ix_sections_title_fts", text("to_tsvector('simple', title_norm)"),
+            postgresql_using="gin",
+        ),
     )
 
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-from app.schemas.catalog import LibraryOut, SubjectOut
+from app.schemas.catalog import LibraryOut, PageEnvelope, SubjectOut
 
 
 class SearchHit(BaseModel):
@@ -39,3 +39,29 @@ class SearchHit(BaseModel):
     matchStart: int | None
     matchEnd: int | None
     score: float
+
+
+class TocHit(BaseModel):
+    """One chapter heading matched by GET /api/toc/search. Field names follow SearchHit
+    (bookId/workId as strings, page + pageSequence) so the client's decoding carries over;
+    the sequence is what GET /api/books/{id}/pages/{sequence} and the downloaded JSON's
+    pages are keyed by, the label is only what is printed."""
+
+    bookId: str
+    workId: str
+    workTitle: str
+    title: str
+    author: str
+    volume: int | None
+    heading: str
+    tocId: str  # the heading's id in the book JSON's toc[] ("toc-00004")
+    order: int  # 1-based position in that book's toc[]
+    page: str
+    pageSequence: int | None
+
+
+class TocSearchResponse(PageEnvelope[TocHit]):
+    # A very common word ("باب") matches hundreds of thousands of headings. Only the first
+    # _CANDIDATE_CAP matches are ranked, and `total` counts just those -- `capped` says
+    # the real number is larger. Narrow the query (or add a filter) to see the rest.
+    capped: bool
