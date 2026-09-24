@@ -8,7 +8,7 @@ cache, or moving search to a different engine) without router changes.
 
 from __future__ import annotations
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -260,7 +260,16 @@ async def list_authors(session: AsyncSession) -> list[AuthorOut]:
 
 async def list_subjects(session: AsyncSession) -> list[CategoryOut]:
     rows = (await session.execute(select(Subject).order_by(Subject.sort_order))).scalars().all()
-    return [CategoryOut(id=s.id, title=s.title, order=s.sort_order) for s in rows]
+    pins: dict[str, list[str]] = {}
+    for r in (await session.execute(
+        text("SELECT subject_id, book_id FROM subject_pinned_books ORDER BY subject_id, position")
+    )).all():
+        pins.setdefault(r.subject_id, []).append(str(r.book_id))
+    return [
+        CategoryOut(id=s.id, title=s.title, order=s.sort_order, section=s.section,
+                    pinnedBookIds=pins.get(s.id, []))
+        for s in rows
+    ]
 
 
 async def list_libraries(session: AsyncSession) -> list[LibraryOut]:

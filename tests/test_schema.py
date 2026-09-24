@@ -101,16 +101,18 @@ class TestSeedData:
             "القرآن الكريم وعلومه عند السنة",
         }
 
-    async def test_quran_sunni_subject_sits_right_after_fiqhi_terms(self, session):
-        """The app's "الكتب الأخرى" section starts right after "مصطلحات ومفردات فقهية";
-        the Sunni Quran subject is its first entry, and the order stays gap-free."""
+    async def test_category_order_and_sections_are_the_apps(self, session):
+        """The app's own order, moved to the server: gap-free 1-40, the first 13 are the
+        Shia section, and the Sunni Quran category opens the "other" section."""
         rows = (await session.execute(
-            select(Subject.id, Subject.sort_order).order_by(Subject.sort_order)
+            select(Subject.id, Subject.sort_order, Subject.section).order_by(Subject.sort_order)
         )).all()
-        ids = [r.id for r in rows]
-        assert ids[ids.index("مصطلحات ومفردات فقهية") + 1] == "القرآن الكريم وعلومه عند السنة"
-        assert ids[ids.index("القرآن الكريم وعلومه عند السنة") + 1] == "مخطوطات"
-        assert [r.sort_order for r in rows] == list(range(1, len(rows) + 1))
+        assert [r.sort_order for r in rows] == list(range(1, 41))
+        assert [r.section for r in rows] == ["shia"] * 13 + ["other"] * 27
+        assert rows[0].id == "القرآن الكريم وعلومه"
+        assert rows[12].id == "مصطلحات ومفردات فقهية"
+        assert rows[13].id == "القرآن الكريم وعلومه عند السنة"
+        assert rows[-1].id == "مخطوطات"
 
 
 class TestGeneratedSearchVector:

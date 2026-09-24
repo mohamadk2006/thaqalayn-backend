@@ -68,6 +68,9 @@ class CategoryOut(SubjectOut):
     SubjectOut, which is embedded in every book and work."""
 
     order: int
+    section: str  # "shia" or "other"
+    # Books the app shows first inside this category, in this order.
+    pinnedBookIds: list[str] = []
 
 
 class BookOut(BaseModel):

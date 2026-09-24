@@ -105,6 +105,11 @@ class Subject(Base):
     sort_order: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # Which half of the category list this belongs to: "shia" (الكتب الشيعية) or "other"
+    # (الكتب الأخرى). The list is ordered by sort_order; sections are contiguous runs of it.
+    section: Mapped[str] = mapped_column(
+        Text, nullable=False, default="other", server_default="other"
+    )
 
 
 class WorkSubject(Base):

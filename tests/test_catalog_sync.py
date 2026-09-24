@@ -325,3 +325,50 @@ class TestUncommittedChangesAreNotServed:
 
         after = mine(await drain(sync, start))
         assert sorted(i["book"]["bookId"] for i in after) == [str(IDS[0]), str(IDS[1])]
+
+
+class TestCategoryOrderSectionAndPins:
+    async def test_categories_carry_order_section_and_pins(self, sync: AsyncClient):
+        cats = (await sync.get("/api/categories")).json()
+        assert [c["order"] for c in cats] == list(range(1, len(cats) + 1))
+        assert {c["section"] for c in cats} == {"shia", "other"}
+        sections = [c["section"] for c in cats]
+        # two contiguous runs: every "shia" entry before the first "other" one
+        assert sections == sorted(sections, key=lambda s: s != "shia")
+        assert all(c["pinnedBookIds"] == [] for c in cats if c["id"] == A)
+
+    async def test_a_pinned_book_is_listed_in_order(self, sync: AsyncClient):
+        await sql("INSERT INTO subject_pinned_books (subject_id, book_id, position) VALUES (:s, :b, 2), (:s, :c, 1)",
+                  s=A, b=IDS[0], c=IDS[1])
+        cat = next(c for c in (await sync.get("/api/categories")).json() if c["id"] == A)
+        assert cat["pinnedBookIds"] == [str(IDS[1]), str(IDS[0])]
+
+    async def test_deleting_a_pinned_book_drops_its_pin(self, sync: AsyncClient):
+        await sql("INSERT INTO subject_pinned_books (subject_id, book_id, position) VALUES (:s, :b, 1)", s=A, b=IDS[0])
+        await sql("DELETE FROM books WHERE id = :i", i=IDS[0])
+        cat = next(c for c in (await sync.get("/api/categories")).json() if c["id"] == A)
+        assert cat["pinnedBookIds"] == []
+
+    async def test_pinning_and_unpinning_change_the_category_list_version(self, sync: AsyncClient):
+        v0 = (await versions(sync))["categories"]["version"]
+        await sql("INSERT INTO subject_pinned_books (subject_id, book_id, position) VALUES (:s, :b, 1)", s=A, b=IDS[0])
+        v1 = (await versions(sync))["categories"]["version"]
+        await sql("DELETE FROM subject_pinned_books WHERE subject_id = :s", s=A)
+        v2 = (await versions(sync))["categories"]["version"]
+        assert len({v0, v1, v2}) == 3
+
+    async def test_changing_a_section_changes_the_category_list_version_only(self, sync: AsyncClient):
+        before = await versions(sync)
+        original = next(c["section"] for c in (await sync.get("/api/categories")).json() if c["id"] == A)
+        flipped = "shia" if original == "other" else "other"
+        try:
+            await sql("UPDATE subjects SET section = :x WHERE id = :s", x=flipped, s=A)
+            after = await versions(sync)
+            assert after["categories"]["version"] != before["categories"]["version"]
+            assert after["books"] == before["books"]  # no book carries its category's section
+        finally:
+            await sql("UPDATE subjects SET section = :x WHERE id = :s", x=original, s=A)
+
+    async def test_an_invalid_section_is_refused(self, sync: AsyncClient):
+        with pytest.raises(Exception):
+            await sql("UPDATE subjects SET section = 'nonsense' WHERE id = :s", s=A)
