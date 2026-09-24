@@ -170,12 +170,144 @@ async def dashboard(
         for r in rows
     )
     body = (
-        '<p><a href="/admin/featured">الكتب المختارة &rarr;</a></p>'
+        '<p><a href="/admin/featured">الكتب المختارة &rarr;</a> &nbsp;|&nbsp; '
+        '<a href="/admin/categories">ترتيب التصنيفات &rarr;</a></p>'
         "<h1>التصنيفات</h1>"
         "<table><tr><th>التصنيف</th><th>عدد العناوين</th><th>عدد المجلدات</th></tr>"
         f"{rows_html}</table>"
     )
     return _render("لوحة التحكم", body)
+
+
+# ── Category order and sections ───────────────────────────────────────────────
+#
+# The app shows categories in two sections -- "shia" (الكتب الشيعية) then "other" (الكتب
+# الأخرى) -- in sort_order. A section is a contiguous run of that list, so it is modelled as
+# a boundary (how many come first) rather than a per-row flag that could be set into a
+# pattern the app cannot draw. Moving a row up or down swaps it with its neighbour and the
+# boundary stays where it is, so the row crossing it simply joins the other section.
+
+_SECTIONS = (("shia", "الكتب الشيعية"), ("other", "الكتب الأخرى"))
+
+
+async def _category_list(session: AsyncSession):
+    return (await session.execute(text("""
+        SELECT s.id, s.title, s.section,
+               (SELECT count(DISTINCT ws.work_id) FROM work_subjects ws WHERE ws.subject_id = s.id) AS works,
+               (SELECT string_agg(CAST(p.book_id AS text), '، ' ORDER BY p.position)
+                FROM subject_pinned_books p WHERE p.subject_id = s.id) AS pinned
+        FROM subjects s ORDER BY s.sort_order, s.id
+    """))).all()
+
+
+async def _save_category_order(session: AsyncSession, ids: list[str], shia_count: int) -> None:
+    """Write 1..n and each row's section from its position. Only rows that actually change
+    fire the change-tracking triggers, so the app's category-list version moves only if the
+    list really did."""
+    await session.execute(
+        text("""
+            UPDATE subjects s SET sort_order = v.ord, section = v.section
+            FROM unnest(CAST(:ids AS text[]), CAST(:sections AS text[]))
+                 WITH ORDINALITY AS v (id, section, ord)
+            WHERE s.id = v.id
+        """),
+        {
+            "ids": ids,
+            "sections": ["shia" if i < shia_count else "other" for i in range(len(ids))],
+        },
+    )
+    await session.commit()
+
+
+@router.get("/categories", response_class=HTMLResponse)
+async def category_order(
+    ok: str | None = None,
+    session: AsyncSession = Depends(get_session), _: None = Depends(_require_admin),
+) -> HTMLResponse:
+    rows = await _category_list(session)
+    last = len(rows) - 1
+    labels = dict(_SECTIONS)
+
+    def button(subject_id: str, action: str, label: str, disabled: bool = False) -> str:
+        if disabled:
+            return f'<button type="button" disabled>{label}</button>'
+        return (
+            f'<form method="post" action="/admin/categories/{action}" style="display:inline; '
+            f'background:none; border:none; padding:0; margin:0">'
+            f'<input type="hidden" name="subject_id" value="{escape(subject_id)}">'
+            + ('<input type="hidden" name="direction" value="{}">'.format("up" if "▲" in label else "down")
+               if action == "move" else "")
+            + f'<button type="submit">{label}</button></form>'
+        )
+
+    html, previous_section = [], None
+    for i, r in enumerate(rows):
+        if r.section != previous_section:
+            html.append(f'<tr><th colspan="5">{labels[r.section]}</th></tr>')
+            previous_section = r.section
+        other = "الكتب الأخرى" if r.section == "shia" else "الكتب الشيعية"
+        pinned = f"<small>مثبّت: {escape(r.pinned)}</small>" if r.pinned else ""
+        html.append(
+            "<tr>"
+            f"<td>{i + 1}</td>"
+            f"<td>{button(r.id, 'move', '▲', i == 0)} {button(r.id, 'move', '▼', i == last)}</td>"
+            f'<td><a href="/admin/subjects/{escape(r.id)}">{escape(r.title)}</a> {pinned}</td>'
+            f"<td>{r.works}</td>"
+            f"<td>{button(r.id, 'section', 'نقل إلى ' + other)}</td>"
+            "</tr>"
+        )
+    banner = _msg(ok, True) if ok else ""
+    body = (
+        f"{banner}<h1>ترتيب التصنيفات</h1>"
+        "<p><small>هذا الترتيب هو ما يجلبه التطبيق من الخادم. زر ▲/▼ يبدّل التصنيف مع جاره؛ "
+        "وإذا عبر الحدّ بين القسمين انتقل إلى القسم الآخر. «نقل إلى…» ينقله إلى بداية/نهاية القسم الآخر.</small></p>"
+        "<table><tr><th>#</th><th>الترتيب</th><th>التصنيف</th><th>العناوين</th><th>القسم</th></tr>"
+        f"{''.join(html)}</table>"
+    )
+    return _render("ترتيب التصنيفات", body)
+
+
+@router.post("/categories/move")
+async def category_move(
+    subject_id: str = Form(...),
+    direction: str = Form(...),
+    session: AsyncSession = Depends(get_session), _: None = Depends(_require_admin),
+) -> RedirectResponse:
+    rows = await _category_list(session)
+    ids = [r.id for r in rows]
+    if subject_id not in ids:
+        raise HTTPException(status_code=404, detail="Unknown category")
+    shia = sum(1 for r in rows if r.section == "shia")
+    i = ids.index(subject_id)
+    j = i - 1 if direction == "up" else i + 1
+    if 0 <= j < len(ids):
+        ids[i], ids[j] = ids[j], ids[i]
+        await _save_category_order(session, ids, shia)
+    return RedirectResponse("/admin/categories", status_code=303)
+
+
+@router.post("/categories/section")
+async def category_section(
+    subject_id: str = Form(...),
+    session: AsyncSession = Depends(get_session), _: None = Depends(_require_admin),
+) -> RedirectResponse:
+    """Move a category to the other section: the start of "other" if it was in "shia", the
+    end of "shia" if it was in "other" -- the only places that keep both runs contiguous."""
+    rows = await _category_list(session)
+    ids = [r.id for r in rows]
+    if subject_id not in ids:
+        raise HTTPException(status_code=404, detail="Unknown category")
+    shia = sum(1 for r in rows if r.section == "shia")
+    was_shia = rows[ids.index(subject_id)].section == "shia"
+    ids.remove(subject_id)
+    if was_shia:
+        shia -= 1
+        ids.insert(shia, subject_id)      # first of "other"
+    else:
+        ids.insert(shia, subject_id)      # last of "shia"
+        shia += 1
+    await _save_category_order(session, ids, shia)
+    return RedirectResponse("/admin/categories", status_code=303)
 
 
 @router.get("/featured", response_class=HTMLResponse)
