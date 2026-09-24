@@ -16,6 +16,7 @@ from app.models import Author, Book, Language, Library, Subject, Work
 from app.schemas.catalog import (
     AuthorOut,
     BookOut,
+    CategoryOut,
     LanguageOut,
     LibraryOut,
     SubjectOut,
@@ -233,14 +234,33 @@ async def get_book(session: AsyncSession, book_id: int) -> BookOut | None:
     return _book_out(book, book.work.title if book.work else "", collections.get(book.id))
 
 
+async def get_books_by_ids(session: AsyncSession, book_ids: list[int]) -> dict[int, BookOut]:
+    """Published books among `book_ids`, in the exact shape GET /api/books returns them.
+    An id that is missing from the result does not exist or is not published."""
+    if not book_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(Book)
+            .where(Book.id.in_(book_ids), Book.is_published.is_(True))
+            .options(*_book_load_options())
+        )
+    ).scalars().all()
+    collections = await _book_collection_raw(session, [b.id for b in rows])
+    return {
+        b.id: _book_out(b, b.work.title if b.work else "", collections.get(b.id))
+        for b in rows
+    }
+
+
 async def list_authors(session: AsyncSession) -> list[AuthorOut]:
     rows = (await session.execute(select(Author).order_by(Author.name_norm))).scalars().all()
     return [AuthorOut(id=str(a.id), name=a.name, deathLabel=a.death_label) for a in rows]
 
 
-async def list_subjects(session: AsyncSession) -> list[SubjectOut]:
+async def list_subjects(session: AsyncSession) -> list[CategoryOut]:
     rows = (await session.execute(select(Subject).order_by(Subject.sort_order))).scalars().all()
-    return [SubjectOut(id=s.id, title=s.title) for s in rows]
+    return [CategoryOut(id=s.id, title=s.title, order=s.sort_order) for s in rows]
 
 
 async def list_libraries(session: AsyncSession) -> list[LibraryOut]:

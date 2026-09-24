@@ -62,6 +62,14 @@ class LibraryOut(BaseModel):
     parentId: str | None = None
 
 
+class CategoryOut(SubjectOut):
+    """An item of GET /api/categories: a subject plus its position in the list, so the
+    server -- not the app -- decides where a new category sits. Deliberately not part of
+    SubjectOut, which is embedded in every book and work."""
+
+    order: int
+
+
 class BookOut(BaseModel):
     """One volume — the downloadable unit. Matches CatalogBook in the iOS brief."""
 

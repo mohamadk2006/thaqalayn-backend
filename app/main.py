@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from starlette.middleware.gzip import GZipMiddleware
 
 from app import __version__
-from app.api import admin, books, health, metadata, search, toc_search, works
+from app.api import admin, books, catalog_sync, health, metadata, search, toc_search, works
 from app.config import get_settings
 from app.db import dispose_engine
 
@@ -51,6 +51,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router, prefix="/api")
     app.include_router(works.router, prefix="/api")
+    app.include_router(catalog_sync.router, prefix="/api")  # before books: /books/changes
     app.include_router(books.router, prefix="/api")
     app.include_router(metadata.router, prefix="/api")
     app.include_router(search.router, prefix="/api")
