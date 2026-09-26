@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import sys
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -29,6 +30,24 @@ from sqlalchemy import text  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.db import get_engine  # noqa: E402
 from app.services import search_reindex as R  # noqa: E402
+
+
+def _read_ahead(pool: ThreadPoolExecutor, books_root: Path, book_ids: list[int], depth: int):
+    """Yield (book_id, texts) in order, with at most `depth` books read ahead. Not
+    pool.map(): that submits every book at once, and the readers then outrun the single
+    writer until the parsed books fill memory (it was OOM-killed at 10 GB this way)."""
+    pending: deque = deque()
+    ids = iter(book_ids)
+    for book_id in ids:
+        pending.append((book_id, pool.submit(R.book_page_texts, books_root, book_id)))
+        if len(pending) >= depth:
+            break
+    while pending:
+        book_id, future = pending.popleft()
+        nxt = next(ids, None)
+        if nxt is not None:
+            pending.append((nxt, pool.submit(R.book_page_texts, books_root, nxt)))
+        yield book_id, future.result()
 
 
 async def build(limit: int | None, workers: int) -> int:
@@ -46,8 +65,7 @@ async def build(limit: int | None, workers: int) -> int:
     started = time.monotonic()
     pages_done = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        # map() yields in submission order, so the writer still goes book by book.
-        texts_iter = pool.map(lambda b: (b, R.book_page_texts(books_root, b)), book_ids)
+        texts_iter = _read_ahead(pool, books_root, book_ids, depth=2 * workers)
         async with engine.connect() as conn:
             for n, (book_id, texts) in enumerate(texts_iter, 1):
                 if texts is None:
