@@ -134,6 +134,7 @@ class TestReindex:
         assert sorted(texts) == [1, 2, 3]
         async with get_sessionmaker()() as s:
             await s.execute(text(R.CREATE_TARGET_SQL))
+            await s.execute(text(R.CREATE_TARGET_BOOK_INDEX_SQL))
             todo = [r[0] for r in (await s.execute(text(R.BOOKS_TO_BUILD_SQL))).all()]
             assert int(BOOK_ID) in todo
             await s.execute(text(R.INSERT_BOOK_SQL), R.book_params(int(BOOK_ID), texts))

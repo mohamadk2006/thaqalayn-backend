@@ -35,6 +35,11 @@ TARGET = "pages_exact"
 _COPIED_COLUMNS = "id, book_id, sequence, page_number, page_type, is_blank, section_id, block_offsets"
 
 CREATE_TARGET_SQL = f"CREATE TABLE IF NOT EXISTS {TARGET} (LIKE pages INCLUDING DEFAULTS)"
+# Created up front, not in phase 2: every book's DELETE_BOOK_SQL looks its rows up by
+# book_id, and without an index each one scans the whole growing table -- the full build
+# slowed from ~800 to ~300 pages/s that way. Named as `index_statements` would name its
+# copy of ix_pages_book, so phase 2 finds it already there and skips it.
+CREATE_TARGET_BOOK_INDEX_SQL = f"CREATE INDEX IF NOT EXISTS ix_pages_book__new ON {TARGET} (book_id)"
 
 # One statement per book. The join is on sequence, so a page present in `pages` but
 # missing from the JSON would silently drop out -- `build_book` checks for that first.

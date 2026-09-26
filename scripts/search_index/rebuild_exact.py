@@ -55,6 +55,7 @@ async def build(limit: int | None, workers: int) -> int:
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.execute(text(R.CREATE_TARGET_SQL))
+        await conn.execute(text(R.CREATE_TARGET_BOOK_INDEX_SQL))
         await conn.execute(text(R.STALE_IN_TARGET_SQL))
         book_ids = [r[0] for r in (await conn.execute(text(R.BOOKS_TO_BUILD_SQL))).all()]
     if limit:

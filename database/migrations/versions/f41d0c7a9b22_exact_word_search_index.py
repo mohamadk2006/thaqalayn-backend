@@ -41,6 +41,7 @@ def upgrade() -> None:
     books_root = Path(get_settings().books_root)
 
     bind.execute(text(R.CREATE_TARGET_SQL))
+    bind.execute(text(R.CREATE_TARGET_BOOK_INDEX_SQL))
     bind.execute(text(R.STALE_IN_TARGET_SQL))
     problems = []
     for (book_id,) in bind.execute(text(R.BOOKS_TO_BUILD_SQL)).all():
