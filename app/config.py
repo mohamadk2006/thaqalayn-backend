@@ -31,6 +31,16 @@ class Settings(BaseSettings):
     api_port: int = 8000
     log_level: str = "INFO"
 
+    # Websites allowed to call the API from a browser (CORS). The public site is served
+    # from its own domain, so without this the browser blocks its requests to api.*.
+    # Env override is a JSON list, e.g. CORS_ORIGINS='["https://www.example.com"]'.
+    cors_origins: list[str] = [
+        "https://www.thaqalaynlibrary.com",
+        "https://thaqalaynlibrary.com",
+    ]
+    # Also allow http://localhost:<any port> / 127.0.0.1, for developing the site locally.
+    cors_allow_localhost: bool = True
+
     # Guards the /admin control panel (HTTP Basic). Required, no default -- an admin
     # panel with a guessable or absent credential is worse than no panel at all.
     admin_username: str

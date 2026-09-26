@@ -8,6 +8,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from app import __version__
@@ -48,6 +49,22 @@ def create_app() -> FastAPI:
     # already-gzip Content-Encoding), just pointless CPU. Remove this if Nginx takes
     # over the job.
     app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    # Lets the public website (its own domain) read the API from the browser. Read-only
+    # and without credentials: the API is public anyway, and /admin's HTTP Basic login is
+    # never sent cross-site. ETag is exposed so the site can use /api/catalog/version's
+    # If-None-Match the way the app does.
+    settings = get_settings()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?" if settings.cors_allow_localhost else None,
+        allow_methods=["GET", "HEAD"],
+        allow_headers=["*"],
+        expose_headers=["ETag"],
+        allow_credentials=False,
+        max_age=86400,
+    )
 
     app.include_router(health.router, prefix="/api")
     app.include_router(works.router, prefix="/api")
