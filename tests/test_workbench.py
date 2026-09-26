@@ -278,3 +278,50 @@ class TestPageMap:
         meta = (await upload(employee)).json()
         r = await employee.get(f"/api/drafts/{meta['id']}/pagemap")
         assert r.status_code == 200 and r.json() == {"pages": []}
+
+
+class TestFollowsWord:
+    def test_page_break_right_after_a_new_page_section_starts_no_extra_page(self, tmp_path):
+        """Word starts one page, not two, for a next-page section break followed by a
+        manual page break -- a real book gained a blank page (and every later page number
+        shifted by one) when both were counted."""
+        from docx.enum.section import WD_SECTION
+        from workbench.conversion import converter
+        d = docx.Document()
+        d.add_paragraph("الصفحة الأولى")
+        d.add_section(WD_SECTION.NEW_PAGE)
+        d.add_page_break()
+        d.add_paragraph("الصفحة الثانية")
+        d.add_page_break()
+        d.add_paragraph("الصفحة الثالثة")
+        d.save(tmp_path / "b.docx")
+        c = converter()
+        pages = c._split_pages(c.read_docx(tmp_path / "b.docx"))
+        texts = [" ".join(p.text for p in pg) for pg in pages]
+        assert texts == ["الصفحة الأولى", "الصفحة الثانية", "الصفحة الثالثة"]
+
+    def test_two_manual_breaks_still_make_a_blank_page(self, tmp_path):
+        from workbench.conversion import converter
+        d = docx.Document()
+        d.add_paragraph("قبل")
+        d.add_page_break()
+        d.add_page_break()
+        d.add_paragraph("بعد")
+        d.save(tmp_path / "b.docx")
+        c = converter()
+        assert len(c._split_pages(c.read_docx(tmp_path / "b.docx"))) == 3
+
+    def test_preview_stretches_page_height_only(self, tmp_path):
+        import re
+        import zipfile
+        from workbench.conversion import stretch_pages
+        d = docx.Document()
+        d.add_paragraph("نص")
+        d.save(tmp_path / "a.docx")
+        stretch_pages(tmp_path / "a.docx", tmp_path / "b.docx", 1.5)
+        def size(path):
+            xml = zipfile.ZipFile(path).read("word/document.xml").decode()
+            return re.search(r'<w:pgSz[^>]*w:w="(\d+)"[^>]*w:h="(\d+)"', xml).groups()
+        (w1, h1), (w2, h2) = size(tmp_path / "a.docx"), size(tmp_path / "b.docx")
+        assert w1 == w2 and int(h2) == round(int(h1) * 1.5)
+        assert docx.Document(tmp_path / "b.docx").paragraphs[0].text == "نص"

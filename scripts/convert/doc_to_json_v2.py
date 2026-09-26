@@ -274,6 +274,11 @@ def read_docx(path: Path) -> list[Para | None]:
 
     w_t, w_tab, w_br = qn("w:t"), qn("w:tab"), qn("w:br")
     result: list[Para | None] = []
+    # Word starts no extra page for a manual page break that directly follows a next-page
+    # section break (only empty paragraphs between): the section already began a new page.
+    # Counting both put a blank page into one real book that Word itself doesn't show,
+    # shifting every later page number by one.
+    after_section_break = False
 
     def paragraph(p_el) -> None:
         para = Paragraph(p_el, document)
@@ -291,22 +296,31 @@ def read_docx(path: Path) -> list[Para | None]:
                     else:
                         segments[-1] += "\u2028"  # soft line break, kept for heading recovery
         has_picture = bool(p_el.findall(".//" + qn("w:drawing")) or p_el.findall(".//" + qn("w:pict")))
+        nonlocal after_section_break
         for k, seg in enumerate(segments):
             if k > 0:
-                result.append(None)
+                if after_section_break:
+                    after_section_break = False
+                else:
+                    result.append(None)
             seg = re.sub(r"[ \u00a0]+", " ", seg).strip(" ")
             if seg.strip():
                 result.append(Para(seg.strip(), style))
+                after_section_break = False
             elif has_picture and len(segments) == 1:
                 result.append(Para("", "picture"))
+                after_section_break = False
         ppr = p_el.find(qn("w:pPr"))
         sect = ppr.find(qn("w:sectPr")) if ppr is not None else None
         if sect is not None:
             kind = sect.find(qn("w:type"))
             if kind is None or kind.get(qn("w:val")) != "continuous":
                 result.append(None)  # a next-page section break starts a new page
+                after_section_break = True
 
     def table(tbl_el) -> None:
+        nonlocal after_section_break
+        after_section_break = False
         tbl = Table(tbl_el, document)
         for row in tbl.rows:
             seen, cells = set(), []

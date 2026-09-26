@@ -126,19 +126,58 @@ def renderer_available() -> bool:
     return bool(shutil.which("soffice") and shutil.which("pdftoppm") and shutil.which("pdfinfo"))
 
 
+# How much taller than the book's own pages the preview is rendered. The books' Word
+# fonts can't be reproduced exactly, and every free substitute sets Arabic with taller
+# lines, so a full Word page doesn't fit on a rendered page of the same size and spills
+# onto a second one. With taller pages each Word page's text stays on one rendered page,
+# with the same page breaks -- the whole page can be seen at once. (A real 156-page book
+# rendered as 278 pages unstretched, and as exactly 156 from 1.3 up.)
+PREVIEW_PAGE_STRETCH = 1.35
+
+_PGSZ_HEIGHT_RE = re.compile(r'(<w:pgSz\b[^>]*?\bw:h=")(\d+)(")')
+
+
+def stretch_pages(src: Path, dst: Path, factor: float = PREVIEW_PAGE_STRETCH) -> None:
+    """Copy a .docx with every section's page height multiplied by `factor` -- only for
+    rendering the preview; the uploaded original is never changed."""
+    import zipfile
+
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "word/document.xml":
+                xml = data.decode("utf-8")
+                xml = _PGSZ_HEIGHT_RE.sub(lambda m: f"{m.group(1)}{round(int(m.group(2)) * factor)}{m.group(3)}", xml)
+                data = xml.encode("utf-8")
+            zout.writestr(item, data)
+
+
+def _soffice(args: list[str], profile: Path, timeout: int) -> None:
+    subprocess.run(["soffice", f"-env:UserInstallation=file://{profile}", "--headless", "--norestore", *args],
+                   check=True, timeout=timeout, capture_output=True)
+
+
 def render_pdf(folder: Path, source_file: str, timeout: int = 600) -> int:
-    """Render the source to original.pdf; returns its page count."""
+    """Render the source to original.pdf (pages stretched, see PREVIEW_PAGE_STRETCH);
+    returns its page count."""
     with _render_lock, tempfile.TemporaryDirectory() as tmp:
-        profile = Path(tmp) / "profile"
-        subprocess.run(
-            ["soffice", f"-env:UserInstallation=file://{profile}", "--headless", "--norestore",
-             "--convert-to", "pdf", "--outdir", tmp, str(folder / source_file)],
-            check=True, timeout=timeout, capture_output=True,
-        )
-        produced = Path(tmp) / (Path(source_file).stem + ".pdf")
+        tmp_dir = Path(tmp)
+        profile = tmp_dir / "profile"
+        source = folder / source_file
+        if source.suffix.lower() == ".doc":
+            _soffice(["--convert-to", "docx", "--outdir", str(tmp_dir), str(source)], profile, timeout)
+            source = tmp_dir / (source.stem + ".docx")
+            if not source.exists():
+                raise RuntimeError("LibreOffice could not read the .doc file")
+        preview = tmp_dir / "preview.docx"
+        stretch_pages(source, preview)
+        _soffice(["--convert-to", "pdf", "--outdir", str(tmp_dir), str(preview)], profile, timeout)
+        produced = tmp_dir / "preview.pdf"
         if not produced.exists():
             raise RuntimeError("LibreOffice produced no PDF")
         shutil.move(str(produced), folder / "original.pdf")
+    for stale in (folder / "img").glob("*.png") if (folder / "img").exists() else []:
+        stale.unlink()
     info = subprocess.run(["pdfinfo", str(folder / "original.pdf")], check=True,
                           capture_output=True, text=True, timeout=60).stdout
     match = re.search(r"^Pages:\s+(\d+)", info, re.MULTILINE)

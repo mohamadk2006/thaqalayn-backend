@@ -85,7 +85,10 @@
   #original .viewer { flex: 1; overflow: auto; padding: 10px; text-align: center; }
   #original img { max-width: 100%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.2); display: block; margin: 0 auto 4px; }
   #original .pgtag { font-size: 11.5px; color: var(--muted); margin: 8px 0 3px; }
-  #original .viewer.zoom img { max-width: none; width: 160%; }
+  /* Default: each original page fits whole in the panel; the zoom button switches to
+     full width, to read small print. */
+  #original .viewer.fit img { max-height: calc(100vh - 150px); width: auto; }
+  #original .viewer.zoom img { max-width: none; width: 100%; }
   #original .placeholder { color: var(--muted); padding: 40px 20px; }
   .page-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 13.5px; }
   .page-meta label { display: flex; align-items: center; gap: 5px; color: var(--muted); }
@@ -189,9 +192,9 @@
         <label title="عند التفعيل يُعرض من الأصل ما يقابل نص الصفحة المحوّلة"><input type="checkbox" id="origLink" checked> ربط</label>
         <span id="origOffset" class="hint"></span>
         <span class="spacer"></span>
-        <button id="origZoom" title="تكبير">🔍</button>
+        <button id="origZoom" title="تكبير (عرض كامل العرض)">🔍</button>
       </div>
-      <div class="viewer" id="origViewer"><div class="placeholder">جاري التحميل…</div></div>
+      <div class="viewer fit" id="origViewer"><div class="placeholder">جاري التحميل…</div></div>
     </div>
   </div>
 </div>
@@ -536,7 +539,7 @@ function renderOriginal() {
   viewer.dataset.key = key;
   let html = "";
   for (let n = a; n <= b; n++) {
-    if (b > a) html += `<div class="pgtag">صفحة ${n}${n > a ? " (تكملة — صفحات الأصل هنا أقصر من Word)" : ""}</div>`;
+    if (b > a) html += `<div class="pgtag">صفحة ${n}${n > a ? " (تكملة)" : ""}</div>`;
     html += `<img alt="صفحة الأصل ${n}" src="/api/drafts/${draft.id}/original/${n}">`;
   }
   viewer.innerHTML = html;
@@ -558,7 +561,12 @@ function moveOriginal(delta) {
 $("origPrev").onclick = () => moveOriginal(-1);
 $("origNext").onclick = () => moveOriginal(1);
 $("origLink").onchange = () => renderOriginal();
-$("origZoom").onclick = () => $("origViewer").classList.toggle("zoom");
+$("origZoom").onclick = () => {
+  const v = $("origViewer");
+  const zoomed = v.classList.toggle("zoom");
+  v.classList.toggle("fit", !zoomed);
+  $("origZoom").title = zoomed ? "عرض الصفحة كاملة" : "تكبير";
+};
 async function rerender() {
   try { draft = await api("POST", `/api/drafts/${draft.id}/render`); pollRender(); } catch (e) { alert(e.message); }
 }
