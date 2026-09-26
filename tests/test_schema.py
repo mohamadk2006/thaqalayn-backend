@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from app.models import Author, Book, Language, Page, Section, Subject, Work
+from app.services.arabic import SEARCH_TS_CONFIG
 
 # A real passage from the corpus, with full tashkeel — the form actually stored.
 DIACRITIZED = "قالَ الإمامُ الصادقُ عليه السلام: العلمُ نورٌ يقذفه اللهُ في قلبِ من يشاء"
@@ -22,7 +23,7 @@ def _tsv(page_text: str):
     computed the same way the real importer computes it, from a value that is itself
     never persisted, so any test exercising search behavior has to build it explicitly
     rather than rely on a GENERATED column to do it automatically."""
-    return func.to_tsvector("arabic", func.arabic_normalize(page_text))
+    return func.to_tsvector(SEARCH_TS_CONFIG, func.arabic_normalize(page_text))
 
 
 async def _make_book(session, *, book_id: int = 900001, volume: int | None = 1) -> Book:
@@ -151,7 +152,7 @@ class TestGeneratedSearchVector:
                 .where(Page.book_id == book.id)
                 .where(
                     Page.search_tsv.op("@@")(
-                        func.phraseto_tsquery("arabic", func.arabic_normalize("الامام الصادق"))
+                        func.phraseto_tsquery(SEARCH_TS_CONFIG, func.arabic_normalize("الامام الصادق"))
                     )
                 )
             )
@@ -167,7 +168,7 @@ class TestGeneratedSearchVector:
             await session.execute(
                 text(
                     "EXPLAIN SELECT id FROM pages WHERE search_tsv @@ "
-                    "phraseto_tsquery('arabic', arabic_normalize('الامام الصادق'))"
+                    f"phraseto_tsquery('{SEARCH_TS_CONFIG}', arabic_normalize('الامام الصادق'))"
                 )
             )
         ).scalars().all()

@@ -1,7 +1,9 @@
 """Full-library search: the implementation the API contract deliberately hides.
 
 Matching runs against the GIN-indexed `search_tsv` column (fast, proven correct against
-real diacritized text, stemmed via Postgres's built-in 'arabic' config). Snippets are
+real diacritized text). Words match exactly as typed, after normalization only
+(tashkeel/hamza/etc., see app/services/arabic.py) -- no stemming, so "الاغتسال ليلا" does
+not also find "الاغتسال بالليل". Snippets are
 extracted separately, from each matched page's *original* text via `find_original_match`
 -- ts_headline() would return normalized (tashkeel-stripped, stemmed) text instead, and a
 search result has to show the user real text.
@@ -28,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.catalog import LibraryOut, SubjectOut
 from app.schemas.search import SearchHit
-from app.services.arabic import find_original_match, normalize
+from app.services.arabic import SEARCH_TS_CONFIG, find_original_match, normalize
 from app.services.paging import page_text_and_offsets
 
 # Characters of context kept on each side of the match inside a snippet. Large enough to
@@ -111,7 +113,7 @@ _CANDIDATE_CAP = 5000
 # into the CTE narrows what the scan is even looking for, so a filtered search stays both
 # fast and exact -- only a broad, unfiltered, very-common-phrase search is subject to the
 # cap's approximation at all.
-_CANDIDATES_CTE = """
+_CANDIDATES_CTE = f"""
     WITH candidates AS (
         SELECT p.id, p.book_id, p.sequence, p.page_number, p.section_id,
                ts_rank_cd(p.search_tsv, q) AS score
@@ -119,7 +121,7 @@ _CANDIDATES_CTE = """
         JOIN books b ON b.id = p.book_id AND b.is_published
         JOIN works w ON w.id = b.work_id
         LEFT JOIN authors a ON a.id = b.author_id,
-        phraseto_tsquery('arabic', :normalized_query) q
+        phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query) q
         WHERE p.search_tsv @@ q
 """
 

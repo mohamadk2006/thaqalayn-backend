@@ -48,7 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from app.config import get_settings  # noqa: E402
 from app.db import dispose_engine, get_sessionmaker  # noqa: E402
-from app.services.arabic import normalize  # noqa: E402
+from app.services.arabic import SEARCH_TS_CONFIG, normalize  # noqa: E402
 from app.services.paging import paginate, paginate_sections  # noqa: E402
 
 
@@ -365,13 +365,12 @@ async def _import_content(
         if pages:
             # search_tsv is computed straight from :text here, not stored anywhere --
             # pages has no `text` column (see Page's docstring in app/models/library.py).
-            # 'arabic', not 'simple': Postgres's built-in Snowball stemmer, measured to
-            # shrink the index ~42% on this corpus's real text versus no stemming at all.
+            # SEARCH_TS_CONFIG ('simple'): exact words, no stemming -- see app/services/arabic.py.
             await session.execute(
-                text("""INSERT INTO pages (book_id, sequence, page_number, page_type,
+                text(f"""INSERT INTO pages (book_id, sequence, page_number, page_type,
                                             is_blank, search_tsv, block_offsets, section_id)
                         VALUES (:bid, :seq, :pno, :ptype, :blank,
-                                to_tsvector('arabic', arabic_normalize(:text)),
+                                to_tsvector('{SEARCH_TS_CONFIG}', arabic_normalize(:text)),
                                 cast(:offs as jsonb), :sid)"""),
                 [{"bid": bid, "seq": p.sequence, "pno": p.page_number, "ptype": p.page_type,
                   "blank": p.is_blank, "text": p.text,

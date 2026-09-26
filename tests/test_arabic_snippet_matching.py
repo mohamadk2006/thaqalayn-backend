@@ -20,7 +20,8 @@ class TestFindsRealCorpusPatterns:
         text = "قال الإمامُ الصادقُ عليه السلام"
         match = find_original_match(text, normalize("الامام الصادق"))
         assert match is not None
-        assert match.group() == "الإمامُ الصادق"
+        # The last word's own trailing mark belongs to the highlight too.
+        assert match.group() == "الإمامُ الصادقُ"
 
     def test_heavily_diacritized_text(self):
         text = "عن الإِمَام الصَّادِق في تفسير هذه الآية"

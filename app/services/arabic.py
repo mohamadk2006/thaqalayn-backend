@@ -24,6 +24,13 @@ gets stored and displayed; nothing here ever modifies the source books.
 import re
 import unicodedata
 
+# The Postgres text-search config every search_tsv is built with and every query is parsed
+# with -- the importer, the search service and the reindex tool all read it from here, so
+# they can never disagree. 'simple' indexes each (normalized) word exactly as written:
+# a search matches the words the user typed, not other forms of them. ('arabic', the
+# Snowball stemmer used before, folded الاغتسال/اغتسالها and ليلا/بالليل/ليلة together.)
+SEARCH_TS_CONFIG = "simple"
+
 # ── Marks removed entirely ───────────────────────────────────────────────────────
 # Tashkeel (fatha, damma, kasra, shadda, sukun, tanween …) plus the Quranic annotation
 # marks that appear throughout this corpus. Measured on the real library: 50.7% of
@@ -125,7 +132,14 @@ for _original, _digit in _DIGIT_FOLDING.items():
 for _digit in list(_REVERSE_DIGITS):
     _REVERSE_DIGITS[_digit].add(_digit)
 
-_MARK_GAP = f"[{_TASHKEEL}{_TATWEEL}{_INVISIBLES}]*"
+_MARKS = f"[{_TASHKEEL}{_TATWEEL}{_INVISIBLES}]"
+_MARK_GAP = f"{_MARKS}*"
+# Whole words only, like the index: the query must not start or end inside a longer
+# word ("الليل" inside "والليل"). Marks belong to the letter before them, so a letter
+# followed by up to two marks (e.g. shadda + fatha) still counts as "inside a word".
+# Python's lookbehind must be fixed-width, hence one assertion per mark count.
+_WORD_START = rf"(?<!\w)(?<!\w{_MARKS})(?<!\w{_MARKS}{_MARKS})"
+_WORD_END = r"(?!\w)"
 
 
 def build_match_pattern(normalized_query: str) -> re.Pattern[str]:
@@ -161,7 +175,7 @@ def build_match_pattern(normalized_query: str) -> re.Pattern[str]:
     # Between words: at least one whitespace/mark character, collapsed by normalize()
     # from what could be any run of real whitespace in the original.
     pattern = rf"[\s{_TASHKEEL}{_TATWEEL}]+".join(word_patterns)
-    return re.compile(pattern)
+    return re.compile(_WORD_START + pattern + _MARK_GAP + _WORD_END)
 
 
 def find_original_match(original_text: str, normalized_query: str) -> re.Match[str] | None:

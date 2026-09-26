@@ -451,11 +451,11 @@ class Page(Base):
 
     # NOT a GENERATED column: that would require a stored source column to generate from,
     # which is exactly what this table doesn't have. The importer computes this directly
-    # -- to_tsvector('arabic', arabic_normalize(:text)) -- passing the page text as a bind
-    # parameter that is never itself persisted. 'arabic' (Postgres's built-in Snowball
-    # stemmer), not 'simple': measured on a real sample, stemming shrunk the index by
-    # ~42% and means a query for one inflected form of a word also finds other forms of
-    # it, which 'simple' never did.
+    # -- to_tsvector(SEARCH_TS_CONFIG, arabic_normalize(:text)) -- passing the page text as
+    # a bind parameter that is never itself persisted. SEARCH_TS_CONFIG is 'simple' (exact
+    # words; see app/services/arabic.py). It was briefly 'arabic' (Snowball stemming, ~42%
+    # smaller) while the old VPS was short of disk, but stemming made a search also match
+    # other forms of the typed words, which the library's users don't want.
     search_tsv: Mapped[str] = mapped_column(TSVECTOR, nullable=False)
 
     __table_args__ = (
