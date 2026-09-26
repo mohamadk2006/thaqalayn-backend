@@ -9,13 +9,17 @@ on demand by pdftoppm (poppler), cached next to it.
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import unicodedata
 from pathlib import Path
+
+from app.services.arabic import normalize
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -155,3 +159,129 @@ def page_image(folder: Path, number: int) -> Path:
         )
         stem.with_suffix(".png").replace(target)
     return target
+
+
+# ── lining converted pages up with the rendered original ─────────────────────
+#
+# LibreOffice does not break pages where Word does: these books are set in Traditional
+# Arabic, whose tight line height no free font reproduces, so every Word page overflows
+# into a short extra page (a 156-page book rendered as 278). Page N of the render is
+# therefore not page N of the book. Instead each converted page is located in the render
+# by its own words -- where its opening words and its closing words fall -- and shown as
+# the range of rendered pages it spans.
+
+_WORD_RE = re.compile(r"[\u0621-\u064A\u0660-\u0669\u06F0-\u06F90-9A-Za-z]{2,}")
+
+
+def text_words(text: str) -> list[str]:
+    """Words for matching: presentation forms unfolded (PDF text extraction yields them),
+    then the search normalizer (tashkeel, hamza forms ...), one-letter tokens dropped."""
+    return _WORD_RE.findall(normalize(unicodedata.normalize("NFKC", text or "")))
+
+
+def extract_original_words(folder: Path, pages: int) -> None:
+    """Save each rendered page's words (original_words.json), once per render."""
+    out = []
+    for n in range(1, pages + 1):
+        text = subprocess.run(["pdftotext", "-f", str(n), "-l", str(n), str(folder / "original.pdf"), "-"],
+                              capture_output=True, text=True, timeout=60).stdout
+        out.append(text_words(text))
+    (folder / "original_words.json").write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+
+
+def page_map(book: dict, pdf_words: list[list[str]], gram: int = 3) -> list[list[int] | None]:
+    """For each converted page (in order), [first, last] rendered page it spans (1-based),
+    or None where it can't be located."""
+    stream: list[str] = []
+    page_of: list[int] = []
+    for n, words in enumerate(pdf_words, 1):
+        stream.extend(words)
+        page_of.extend([n] * len(words))
+    if not stream:
+        return [None] * len(book.get("pages", []))
+    index: dict[tuple, list[int]] = {}
+    for i in range(len(stream) - gram + 1):
+        index.setdefault(tuple(stream[i:i + gram]), []).append(i)
+
+    def find(words: list[str], lo: int, hi: int, from_end: bool) -> int | None:
+        """Stream position of the page's first (or last) word, found via an n-gram near
+        its start (or end) occurring within [lo, hi]. A few n-grams are tried in case one
+        differs (a heading or a verse extracted in another order, a footnote marker)."""
+        if len(words) < gram:
+            return None
+        if from_end:
+            starts = range(len(words) - gram, max(len(words) - gram - 12, -1), -1)
+        else:
+            starts = range(0, min(12, len(words) - gram + 1))
+        for k in starts:
+            for pos in index.get(tuple(words[k:k + gram]), []):
+                if pos > hi:
+                    break
+                if pos >= lo:
+                    # Where the page's own first (last) word is, from where this n-gram sits
+                    # in it -- not clamped to `lo`: an overlap with the page before is
+                    # resolved below by trimming that page, which is the one that guessed.
+                    at = pos + (len(words) - gram - k if from_end else -k)
+                    return min(max(at, 0), len(stream) - 1)
+        return None
+
+    spans: list[tuple[int, int] | None] = []  # stream positions of each page's first/last word
+    cursor = 0
+    skipped = 0  # words of pages not located since the last one that was
+    for page in book.get("pages", []):
+        words = text_words(" ".join(b.get("text", "") for b in page.get("blocks", [])))
+        # Look ahead only as far as the pages skipped since the last match could reach.
+        start = find(words, cursor, cursor + 600 + int(skipped * 1.5), from_end=False)
+        if start is None:
+            spans.append(None)
+            skipped += len(words)
+            continue
+        expected = start + len(words) - 1
+        slack = max(25, len(words) // 3)
+        # An ending found far from where the page's own length puts it is another page's
+        # copy of the same phrase (the real ending was garbled in extraction): ignore it.
+        end = find(words, max(start, expected - slack), expected + slack, from_end=True)
+        if end is None:
+            end = min(expected, len(stream) - 1)
+            cursor = start + (len(words) * 4) // 5  # an estimate: leave the next page findable
+        else:
+            cursor = end + 1
+        spans.append((start, end))
+        skipped = 0
+
+    # A page ends before the next located page begins.
+    located = [i for i, span in enumerate(spans) if span]
+    for i, j in zip(located, located[1:]):
+        start, end = spans[i]
+        spans[i] = (start, max(start, min(end, spans[j][0] - 1)))
+    result: list[list[int] | None] = [
+        [page_of[span[0]], page_of[span[1]]] if span else None for span in spans
+    ]
+
+    # Runs of pages not located (no text of their own, or text that didn't match) share
+    # out, in order, the rendered pages lying between their located neighbours.
+    i = 0
+    while i < len(result):
+        if result[i] is not None:
+            i += 1
+            continue
+        j = i
+        while j < len(result) and result[j] is None:
+            j += 1
+        first = result[i - 1][1] + 1 if i > 0 else 1
+        last = result[j][0] - 1 if j < len(result) else len(pdf_words)
+        free = last - first + 1
+        run = j - i
+        if free >= 1:
+            for r in range(run):
+                a = first + r * free // run
+                b = first + (r + 1) * free // run - 1
+                result[i + r] = [a, max(a, b)] if a <= last else [last, last]
+        i = j
+    # A rendered page between two consecutive pages' ranges (an overflow whose text didn't
+    # extract cleanly, or a blank page) is shown with the page before it, so every page of
+    # the original can be seen next to something.
+    for k in range(len(result) - 1):
+        if result[k] and result[k + 1] and result[k + 1][0] - result[k][1] > 1:
+            result[k] = [result[k][0], result[k + 1][0] - 1]
+    return result

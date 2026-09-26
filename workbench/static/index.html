@@ -83,7 +83,8 @@
   #original { flex: 1 1 45%; min-width: 0; border-right: 1px solid var(--border); background: #e9e7e1; display: flex; flex-direction: column; }
   #original .bar { background: var(--panel); border-bottom: 1px solid var(--border); padding: 6px 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
   #original .viewer { flex: 1; overflow: auto; padding: 10px; text-align: center; }
-  #original img { max-width: 100%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
+  #original img { max-width: 100%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.2); display: block; margin: 0 auto 4px; }
+  #original .pgtag { font-size: 11.5px; color: var(--muted); margin: 8px 0 3px; }
   #original .viewer.zoom img { max-width: none; width: 160%; }
   #original .placeholder { color: var(--muted); padding: 40px 20px; }
   .page-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 13.5px; }
@@ -185,7 +186,7 @@
         <button id="origPrev">&rarr;</button>
         <span id="origLabel"></span>
         <button id="origNext">&larr;</button>
-        <label title="عند التفعيل تتبع صفحة الأصل الصفحة المحوّلة"><input type="checkbox" id="origLink" checked> ربط</label>
+        <label title="عند التفعيل يُعرض من الأصل ما يقابل نص الصفحة المحوّلة"><input type="checkbox" id="origLink" checked> ربط</label>
         <span id="origOffset" class="hint"></span>
         <span class="spacer"></span>
         <button id="origZoom" title="تكبير">🔍</button>
@@ -300,8 +301,9 @@ let book = null;        // the book being edited (pages sorted, toc rebuilt on s
 let currentPage = 0;
 let dirty = false;
 let readOnly = false;
-let origOffset = 0;     // original page = converted page index + 1 + origOffset
-let origPage = 1;
+let origOffset = 0;     // fallback only: original page = converted page index + 1 + origOffset
+let origPage = 1;       // the single original page shown while not linked
+let pageMap = [];       // per converted page: [first, last] rendered original page, from the server
 let pollTimer = null;
 
 window.addEventListener("hashchange", route);
@@ -477,19 +479,38 @@ $("issuesClose").onclick = () => $("issuesDialog").close();
 function pollRender() {
   clearInterval(pollTimer);
   const st = (draft.render || {}).status;
-  renderOriginal();
+  if (st === "done") loadPageMap(); else renderOriginal();
   if (st === "pending" || st === "running") {
     pollTimer = setInterval(async () => {
       try {
         const fresh = await api("GET", "/api/drafts/" + draft.id);
         draft.render = fresh.render;
-        if (!["pending", "running"].includes(fresh.render.status)) { clearInterval(pollTimer); renderReport(); renderOriginal(); }
+        if (!["pending", "running"].includes(fresh.render.status)) { clearInterval(pollTimer); renderReport(); await loadPageMap(); }
       } catch {}
     }, 3000);
   }
 }
 
 // ── original pane ───────────────────────────────────────────────────────────
+
+async function loadPageMap() {
+  pageMap = [];
+  if ((draft.render || {}).status === "done" && book) {
+    try { pageMap = (await api("GET", `/api/drafts/${draft.id}/pagemap`)).pages || []; } catch {}
+  }
+  renderOriginal();
+}
+
+// The rendered original does not break pages where Word does (these books' fonts can't be
+// reproduced exactly), so a converted page is shown next to the rendered page(s) holding
+// its own text -- found by the server from the words -- not "the page with the same number".
+function linkedRange() {
+  const total = (draft.render || {}).pages || 0;
+  const hit = pageMap[currentPage];
+  if (hit) return hit;
+  const n = Math.max(1, Math.min(currentPage + 1 + origOffset, total));
+  return [n, n];
+}
 
 function renderOriginal() {
   const rs = draft.render || {};
@@ -498,29 +519,40 @@ function renderOriginal() {
     const msg = { pending: "جاري تجهيز صفحات الأصل… (قد يستغرق دقيقة)", running: "جاري تجهيز صفحات الأصل… (قد يستغرق دقيقة)",
       failed: "تعذّر تحويل ملف Word إلى صور: " + (rs.error || ""), unavailable: "عرض الأصل غير متاح على هذا الخادم." }[rs.status] || "";
     viewer.innerHTML = `<div class="placeholder">${escapeHtml(msg)}${rs.status === "failed" ? '<br><br><button onclick="rerender()">إعادة المحاولة</button>' : ""}</div>`;
+    viewer.dataset.key = "";
     $("origLabel").textContent = ""; $("origOffset").textContent = "";
     return;
   }
-  if ($("origLink").checked) origPage = currentPage + 1 + origOffset;
-  origPage = Math.max(1, Math.min(origPage, rs.pages));
-  $("origLabel").textContent = `صفحة ${origPage} من ${rs.pages}`;
-  $("origOffset").textContent = origOffset ? `(إزاحة ${origOffset > 0 ? "+" : ""}${origOffset})` : "";
-  $("origPrev").disabled = origPage <= 1;
-  $("origNext").disabled = origPage >= rs.pages;
-  const src = `/api/drafts/${draft.id}/original/${origPage}`;
-  const img = viewer.querySelector("img");
-  if (img) { if (!img.src.endsWith(src)) img.src = src; }
-  else viewer.innerHTML = `<img alt="صفحة الأصل" src="${src}">`;
-  // Warm the next page so flipping feels instant.
-  if (origPage < rs.pages) new Image().src = `/api/drafts/${draft.id}/original/${origPage + 1}`;
+  const linked = $("origLink").checked;
+  let [a, b] = linked ? linkedRange() : [origPage, origPage];
+  a = Math.max(1, Math.min(a, rs.pages)); b = Math.max(a, Math.min(b, rs.pages));
+  origPage = a;
+  $("origLabel").textContent = a === b ? `صفحة ${a} من ${rs.pages}` : `صفحات ${a}–${b} من ${rs.pages}`;
+  $("origOffset").textContent = linked && !pageMap[currentPage] ? "(تقريبي)" : "";
+  $("origPrev").disabled = a <= 1;
+  $("origNext").disabled = b >= rs.pages;
+  const key = `${draft.id}:${a}-${b}`;
+  if (viewer.dataset.key === key) return;
+  viewer.dataset.key = key;
+  let html = "";
+  for (let n = a; n <= b; n++) {
+    if (b > a) html += `<div class="pgtag">صفحة ${n}${n > a ? " (تكملة — صفحات الأصل هنا أقصر من Word)" : ""}</div>`;
+    html += `<img alt="صفحة الأصل ${n}" src="/api/drafts/${draft.id}/original/${n}">`;
+  }
+  viewer.innerHTML = html;
+  viewer.scrollTop = 0;
+  // Warm the next converted page's images so flipping feels instant.
+  const next = pageMap[currentPage + 1];
+  if (linked && next) for (let n = next[0]; n <= next[1]; n++) new Image().src = `/api/drafts/${draft.id}/original/${n}`;
 }
 function moveOriginal(delta) {
-  origPage += delta;
+  // Browsing the original by hand: unlink, and step one rendered page at a time.
   if ($("origLink").checked) {
-    // Moving the original while linked means the two had drifted: remember the new offset.
-    origOffset = origPage - (currentPage + 1);
-    safeStorage.set("wb_offset_" + draft.id, String(origOffset));
+    const [a, b] = linkedRange();
+    origPage = delta > 0 ? b : a;
+    $("origLink").checked = false;
   }
+  origPage += delta;
   renderOriginal();
 }
 $("origPrev").onclick = () => moveOriginal(-1);
@@ -555,6 +587,7 @@ async function save() {
     setStatus("تم الحفظ", "saved");
     renderReport();
     renderSidebar();
+    loadPageMap();
     return true;
   } catch (e) { alert("فشل الحفظ: " + e.message); return false; }
   finally { idle(); }
@@ -683,6 +716,7 @@ $("optRun").onclick = async () => {
     dirty = false; safeStorage.remove("wb_backup_" + draft.id);
     currentPage = 0;
     renderEditor();
+    loadPageMap();
   } catch (e) { alert(e.message); }
   finally { idle(); }
 };

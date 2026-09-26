@@ -224,3 +224,57 @@ def test_draft_ids_cannot_escape_the_folder(tmp_path):
     for bad in ["../x", "20260101-abcdef/../../x", "", "20260101-ABCDEF"]:
         with pytest.raises(drafts.DraftNotFound):
             drafts.draft_dir(tmp_path, bad)
+
+
+class TestPageMap:
+    """Converted pages located in the rendered original by their words: LibreOffice breaks
+    pages differently from Word (a 156-page book rendered as 278), so page N of the render
+    is not page N of the book."""
+
+    @staticmethod
+    def page(text):
+        return {"blocks": [{"type": "text", "text": text}]}
+
+    def words(self, n, tag):
+        return " ".join(f"كلمة{tag}{i}" for i in range(n))
+
+    def test_each_page_spans_its_own_rendered_pages(self):
+        from workbench.conversion import page_map, text_words
+        p1, p2, p3 = self.words(40, "ا"), self.words(40, "ب"), self.words(10, "ج")
+        # The render: page 1's text spills onto a second rendered page, page 2 fits.
+        w1 = text_words(p1)
+        pdf = [w1[:30], w1[30:], text_words(p2), text_words(p3)]
+        book = {"pages": [self.page(p1), self.page(p2), self.page(p3)]}
+        assert page_map(book, pdf) == [[1, 2], [3, 3], [4, 4]]
+
+    def test_pages_without_text_sit_between_their_neighbours(self):
+        from workbench.conversion import page_map, text_words
+        p1, p3 = self.words(20, "ا"), self.words(20, "ج")
+        pdf = [text_words(p1), [], text_words(p3)]
+        book = {"pages": [self.page(p1), self.page(""), self.page(p3)]}
+        assert page_map(book, pdf) == [[1, 1], [2, 2], [3, 3]]
+
+    def test_a_repeated_phrase_far_ahead_does_not_derail_the_rest(self):
+        from workbench.conversion import page_map, text_words
+        common = "قال رسول الله صلى الله عليه واله"
+        pages = [f"{self.words(30, t)} {common}" for t in "ابجد"]
+        pdf = [text_words(p) for p in pages]
+        # Page 2's ending is garbled in the render (as two-column verse extracts): its end
+        # can't be found nearby, and must not be matched to a later page's same phrase.
+        pdf[1] = text_words(self.words(30, "ب")) + ["مختلف", "تماما", "هنا"]
+        book = {"pages": [self.page(p) for p in pages]}
+        assert page_map(book, pdf) == [[1, 1], [2, 2], [3, 3], [4, 4]]
+
+    def test_diacritics_and_presentation_forms_still_match(self):
+        from workbench.conversion import page_map, text_words
+        page_text = "قالَ الإمامُ الصادقُ عليه السلامُ العلمُ نورٌ يقذفه اللهُ"
+        # PDF extraction yields presentation forms; the converted page carries tashkeel.
+        import unicodedata
+        extracted = "ﻗﺎﻝ ﺍﻻﻣﺎﻡ ﺍﻟﺼﺎﺩﻕ ﻋﻠﻴﻪ ﺍﻟﺴﻼﻡ ﺍﻟﻌﻠﻢ ﻧﻮﺭ ﻳﻘﺬﻓﻪ ﺍﻟﻠﻪ"
+        assert unicodedata.normalize("NFKC", extracted) != extracted
+        assert page_map({"pages": [self.page(page_text)]}, [text_words(extracted)]) == [[1, 1]]
+
+    async def test_endpoint_is_empty_until_the_original_is_rendered(self, employee):
+        meta = (await upload(employee)).json()
+        r = await employee.get(f"/api/drafts/{meta['id']}/pagemap")
+        assert r.status_code == 200 and r.json() == {"pages": []}

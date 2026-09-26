@@ -15,6 +15,7 @@ the API, sharing only the drafts folder. See app/services/drafts.py for storage.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 from functools import lru_cache
@@ -111,6 +112,7 @@ def _render(draft_id: str) -> None:
     drafts.update(root(), draft_id, render={"status": "running", "pages": 0, "error": None})
     try:
         pages = conversion.render_pdf(folder, meta["sourceFile"])
+        conversion.extract_original_words(folder, pages)
         drafts.update(root(), draft_id, render={"status": "done", "pages": pages, "error": None})
     except Exception as exc:  # noqa: BLE001
         log.exception("rendering %s failed", draft_id)
@@ -222,6 +224,22 @@ async def original_page(draft_id: str, number: int, _: str = Depends(current_use
         raise HTTPException(404, "صفحة غير متوفرة")
     path = await asyncio.to_thread(conversion.page_image, drafts.draft_dir(root(), draft_id), number)
     return FileResponse(path, media_type="image/png", headers={"Cache-Control": "private, max-age=86400"})
+
+
+@app.get("/api/drafts/{draft_id}/pagemap")
+async def get_page_map(draft_id: str, _: str = Depends(current_user)) -> dict:
+    """Which rendered original pages each converted page spans -- computed against the
+    book as last saved, so it follows page edits (merges, splits, deletions)."""
+    meta = _meta_or_404(draft_id)
+    folder = drafts.draft_dir(root(), draft_id)
+    words_file = folder / "original_words.json"
+    book = drafts.load_book(root(), draft_id)
+    if meta["render"]["status"] != "done" or book is None:
+        return {"pages": []}
+    if not words_file.exists():  # rendered before page maps existed
+        await asyncio.to_thread(conversion.extract_original_words, folder, meta["render"]["pages"])
+    pdf_words = json.loads(words_file.read_text(encoding="utf-8"))
+    return {"pages": await asyncio.to_thread(conversion.page_map, book, pdf_words)}
 
 
 @app.get("/api/drafts/{draft_id}/source")
