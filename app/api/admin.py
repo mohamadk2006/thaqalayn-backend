@@ -21,7 +21,7 @@ from pathlib import Path
 import docx
 from docx.oxml.ns import qn
 from fastapi import APIRouter, Depends, Form, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from starlette.exceptions import HTTPException
 from sqlalchemy import text
@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.books import _resolve_under_root
 from app.config import get_settings
 from app.db import get_session
+from app.services import drafts
 from app.services.arabic import normalize
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -89,6 +90,7 @@ _PAGE = """<!doctype html>
 <body>
 <nav><a href="/admin">لوحة التحكم</a> &nbsp;|&nbsp; <a href="/admin/libraries">المكتبات</a>
 &nbsp;|&nbsp; <a href="/admin/books/new">إضافة كتاب</a>
+&nbsp;|&nbsp; <a href="/admin/drafts">مراجعة الكتب المحوّلة</a>
 &nbsp;|&nbsp; <form method="get" action="/admin/search" style="display:inline">
 <input name="q" placeholder="بحث بالعنوان أو المؤلف..." style="width:16rem; display:inline; margin:0">
 </form></nav>
@@ -1211,22 +1213,39 @@ async def new_book_json(
     as every other book. A multi-volume book is one file per volume, grouped into a work
     by identical (title, author): when `work_id` is given the volume is forced onto that
     work's own title/author/death label so it can never split off into a new work."""
-    settings = get_settings()
     back = f"/admin/works/{work_id}" if work_id.strip().isdigit() else "/admin/books/new"
-
-    def fail(message: str) -> RedirectResponse:
-        return RedirectResponse(f"{back}?err={message}", status_code=303)
-
     try:
         content = json.loads((await file.read()).decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return fail(f"الملف ليس JSON صالحاً: {exc}")
-    if not isinstance(content, dict):
-        return fail("الملف ليس كتاباً بصيغة v2")
+        return RedirectResponse(f"{back}?err=الملف ليس JSON صالحاً: {exc}", status_code=303)
+    new_book, new_work, error = await _import_book_json(
+        session, content, book_id=book_id, volume=volume, work_id=work_id,
+        subject=subject, library=library, source="admin-panel-json",
+    )
+    if error:
+        return RedirectResponse(f"{back}?err={error}", status_code=303)
+    return RedirectResponse(
+        f"/admin/works/{new_work}?ok=تم استيراد الكتاب رقم {new_book}", status_code=303
+    )
 
+
+async def _import_book_json(
+    session: AsyncSession, content, *, book_id: str = "", volume: str = "", work_id: str = "",
+    subject: list[str] | None = None, library: list[int] | None = None, source: str,
+) -> tuple[int | None, int | None, str | None]:
+    """Validate and import a v2 book JSON -- the JSON upload form and the conversion
+    review list (/admin/drafts) both publish through here. Returns (book id, work id,
+    None) on success or (None, None, message) without importing anything.
+
+    A multi-volume book is one file per volume, grouped into a work by identical (title,
+    author): when `work_id` is given the volume is forced onto that work's own
+    title/author/death label so it can never split off into a new work."""
+    settings = get_settings()
+    if not isinstance(content, dict):
+        return None, None, "الملف ليس كتاباً بصيغة v2"
     metadata = content.setdefault("metadata", {})
     if not isinstance(metadata, dict):
-        return fail("حقل metadata غير صالح")
+        return None, None, "حقل metadata غير صالح"
 
     forced_work: int | None = None
     if work_id.strip().isdigit():
@@ -1238,7 +1257,7 @@ async def new_book_json(
             {"id": int(work_id)},
         )).first()
         if row is None:
-            return fail("العمل غير موجود")
+            return None, None, "العمل غير موجود"
         forced_work = row.id
         content["title"] = row.title
         content["author"] = row.author or ""
@@ -1247,7 +1266,7 @@ async def new_book_json(
         else:
             metadata.pop("authorDeath", None)
         if not volume.strip().isdigit():
-            return fail("رقم المجلد مطلوب عند إضافة مجلد إلى عمل")
+            return None, None, "رقم المجلد مطلوب عند إضافة مجلد إلى عمل"
 
     if volume.strip().isdigit():
         metadata["volume"] = str(int(volume))
@@ -1259,7 +1278,7 @@ async def new_book_json(
     errors = [i for i in importer.val.validate(content) if i.severity == "error"]
     if errors:
         detail = "؛ ".join(f"{i.code}: {i.detail}" for i in errors[:4])
-        return fail(f"الملف غير صالح ({len(errors)} خطأ): {detail}")
+        return None, None, f"الملف غير صالح ({len(errors)} خطأ): {detail}"
 
     # Same (title, author) as an existing work means this file would join it: refuse a
     # second copy of the same volume, and refuse an unnumbered volume next to real ones.
@@ -1277,19 +1296,19 @@ async def new_book_json(
     vol_int = int(metadata["volume"]) if str(metadata.get("volume", "")).isdigit() else None
     if existing:
         if vol_int is None:
-            return fail(
+            return None, None, (
                 "يوجد كتاب بالعنوان والمؤلف نفسيهما: حدّد رقم المجلد، أو استخدم «إضافة مجلد جديد» في صفحة العمل"
             )
         clash = next((r for r in existing if r.volume == vol_int), None)
         if clash:
-            return fail(f"المجلد {vol_int} موجود مسبقاً (كتاب #{clash.id})")
+            return None, None, f"المجلد {vol_int} موجود مسبقاً (كتاب #{clash.id})"
 
     result = await importer._import_content(
-        session, content, str(resolved_id), f"{resolved_id}.json", "admin-panel-json",
+        session, content, str(resolved_id), f"{resolved_id}.json", source,
         settings.books_root, True,
     )
     if result != "ok":
-        return fail(f"فشل الاستيراد ({result}) -- راجع سجل الاستيراد لمعرفة السبب")
+        return None, None, f"فشل الاستيراد ({result}) -- راجع سجل الاستيراد لمعرفة السبب"
 
     new_work = forced_work or await session.scalar(
         text("SELECT work_id FROM books WHERE id = :id"), {"id": resolved_id}
@@ -1299,9 +1318,7 @@ async def new_book_json(
     if library and not forced_work:
         await _set_work_libraries(session, new_work, library)
     await session.commit()
-    return RedirectResponse(
-        f"/admin/works/{new_work}?ok=تم استيراد الكتاب رقم {resolved_id}", status_code=303
-    )
+    return resolved_id, new_work, None
 
 
 @router.post("/books/new/manual")
@@ -1336,3 +1353,187 @@ async def new_book_manual(
     )
     await session.commit()
     return RedirectResponse(f"/admin/books/{book_id}", status_code=303)
+
+
+# ── Conversion review: books finished in the workbench, waiting to be published ─────
+#
+# The workbench (workbench/, its own container) writes drafts to WORKBENCH_ROOT; this
+# panel reads the same folder. Publishing goes through _import_book_json, exactly like a
+# JSON upload, then marks the draft published so the workbench shows it read-only.
+
+
+def _drafts_root() -> Path:
+    return get_settings().workbench_root
+
+
+def _draft_or_404(draft_id: str) -> dict:
+    try:
+        return drafts.load(_drafts_root(), draft_id)
+    except drafts.DraftNotFound:
+        raise HTTPException(status_code=404, detail="Unknown draft") from None
+
+
+_DRAFT_STATUS = {
+    "editing": "قيد التحرير", "returned": "أُعيد للتعديل", "failed": "فشل التحويل",
+    "submitted": "بانتظار المراجعة", "published": "منشور",
+}
+
+
+@router.get("/drafts", response_class=HTMLResponse)
+async def drafts_list(
+    ok: str | None = None, err: str | None = None, all: bool = False,
+    session: AsyncSession = Depends(get_session), _: None = Depends(_require_admin),
+) -> HTMLResponse:
+    settings = get_settings()
+    rows = drafts.list_all(_drafts_root())
+    waiting = [r for r in rows if r["status"] == "submitted"]
+    others = [r for r in rows if r["status"] != "submitted"] if all else []
+    banner = _msg(ok, True) if ok else (_msg(err, False) if err else "")
+
+    def row_html(r: dict) -> str:
+        report = r.get("report") or {}
+        link = f"{settings.workbench_url}/#/d/{r['id']}"
+        published = (f' — <a href="/admin/books/{r["publishedBookId"]}">كتاب #{r["publishedBookId"]}</a>'
+                     if r.get("publishedBookId") else "")
+        return f"""<tr>
+          <td><a href="/admin/drafts/{escape(r['id'])}">{escape(r.get('title') or r['sourceName'])}</a>
+            <br><small>{escape(r['sourceName'])}</small></td>
+          <td>{escape(r.get('author') or '—')}</td>
+          <td>{report.get('pages', '—')}</td>
+          <td>{_DRAFT_STATUS.get(r['status'], r['status'])}{published}</td>
+          <td>{escape(r.get('submittedBy') or r.get('updatedBy') or '')}<br>
+            <small>{escape((r.get('submittedAt') or r.get('updatedAt') or '')[:16].replace('T', ' '))}</small></td>
+          <td><a href="{escape(link)}" target="_blank">فتح في المحوّل</a></td>
+        </tr>"""
+
+    table_head = "<tr><th>العنوان</th><th>المؤلف</th><th>الصفحات</th><th>الحالة</th><th>بواسطة</th><th></th></tr>"
+    body = f"""{banner}<h1>مراجعة الكتب المحوّلة</h1>
+    <p><small>كتب Word حُوّلت ودُققت في <a href="{escape(settings.workbench_url)}" target="_blank">المحوّل</a>
+    وأُرسلت للمراجعة. افتح الكتاب للمراجعة ثم انشره في المكتبة، أو أعده للموظف مع ملاحظة.</small></p>
+    <h2>بانتظار المراجعة ({len(waiting)})</h2>
+    <table>{table_head}{''.join(row_html(r) for r in waiting) or '<tr><td colspan="6">لا توجد كتب بانتظار المراجعة.</td></tr>'}</table>
+    <p><a href="/admin/drafts?all={'false' if all else 'true'}">{'إخفاء' if all else 'إظهار'} بقية الكتب (قيد التحرير والمنشورة)</a></p>
+    {f"<table>{table_head}{''.join(row_html(r) for r in others)}</table>" if all else ""}"""
+    return _render("مراجعة الكتب المحوّلة", body)
+
+
+@router.get("/drafts/{draft_id}", response_class=HTMLResponse)
+async def draft_detail(
+    draft_id: str, ok: str | None = None, err: str | None = None,
+    session: AsyncSession = Depends(get_session), _: None = Depends(_require_admin),
+) -> HTMLResponse:
+    settings = get_settings()
+    meta = _draft_or_404(draft_id)
+    book = drafts.load_book(_drafts_root(), draft_id) or {}
+    md = book.get("metadata") or {}
+    report = meta.get("report") or {}
+    issues = meta.get("issues") or []
+    banner = _msg(ok, True) if ok else (_msg(err, False) if err else "")
+    options = await _subject_checkboxes(session, set())
+    library_options = await _library_checkboxes(session, set())
+
+    toc = book.get("toc") or []
+    toc_html = "".join(f"<li>{escape(e.get('title', ''))} <small>(ص {escape(str(e.get('pageNumber', '')))})</small></li>"
+                       for e in toc[:40])
+    if len(toc) > 40:
+        toc_html += f"<li><small>… و{len(toc) - 40} عنواناً آخر</small></li>"
+    issues_html = "".join(
+        f"<li>{'خطأ' if i['severity'] == 'error' else 'تنبيه'} — {escape(i['code'])}: {escape(i['detail'])}</li>"
+        for i in issues) or "<li>لا أخطاء ولا تنبيهات.</li>"
+    meta_rows = "".join(f"<tr><th>{escape(k)}</th><td>{escape(str(v))}</td></tr>" for k, v in md.items())
+
+    actions = ""
+    if meta["status"] == "submitted":
+        actions = f"""
+        <h2>نشر في المكتبة</h2>
+        <form method="post" action="/admin/drafts/{escape(draft_id)}/publish">
+          <div class="row"><label>رقم المجلد (اختياري -- للكتب متعددة المجلدات)</label>
+            <input name="volume" type="number" min="1" value="{escape(str(md.get('volume', '')))}"></div>
+          <div class="row"><label>إضافته كمجلد إلى عمل موجود (رقم العمل، اختياري)</label>
+            <input name="work_id" type="number"></div>
+          <div class="row"><label>التصنيف</label><div class="checkbox-group">{options}</div></div>
+          <div class="row"><label>المكتبات (اختياري)</label><div class="checkbox-group">{library_options}</div></div>
+          <button type="submit">نشر الكتاب</button>
+        </form>
+        <h2>إعادة للموظف</h2>
+        <form method="post" action="/admin/drafts/{escape(draft_id)}/return">
+          <div class="row"><label>ما الذي يجب تصحيحه؟</label><textarea name="note" rows="3" required></textarea></div>
+          <button type="submit" style="background:#8a6d3b">إعادة للتعديل</button>
+        </form>"""
+    elif meta["status"] == "published":
+        actions = f'<p>نُشر ككتاب <a href="/admin/books/{meta["publishedBookId"]}">#{meta["publishedBookId"]}</a>.</p>'
+
+    body = f"""{banner}
+    <p><a href="/admin/drafts">&rarr; قائمة المراجعة</a></p>
+    <h1>{escape(book.get('title') or meta.get('title') or '')}</h1>
+    <table>
+      <tr><th>المؤلف</th><td>{escape(book.get('author') or '—')}</td></tr>
+      <tr><th>الحالة</th><td>{_DRAFT_STATUS.get(meta['status'], meta['status'])}</td></tr>
+      <tr><th>الملف الأصلي</th><td>{escape(meta['sourceName'])}</td></tr>
+      <tr><th>الصفحات</th><td>{report.get('pages', '—')} ({report.get('frontPages', 0)} مقدمة) —
+        الأرقام المطبوعة {escape(str(report.get('printedFirst', '')))} … {escape(str(report.get('printedLast', '')))}</td></tr>
+      <tr><th>العناوين</th><td>{len(toc)}</td></tr>
+      <tr><th>أرسله</th><td>{escape(meta.get('submittedBy') or '—')} {escape((meta.get('submittedAt') or '')[:16].replace('T', ' '))}</td></tr>
+      <tr><th>ملاحظة الموظف</th><td>{escape(meta.get('submitNote') or '—')}</td></tr>
+      {meta_rows}
+    </table>
+    <p><a href="{escape(settings.workbench_url)}/#/d/{escape(draft_id)}" target="_blank">فتح في المحوّل (مقارنة الصفحات بالأصل)</a>
+      &nbsp;|&nbsp; <a href="/admin/drafts/{escape(draft_id)}/book.json">تنزيل JSON</a></p>
+    <h2>التحقق</h2><ul>{issues_html}</ul>
+    <h2>الفهرس</h2><ol>{toc_html or '<li>لا توجد عناوين</li>'}</ol>
+    {actions}"""
+    return _render("مراجعة كتاب", body)
+
+
+@router.get("/drafts/{draft_id}/book.json")
+async def draft_book_json(draft_id: str, _: None = Depends(_require_admin)) -> Response:
+    meta = _draft_or_404(draft_id)
+    path = drafts.draft_dir(_drafts_root(), draft_id) / "book.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Not converted")
+    return FileResponse(path, media_type="application/json",
+                        filename=drafts.book_filename(meta.get("title", ""), draft_id))
+
+
+@router.post("/drafts/{draft_id}/publish")
+async def draft_publish(
+    draft_id: str,
+    volume: str = Form(""),
+    work_id: str = Form(""),
+    subject: list[str] = Form([]),
+    library: list[int] = Form([]),
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(_require_admin),
+    credentials: HTTPBasicCredentials = Depends(_security),
+) -> RedirectResponse:
+    meta = _draft_or_404(draft_id)
+    back = f"/admin/drafts/{draft_id}"
+    if meta["status"] != "submitted":
+        return RedirectResponse(f"{back}?err=الكتاب ليس بانتظار المراجعة", status_code=303)
+    book = drafts.load_book(_drafts_root(), draft_id)
+    if book is None:
+        return RedirectResponse(f"{back}?err=لا يوجد ملف كتاب لهذه المسودة", status_code=303)
+    new_book, new_work, error = await _import_book_json(
+        session, book, volume=volume, work_id=work_id, subject=subject, library=library,
+        source="workbench",
+    )
+    if error:
+        return RedirectResponse(f"{back}?err={error}", status_code=303)
+    drafts.update(_drafts_root(), draft_id, status="published", publishedBookId=new_book,
+                  publishedAt=drafts.now(), publishedBy=credentials.username)
+    return RedirectResponse(
+        f"/admin/works/{new_work}?ok=تم نشر الكتاب رقم {new_book} من المحوّل", status_code=303
+    )
+
+
+@router.post("/drafts/{draft_id}/return")
+async def draft_return(
+    draft_id: str, note: str = Form(...), _: None = Depends(_require_admin),
+    credentials: HTTPBasicCredentials = Depends(_security),
+) -> RedirectResponse:
+    meta = _draft_or_404(draft_id)
+    if meta["status"] != "submitted":
+        return RedirectResponse(f"/admin/drafts/{draft_id}?err=الكتاب ليس بانتظار المراجعة", status_code=303)
+    drafts.update(_drafts_root(), draft_id, status="returned", reviewNote=note.strip(),
+                  reviewedBy=credentials.username, reviewedAt=drafts.now())
+    return RedirectResponse("/admin/drafts?ok=أُعيد الكتاب للموظف مع الملاحظة", status_code=303)

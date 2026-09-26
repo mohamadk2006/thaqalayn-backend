@@ -1,0 +1,914 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>محوّل الكتب — Thaqalayn</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #fff; --border: #d8d5cd; --text: #222;
+    --muted: #6f6f6f; --accent: #8a6d3b; --accent-dark: #74582c;
+    --danger: #a33; --ok: #2a7a3a; --warn: #8a6100;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 15px;
+    display: flex; flex-direction: column;
+  }
+  header {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 8px 14px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 16px; margin: 0; color: var(--accent); white-space: nowrap; }
+  header input.title-field { font-size: 14.5px; padding: 5px 8px; min-width: 200px; flex: 1 1 200px; max-width: 360px; }
+  input, select, textarea, button { font-family: inherit; }
+  .spacer { flex: 1; }
+  button {
+    cursor: pointer; border: 1px solid var(--border); background: var(--panel);
+    padding: 6px 12px; border-radius: 4px; font-size: 14px; color: var(--text);
+  }
+  button:hover { background: #f0eee8; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.primary:hover { background: var(--accent-dark); }
+  button.danger { color: var(--danger); border-color: #d8b9b9; }
+  button:disabled { opacity: .45; cursor: default; }
+  #status { font-size: 13px; color: var(--muted); white-space: nowrap; }
+  #status.dirty { color: var(--danger); }
+  #status.saved { color: var(--ok); }
+  .hint { color: var(--muted); font-size: 13px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; background: #eee; white-space: nowrap; }
+  .badge.editing, .badge.returned { background: #fff3d6; color: var(--warn); }
+  .badge.failed { background: #fbe4e4; color: #7a1f1f; }
+  .badge.submitted { background: #e2ecf7; color: #1a5276; }
+  .badge.published { background: #dff1e3; color: var(--ok); }
+
+  /* ── list view ── */
+  #listView { flex: 1; overflow-y: auto; padding: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 18px; max-width: 1100px; }
+  .card h2 { margin: 0 0 10px; font-size: 16px; }
+  .upload-grid { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; align-items: center; }
+  table.drafts { border-collapse: collapse; width: 100%; font-size: 14px; }
+  table.drafts th, table.drafts td { border-bottom: 1px solid #eee; padding: 8px 6px; text-align: right; vertical-align: middle; }
+  table.drafts th { color: var(--muted); font-weight: normal; font-size: 13px; }
+  table.drafts tr:hover td { background: #faf8f3; }
+  table.drafts td.actions { white-space: nowrap; }
+  table.drafts a { color: #1a5276; cursor: pointer; text-decoration: none; }
+
+  /* ── editor view ── */
+  #editorView { flex: 1; display: none; flex-direction: column; min-height: 0; }
+  #reportBar { background: #fbfaf6; border-bottom: 1px solid var(--border); padding: 6px 14px; font-size: 13px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+  #reportBar .err { color: var(--danger); font-weight: bold; }
+  #reportBar .warnc { color: var(--warn); }
+  #reportBar a { color: #1a5276; cursor: pointer; }
+  #returnedNote { background: #fff3d6; color: #5c4200; padding: 8px 14px; border-bottom: 1px solid #ecd9a6; font-size: 14px; display: none; }
+  .work { flex: 1; display: flex; min-height: 0; }
+  aside {
+    width: 250px; flex: none; background: var(--panel); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  aside .tabs { display: flex; border-bottom: 1px solid var(--border); }
+  aside .tabs button { flex: 1; border: none; border-radius: 0; background: none; }
+  aside .tabs button.active { border-bottom: 2px solid var(--accent); font-weight: bold; }
+  aside .search { padding: 8px; border-bottom: 1px solid var(--border); }
+  aside .search input { width: 100%; padding: 5px 8px; }
+  aside ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+  aside li a { display: block; padding: 6px 10px; color: var(--text); font-size: 13.5px; cursor: pointer; border-bottom: 1px solid #f0f0f0; }
+  aside li a:hover { background: #f0eee8; }
+  aside li a.current { background: #efe6d3; font-weight: bold; }
+  aside li a .num { color: var(--muted); font-size: 12px; }
+  aside li a .flag { color: var(--danger); font-size: 12px; }
+  #content { flex: 1 1 50%; overflow-y: auto; padding: 14px 18px; min-width: 0; }
+  #original { flex: 1 1 45%; min-width: 0; border-right: 1px solid var(--border); background: #e9e7e1; display: flex; flex-direction: column; }
+  #original .bar { background: var(--panel); border-bottom: 1px solid var(--border); padding: 6px 10px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
+  #original .viewer { flex: 1; overflow: auto; padding: 10px; text-align: center; }
+  #original img { max-width: 100%; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
+  #original .viewer.zoom img { max-width: none; width: 160%; }
+  #original .placeholder { color: var(--muted); padding: 40px 20px; }
+  .page-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 13.5px; }
+  .page-meta label { display: flex; align-items: center; gap: 5px; color: var(--muted); }
+  .page-meta input[type=text], .page-meta select { padding: 3px 6px; font-size: 13.5px; }
+  .page-meta input[type=text].small { width: 70px; }
+  .nav-bar { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+  .block-row { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 6px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 7px; }
+  .block-row.heading { border-right: 4px solid var(--accent); }
+  .block-row.footnotes { border-right: 4px solid #999; }
+  .block-row .handle { display: flex; flex-direction: column; gap: 3px; }
+  .block-row .handle button { padding: 1px 6px; font-size: 11px; }
+  .block-row select { align-self: flex-start; font-size: 12.5px; padding: 3px 4px; }
+  .block-row textarea { flex: 1; min-height: 40px; padding: 6px 8px; font-size: 15px; border: 1px solid var(--border); border-radius: 4px; resize: vertical; line-height: 1.7; }
+  .block-row.heading textarea { font-weight: bold; }
+  .block-row.footnotes textarea { font-size: 13px; color: #555; }
+  .insert-row { text-align: center; margin: 1px 0 6px; }
+  .insert-row button { font-size: 11px; padding: 1px 10px; opacity: .45; }
+  .insert-row button:hover { opacity: 1; }
+  .page-controls { display: flex; gap: 8px; margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--border); flex-wrap: wrap; }
+  details.meta-panel { margin-bottom: 12px; }
+  details.meta-panel summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .meta-grid { display: grid; grid-template-columns: max-content 1fr; gap: 6px 10px; margin-top: 8px; }
+  .meta-grid label { font-size: 13px; color: var(--muted); align-self: center; }
+  .meta-grid input, .meta-grid select, .meta-grid textarea { padding: 4px 7px; font-size: 13.5px; width: 100%; }
+  dialog { border: none; border-radius: 8px; padding: 0; max-width: 640px; width: 94vw; }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  dialog .inner { padding: 18px 20px; max-height: 85vh; overflow-y: auto; }
+  dialog h3 { margin-top: 0; }
+  dialog .btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+  ul.issues { margin: 6px 0; padding-right: 18px; font-size: 13.5px; }
+  ul.issues li.error { color: #7a1f1f; }
+  ul.issues li.warning { color: var(--warn); }
+  #busy { position: fixed; inset: 0; background: rgba(255,255,255,.6); display: none; align-items: center; justify-content: center; font-size: 16px; z-index: 50; }
+  #busy .box { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 18px 26px; }
+  @media (max-width: 1000px) { #original { display: none; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>محوّل الكتب</h1>
+  <button id="backBtn" style="display:none">&rarr; كل الكتب</button>
+  <input type="text" id="titleField" class="title-field" placeholder="عنوان الكتاب" style="display:none">
+  <input type="text" id="authorField" class="title-field" placeholder="اسم المؤلف" style="display:none">
+  <button id="metaBtn" style="display:none">بيانات الكتاب</button>
+  <button id="optionsBtn" style="display:none">إعدادات التحويل</button>
+  <span class="spacer"></span>
+  <span id="status"></span>
+  <button id="saveBtn" class="primary" style="display:none" title="Ctrl+S">حفظ</button>
+  <button id="submitBtn" style="display:none">إرسال للمراجعة</button>
+  <span id="userName" class="hint"></span>
+</header>
+
+<!-- ── list of drafts ── -->
+<div id="listView">
+  <div class="card">
+    <h2>تحويل كتاب جديد</h2>
+    <form id="uploadForm" class="upload-grid">
+      <label>ملف Word</label>
+      <input type="file" name="file" accept=".doc,.docx" required>
+      <label>ملف readme.txt <span class="hint">(اختياري)</span></label>
+      <input type="file" name="readme" accept=".txt">
+      <span></span>
+      <div><button class="primary" type="submit">رفع وتحويل</button>
+        <span class="hint">يُقرأ العنوان والمؤلف والناشر من readme.txt إن وُجد، ويمكن تعديلها بعد التحويل.</span></div>
+    </form>
+  </div>
+  <div class="card">
+    <h2>الكتب <span class="hint" id="listCount"></span></h2>
+    <div style="margin-bottom:8px">
+      <label class="hint"><input type="checkbox" id="showPublished"> إظهار الكتب المنشورة</label>
+    </div>
+    <table class="drafts">
+      <thead><tr><th>العنوان</th><th>المؤلف</th><th>الصفحات</th><th>الحالة</th><th>آخر تعديل</th><th></th></tr></thead>
+      <tbody id="draftRows"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ── one draft ── -->
+<div id="editorView">
+  <div id="returnedNote"></div>
+  <div id="reportBar"></div>
+  <div class="work">
+    <aside>
+      <div class="tabs">
+        <button id="tabPages" class="active">الصفحات</button>
+        <button id="tabToc">الفهرس</button>
+      </div>
+      <div class="search"><input type="text" id="pageFilter" placeholder="بحث برقم الصفحة..."></div>
+      <ul id="pageList"></ul>
+      <ul id="tocList" style="display:none"></ul>
+    </aside>
+    <div id="content"></div>
+    <div id="original">
+      <div class="bar">
+        <strong>الأصل (Word)</strong>
+        <button id="origPrev">&rarr;</button>
+        <span id="origLabel"></span>
+        <button id="origNext">&larr;</button>
+        <label title="عند التفعيل تتبع صفحة الأصل الصفحة المحوّلة"><input type="checkbox" id="origLink" checked> ربط</label>
+        <span id="origOffset" class="hint"></span>
+        <span class="spacer"></span>
+        <button id="origZoom" title="تكبير">🔍</button>
+      </div>
+      <div class="viewer" id="origViewer"><div class="placeholder">جاري التحميل…</div></div>
+    </div>
+  </div>
+</div>
+
+<dialog id="metaDialog">
+  <div class="inner">
+    <h3>بيانات الكتاب</h3>
+    <p class="hint">العنوان والمؤلف يُعدَّلان من الشريط العلوي. الحقل الفارغ لا يُكتب في الملف.</p>
+    <div class="meta-grid" id="metaGrid"></div>
+    <div id="metaOther" style="margin-top:12px"></div>
+    <div class="btns"><button id="metaCancel">إلغاء</button><button id="metaSave" class="primary">حفظ</button></div>
+  </div>
+</dialog>
+
+<dialog id="optionsDialog">
+  <div class="inner">
+    <h3>إعدادات التحويل</h3>
+    <p class="hint">إعادة التحويل تستبدل صفحات الكتاب بنتيجة التحويل الجديدة — <b>تُفقد تعديلات الصفحات</b>، ويبقى العنوان والمؤلف وبيانات الكتاب.
+      استخدمها قبل البدء بتصحيح النص.</p>
+    <div class="meta-grid">
+      <label>صفحات بيضاء مفقودة</label>
+      <div><input type="text" id="optBlank" placeholder="مثال: 7, 250">
+        <div class="hint">أرقام الصفحات المطبوعة البيضاء في الكتاب الأصلي التي لا تظهر في ملف Word، لتبقى أرقام الصفحات مطابقة.</div></div>
+      <label>استخدام فهرس الكتاب</label>
+      <div><label><input type="checkbox" id="optToc" checked> استخراج أرقام الصفحات والعناوين من فهرس الكتاب (الموصى به)</label></div>
+      <label>صفحات المقدمة</label>
+      <div><input type="text" id="optFront" style="width:80px">
+        <span class="hint">عدد الصفحات الأولى غير المرقمة (الغلاف، المقدمة…)</span></div>
+      <label>رقم أول صفحة</label>
+      <div><input type="text" id="optFirst" style="width:80px">
+        <span class="hint">يُستخدم فقط إذا لم يُستخدم فهرس الكتاب</span></div>
+      <label>أنماط العناوين</label>
+      <div><input type="text" id="optStyles" placeholder="اتركه فارغاً: Heading / Title">
+        <div class="hint">أسماء أنماط Word التي تعتبر عناوين، مفصولة بفواصل (للمتقدمين).</div></div>
+    </div>
+    <div class="btns"><button id="optCancel">إلغاء</button><button id="optRun" class="primary">إعادة التحويل</button></div>
+  </div>
+</dialog>
+
+<dialog id="issuesDialog">
+  <div class="inner">
+    <h3>تقرير التحويل والتحقق</h3>
+    <div id="issuesBody"></div>
+    <div class="btns"><button id="issuesClose" class="primary">إغلاق</button></div>
+  </div>
+</dialog>
+
+<dialog id="submitDialog">
+  <div class="inner">
+    <h3>إرسال الكتاب للمراجعة</h3>
+    <p>بعد الإرسال لا يمكن التعديل إلا بسحب الكتاب من المراجعة. تأكد من العنوان والمؤلف ومن مطابقة الصفحات للأصل.</p>
+    <label class="hint">ملاحظة للمراجع (اختياري)</label>
+    <textarea id="submitNote" rows="3" style="width:100%"></textarea>
+    <div class="btns"><button id="submitCancel">إلغاء</button><button id="submitGo" class="primary">إرسال</button></div>
+  </div>
+</dialog>
+
+<div id="busy"><div class="box" id="busyText">جاري العمل…</div></div>
+
+<script>
+"use strict";
+
+const $ = (id) => document.getElementById(id);
+const pad = (n, w) => String(n).padStart(w, "0");
+const escapeHtml = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const STATUS_LABEL = {
+  editing: "قيد التحرير", returned: "أُعيد للتعديل", failed: "فشل التحويل",
+  submitted: "بانتظار المراجعة", published: "منشور",
+};
+const EDITABLE = new Set(["editing", "returned", "failed"]);
+const safeStorage = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+  remove(k) { try { localStorage.removeItem(k); } catch {} },
+};
+
+async function api(method, path, body, isForm) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) {
+    if (isForm) opts.body = body;
+    else { opts.body = JSON.stringify(body); opts.headers["Content-Type"] = "application/json"; }
+  }
+  const r = await fetch(path, opts);
+  let data = null;
+  try { data = await r.json(); } catch {}
+  if (!r.ok) {
+    const d = data && data.detail;
+    const msg = typeof d === "string" ? d : (d && d.message) || `خطأ ${r.status}`;
+    const err = new Error(msg);
+    err.problems = d && d.problems;
+    throw err;
+  }
+  return data;
+}
+function busy(text) { $("busyText").textContent = text; $("busy").style.display = "flex"; }
+function idle() { $("busy").style.display = "none"; }
+function fmtDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleDateString("ar-LB-u-nu-latn") + " " + d.toLocaleTimeString("ar-LB-u-nu-latn", { hour: "2-digit", minute: "2-digit" });
+}
+
+// ── routing ─────────────────────────────────────────────────────────────────
+
+let draft = null;       // server metadata of the open draft
+let book = null;        // the book being edited (pages sorted, toc rebuilt on save)
+let currentPage = 0;
+let dirty = false;
+let readOnly = false;
+let origOffset = 0;     // original page = converted page index + 1 + origOffset
+let origPage = 1;
+let pollTimer = null;
+
+window.addEventListener("hashchange", route);
+async function route() {
+  if (dirty && !confirm("توجد تعديلات غير محفوظة. الخروج بدونها؟")) { history.replaceState(null, "", "#/d/" + draft.id); return; }
+  dirty = false;
+  clearInterval(pollTimer);
+  const m = location.hash.match(/^#\/d\/([\w-]+)/);
+  if (m) await openDraft(m[1]); else await showList();
+}
+
+function setEditorChrome(on) {
+  for (const id of ["backBtn", "titleField", "authorField", "metaBtn", "optionsBtn", "saveBtn", "submitBtn"]) {
+    $(id).style.display = on ? "" : "none";
+  }
+  $("listView").style.display = on ? "none" : "block";
+  $("editorView").style.display = on ? "flex" : "none";
+  if (!on) setStatus("");
+}
+
+// ── list ────────────────────────────────────────────────────────────────────
+
+async function showList() {
+  setEditorChrome(false);
+  draft = null; book = null;
+  let rows;
+  try { rows = await api("GET", "/api/drafts"); } catch (e) { alert(e.message); return; }
+  const showPublished = $("showPublished").checked;
+  const visible = rows.filter(r => showPublished || r.status !== "published");
+  $("listCount").textContent = `(${visible.length})`;
+  const tbody = $("draftRows");
+  tbody.innerHTML = visible.length ? "" : `<tr><td colspan="6" class="hint">لا توجد كتب بعد — ارفع ملف Word من الأعلى.</td></tr>`;
+  for (const r of visible) {
+    const tr = document.createElement("tr");
+    const errors = (r.issues || []).filter(i => i.severity === "error").length;
+    tr.innerHTML = `
+      <td><a href="#/d/${r.id}">${escapeHtml(r.title || r.sourceName)}</a><br><span class="hint">${escapeHtml(r.sourceName)}</span></td>
+      <td>${escapeHtml(r.author || "—")}</td>
+      <td>${r.report && r.report.pages ? r.report.pages : "—"}</td>
+      <td><span class="badge ${r.status}">${STATUS_LABEL[r.status] || r.status}</span>
+          ${errors && EDITABLE.has(r.status) ? `<br><span class="hint" style="color:var(--danger)">${errors} خطأ</span>` : ""}</td>
+      <td>${fmtDate(r.updatedAt)}<br><span class="hint">${escapeHtml(r.updatedBy || "")}</span></td>
+      <td class="actions">
+        <a href="#/d/${r.id}">فتح</a> &nbsp;
+        <a href="/api/drafts/${r.id}/download">JSON</a>
+        ${r.status !== "published" ? ` &nbsp; <a data-del="${r.id}" style="color:var(--danger)">حذف</a>` : ""}
+      </td>`;
+    tbody.appendChild(tr);
+  }
+  tbody.querySelectorAll("[data-del]").forEach(a => a.onclick = async () => {
+    if (!confirm("حذف هذا الكتاب وملفاته نهائياً؟")) return;
+    try { await api("DELETE", "/api/drafts/" + a.dataset.del); showList(); } catch (e) { alert(e.message); }
+  });
+}
+$("showPublished").addEventListener("change", showList);
+
+$("uploadForm").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = new FormData(e.target);
+  if (!form.get("readme") || !form.get("readme").name) form.delete("readme");
+  busy("جاري رفع الملف وتحويله… قد يستغرق دقيقة للكتب الكبيرة");
+  try {
+    const meta = await api("POST", "/api/drafts", form, true);
+    e.target.reset();
+    location.hash = "#/d/" + meta.id;
+  } catch (err) { alert("فشل الرفع: " + err.message); }
+  finally { idle(); }
+});
+
+// ── open a draft ────────────────────────────────────────────────────────────
+
+async function openDraft(id) {
+  setEditorChrome(true);
+  busy("جاري فتح الكتاب…");
+  try {
+    draft = await api("GET", "/api/drafts/" + id);
+    book = draft.status === "failed" ? null : await api("GET", `/api/drafts/${id}/book`);
+  } catch (e) { idle(); alert(e.message); location.hash = "#/"; return; }
+  idle();
+  readOnly = !EDITABLE.has(draft.status);
+  if (book) normalizeBook(book);
+  currentPage = 0;
+  origOffset = Number(safeStorage.get("wb_offset_" + id) || 0);
+  dirty = false;
+  const backup = safeStorage.get("wb_backup_" + id);
+  if (backup && !readOnly) {
+    try {
+      const b = JSON.parse(backup);
+      if (b.savedAt > (draft.updatedAt || "") && confirm("توجد تعديلات محفوظة في المتصفح لم تُحفظ على الخادم. استعادتها؟")) {
+        book = b.book; normalizeBook(book); markDirty();
+      } else safeStorage.remove("wb_backup_" + id);
+    } catch {}
+  }
+  renderEditor();
+  pollRender();
+}
+
+function normalizeBook(b) {
+  b.pages = (b.pages || []).slice().sort((x, y) => (x.sequence || 0) - (y.sequence || 0));
+  for (const p of b.pages) p.blocks = (p.blocks || []).slice().sort((x, y) => (x.order || 0) - (y.order || 0));
+  delete b.toc;
+}
+
+function renderEditor() {
+  $("titleField").value = book ? book.title || "" : draft.title || "";
+  $("authorField").value = book ? book.author || "" : "";
+  for (const id of ["titleField", "authorField"]) $(id).disabled = readOnly || !book;
+  $("metaBtn").disabled = !book;
+  $("optionsBtn").disabled = readOnly;
+  $("saveBtn").disabled = readOnly || !book;
+  if (draft.status === "submitted") {
+    $("submitBtn").textContent = "سحب من المراجعة"; $("submitBtn").disabled = false;
+  } else {
+    $("submitBtn").textContent = "إرسال للمراجعة"; $("submitBtn").disabled = readOnly || !book;
+  }
+  const note = $("returnedNote");
+  if (draft.status === "returned" && draft.reviewNote) {
+    note.style.display = "block"; note.textContent = "ملاحظة المراجع: " + draft.reviewNote;
+  } else if (draft.status === "published") {
+    note.style.display = "block"; note.textContent = `هذا الكتاب منشور في المكتبة (رقم ${draft.publishedBookId}). للاطلاع فقط.`;
+  } else note.style.display = "none";
+  renderReport();
+  if (!book) {
+    $("content").innerHTML = `<div class="card"><h2>فشل التحويل</h2><p>${escapeHtml(draft.error || "")}</p>
+      <p>جرّب تغيير <a onclick="openOptions()" style="color:#1a5276;cursor:pointer">إعدادات التحويل</a> ثم أعد التحويل، أو أرسل الملف للمسؤول.</p></div>`;
+    $("pageList").innerHTML = ""; $("tocList").innerHTML = "";
+    renderOriginal();
+    return;
+  }
+  renderAll();
+  setStatus(readOnly ? "للاطلاع فقط" : dirty ? "تعديلات غير محفوظة" : "محفوظ", dirty ? "dirty" : "saved");
+}
+
+function renderReport() {
+  const r = draft.report || {};
+  const issues = draft.issues || [];
+  const errors = issues.filter(i => i.severity === "error").length;
+  const warnings = issues.length - errors;
+  const rs = draft.render || {};
+  const renderText = { pending: "تجهيز صور الأصل…", running: "تجهيز صور الأصل…", done: `الأصل: ${rs.pages} صفحة`,
+    failed: "تعذّر عرض الأصل", unavailable: "عرض الأصل غير متاح" }[rs.status] || "";
+  $("reportBar").innerHTML = `
+    <span class="badge ${draft.status}">${STATUS_LABEL[draft.status] || draft.status}</span>
+    ${r.pages ? `<span>${r.pages} صفحة (${r.frontPages || 0} مقدمة) — الأرقام المطبوعة ${escapeHtml(r.printedFirst ?? "")} … ${escapeHtml(r.printedLast ?? "")}</span>` : ""}
+    ${r.tocEntries !== undefined ? `<span>${r.tocEntries} عنوان في الفهرس</span>` : ""}
+    ${r.pageNumbersFrom ? `<span class="hint">${r.pageNumbersFrom === "toc" ? "أرقام الصفحات من فهرس الكتاب" : "أرقام الصفحات متسلسلة (لم يُستخدم فهرس)"}</span>` : ""}
+    <span>${errors ? `<span class="err">${errors} خطأ</span>` : `<span style="color:var(--ok)">لا أخطاء</span>`}${warnings ? ` · <span class="warnc">${warnings} تنبيه</span>` : ""}</span>
+    <a onclick="showIssues()">التفاصيل</a>
+    <span class="hint">${renderText}</span>
+    <span class="spacer"></span>
+    <a href="/api/drafts/${draft.id}/download">تنزيل JSON</a>
+    <a href="/api/drafts/${draft.id}/source">تنزيل ملف Word</a>`;
+}
+
+function showIssues() {
+  const r = draft.report || {};
+  const issues = draft.issues || [];
+  let html = "";
+  if (draft.error) html += `<p style="color:var(--danger)">${escapeHtml(draft.error)}</p>`;
+  html += issues.length
+    ? `<ul class="issues">${issues.map(i => `<li class="${i.severity}">${i.severity === "error" ? "خطأ" : "تنبيه"} — <code>${escapeHtml(i.code)}</code>: ${escapeHtml(i.detail)}</li>`).join("")}</ul>`
+    : `<p style="color:var(--ok)">لا توجد أخطاء أو تنبيهات من أداة التحقق.</p>`;
+  if (r.recovered && r.recovered.length) {
+    html += `<h4>عناوين أُضيفت من فهرس الكتاب (لم تُعثر كعنوان داخل النص)</h4><p class="hint">تحقق منها في الصفحات المذكورة:</p>
+      <ul class="issues">${r.recovered.map(x => `<li>ص ${escapeHtml(x.page)} — ${escapeHtml(x.title)}</li>`).join("")}</ul>`;
+  }
+  if (r.anchors !== undefined) html += `<p class="hint">نقاط ربط أرقام الصفحات بالفهرس: ${r.anchors}</p>`;
+  $("issuesBody").innerHTML = html;
+  $("issuesDialog").showModal();
+}
+$("issuesClose").onclick = () => $("issuesDialog").close();
+
+function pollRender() {
+  clearInterval(pollTimer);
+  const st = (draft.render || {}).status;
+  renderOriginal();
+  if (st === "pending" || st === "running") {
+    pollTimer = setInterval(async () => {
+      try {
+        const fresh = await api("GET", "/api/drafts/" + draft.id);
+        draft.render = fresh.render;
+        if (!["pending", "running"].includes(fresh.render.status)) { clearInterval(pollTimer); renderReport(); renderOriginal(); }
+      } catch {}
+    }, 3000);
+  }
+}
+
+// ── original pane ───────────────────────────────────────────────────────────
+
+function renderOriginal() {
+  const rs = draft.render || {};
+  const viewer = $("origViewer");
+  if (rs.status !== "done") {
+    const msg = { pending: "جاري تجهيز صفحات الأصل… (قد يستغرق دقيقة)", running: "جاري تجهيز صفحات الأصل… (قد يستغرق دقيقة)",
+      failed: "تعذّر تحويل ملف Word إلى صور: " + (rs.error || ""), unavailable: "عرض الأصل غير متاح على هذا الخادم." }[rs.status] || "";
+    viewer.innerHTML = `<div class="placeholder">${escapeHtml(msg)}${rs.status === "failed" ? '<br><br><button onclick="rerender()">إعادة المحاولة</button>' : ""}</div>`;
+    $("origLabel").textContent = ""; $("origOffset").textContent = "";
+    return;
+  }
+  if ($("origLink").checked) origPage = currentPage + 1 + origOffset;
+  origPage = Math.max(1, Math.min(origPage, rs.pages));
+  $("origLabel").textContent = `صفحة ${origPage} من ${rs.pages}`;
+  $("origOffset").textContent = origOffset ? `(إزاحة ${origOffset > 0 ? "+" : ""}${origOffset})` : "";
+  $("origPrev").disabled = origPage <= 1;
+  $("origNext").disabled = origPage >= rs.pages;
+  const src = `/api/drafts/${draft.id}/original/${origPage}`;
+  const img = viewer.querySelector("img");
+  if (img) { if (!img.src.endsWith(src)) img.src = src; }
+  else viewer.innerHTML = `<img alt="صفحة الأصل" src="${src}">`;
+  // Warm the next page so flipping feels instant.
+  if (origPage < rs.pages) new Image().src = `/api/drafts/${draft.id}/original/${origPage + 1}`;
+}
+function moveOriginal(delta) {
+  origPage += delta;
+  if ($("origLink").checked) {
+    // Moving the original while linked means the two had drifted: remember the new offset.
+    origOffset = origPage - (currentPage + 1);
+    safeStorage.set("wb_offset_" + draft.id, String(origOffset));
+  }
+  renderOriginal();
+}
+$("origPrev").onclick = () => moveOriginal(-1);
+$("origNext").onclick = () => moveOriginal(1);
+$("origLink").onchange = () => renderOriginal();
+$("origZoom").onclick = () => $("origViewer").classList.toggle("zoom");
+async function rerender() {
+  try { draft = await api("POST", `/api/drafts/${draft.id}/render`); pollRender(); } catch (e) { alert(e.message); }
+}
+
+// ── dirty / save ────────────────────────────────────────────────────────────
+
+let backupTimer = null;
+function markDirty() {
+  if (readOnly) return;
+  dirty = true;
+  setStatus("تعديلات غير محفوظة", "dirty");
+  clearTimeout(backupTimer);
+  backupTimer = setTimeout(() => safeStorage.set("wb_backup_" + draft.id,
+    JSON.stringify({ savedAt: new Date().toISOString(), book })), 800);
+}
+function setStatus(msg, cls) { $("status").textContent = msg; $("status").className = cls || ""; }
+
+async function save() {
+  if (readOnly || !book) return true;
+  const out = buildExportObject();
+  busy("جاري الحفظ…");
+  try {
+    draft = await api("PUT", `/api/drafts/${draft.id}/book`, out);
+    dirty = false;
+    safeStorage.remove("wb_backup_" + draft.id);
+    setStatus("تم الحفظ", "saved");
+    renderReport();
+    renderSidebar();
+    return true;
+  } catch (e) { alert("فشل الحفظ: " + e.message); return false; }
+  finally { idle(); }
+}
+$("saveBtn").onclick = save;
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s" && draft) { e.preventDefault(); save(); }
+  if (e.altKey && draft && book && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+    e.preventDefault();
+    const d = e.key === "ArrowLeft" ? 1 : -1;
+    const next = currentPage + d;
+    if (next >= 0 && next < book.pages.length) { currentPage = next; renderAll(); }
+  }
+});
+window.addEventListener("beforeunload", (e) => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+$("backBtn").onclick = () => { location.hash = "#/"; };
+
+$("submitBtn").onclick = async () => {
+  if (draft.status === "submitted") {
+    if (!confirm("سحب الكتاب من المراجعة للتعديل عليه؟")) return;
+    try { draft = await api("POST", `/api/drafts/${draft.id}/withdraw`); readOnly = false; renderEditor(); } catch (e) { alert(e.message); }
+    return;
+  }
+  if (dirty && !(await save())) return;
+  $("submitNote").value = "";
+  $("submitDialog").showModal();
+};
+$("submitCancel").onclick = () => $("submitDialog").close();
+$("submitGo").onclick = async () => {
+  const form = new FormData(); form.set("note", $("submitNote").value);
+  try {
+    draft = await api("POST", `/api/drafts/${draft.id}/submit`, form, true);
+    $("submitDialog").close();
+    readOnly = true;
+    renderEditor();
+    alert("تم إرسال الكتاب للمراجعة. شكراً!");
+  } catch (e) {
+    alert(e.message + (e.problems ? "\n\n- " + e.problems.join("\n- ") : ""));
+  }
+};
+
+// ── metadata ────────────────────────────────────────────────────────────────
+
+const META_FIELDS = [
+  { key: "authorDeath",     label: "سنة وفاة المؤلف", type: "text", ph: "مثال: ت 413 هـ" },
+  { key: "publisher",       label: "الناشر",           type: "text" },
+  { key: "edition",         label: "الطبعة",           type: "text" },
+  { key: "publicationYear", label: "سنة النشر",        type: "text" },
+  { key: "printer",         label: "المطبعة",          type: "text" },
+  { key: "editor",          label: "المحقق",           type: "text" },
+  { key: "isbn",            label: "ISBN",             type: "text" },
+  { key: "volume",          label: "رقم المجلد",       type: "text", ph: "أرقام فقط — للكتب متعددة المجلدات" },
+  { key: "language",        label: "اللغة",            type: "select", options: [["", "عربي (افتراضي)"], ["ar", "عربي"], ["fa", "فارسي"]] },
+  { key: "notes",           label: "ملاحظات",          type: "textarea" },
+];
+
+function openMeta() {
+  const md = book.metadata || {};
+  const grid = $("metaGrid");
+  grid.innerHTML = "";
+  for (const f of META_FIELDS) {
+    const label = document.createElement("label");
+    label.textContent = f.label;
+    let input;
+    if (f.type === "select") {
+      input = document.createElement("select");
+      for (const [v, t] of f.options) { const o = document.createElement("option"); o.value = v; o.textContent = t; input.appendChild(o); }
+      input.value = md[f.key] ?? "";
+    } else if (f.type === "textarea") {
+      input = document.createElement("textarea"); input.rows = 3; input.value = md[f.key] ?? "";
+    } else {
+      input = document.createElement("input"); input.type = "text"; input.value = md[f.key] ?? "";
+      if (f.ph) input.placeholder = f.ph;
+    }
+    input.dataset.key = f.key;
+    input.disabled = readOnly;
+    grid.append(label, input);
+  }
+  const known = new Set(META_FIELDS.map(f => f.key));
+  const others = Object.entries(md).filter(([k]) => !known.has(k));
+  $("metaOther").innerHTML = others.length
+    ? `<small class="hint">حقول أخرى (تبقى كما هي): ` + others.map(([k, v]) => `<code>${escapeHtml(k)}</code>=${escapeHtml(JSON.stringify(v))}`).join("، ") + `</small>` : "";
+  $("metaSave").style.display = readOnly ? "none" : "";
+  $("metaDialog").showModal();
+}
+function saveMeta() {
+  const md = book.metadata ? { ...book.metadata } : {};
+  for (const input of $("metaGrid").querySelectorAll("[data-key]")) {
+    const v = input.value.trim();
+    if (v) md[input.dataset.key] = v; else delete md[input.dataset.key];
+  }
+  book.metadata = md;
+  markDirty();
+  $("metaDialog").close();
+}
+$("metaBtn").onclick = openMeta;
+$("metaCancel").onclick = () => $("metaDialog").close();
+$("metaSave").onclick = saveMeta;
+$("titleField").addEventListener("input", (e) => { book.title = e.target.value; markDirty(); });
+$("authorField").addEventListener("input", (e) => { book.author = e.target.value; markDirty(); });
+
+// ── conversion options ──────────────────────────────────────────────────────
+
+function openOptions() {
+  const o = draft.options || {};
+  $("optBlank").value = (o.blankPages || []).join(", ");
+  $("optToc").checked = o.useToc !== false;
+  $("optFront").value = o.frontPages ?? 0;
+  $("optFirst").value = o.firstPrinted ?? 1;
+  $("optStyles").value = o.headingStyles || "";
+  $("optionsDialog").showModal();
+}
+$("optionsBtn").onclick = openOptions;
+$("optCancel").onclick = () => $("optionsDialog").close();
+$("optRun").onclick = async () => {
+  if (!confirm("إعادة التحويل ستستبدل الصفحات وتُفقد تعديلات النص. متابعة؟")) return;
+  if (dirty && book && !(await save())) return;
+  const options = { blankPages: $("optBlank").value, useToc: $("optToc").checked,
+    frontPages: $("optFront").value, firstPrinted: $("optFirst").value, headingStyles: $("optStyles").value };
+  $("optionsDialog").close();
+  busy("جاري إعادة التحويل…");
+  try {
+    draft = await api("POST", `/api/drafts/${draft.id}/reconvert`, options);
+    book = draft.status === "failed" ? null : await api("GET", `/api/drafts/${draft.id}/book`);
+    if (book) normalizeBook(book);
+    dirty = false; safeStorage.remove("wb_backup_" + draft.id);
+    currentPage = 0;
+    renderEditor();
+  } catch (e) { alert(e.message); }
+  finally { idle(); }
+};
+
+// ── sidebar ─────────────────────────────────────────────────────────────────
+
+function renderAll() { renderSidebar(); renderPage(); renderOriginal(); }
+
+function renderSidebar() {
+  const list = $("pageList");
+  const filter = $("pageFilter").value.trim();
+  list.innerHTML = "";
+  book.pages.forEach((p, i) => {
+    if (filter && !String(p.pageNumber ?? "").includes(filter) && !String(i + 1).includes(filter)) return;
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.className = i === currentPage ? "current" : "";
+    const empty = !p.isBlank && !p.blocks.some(b => (b.text || "").trim());
+    a.innerHTML = `<span class="num">#${i + 1}</span> — ص ${escapeHtml(String(p.pageNumber ?? ""))}` +
+      (p.pageType === "frontMatter" ? ` <small class="hint">مقدمة</small>` : "") +
+      (p.isBlank ? ` <small class="hint">(بيضاء)</small>` : "") + (empty ? ` <span class="flag">فارغة!</span>` : "");
+    a.onclick = () => { currentPage = i; renderAll(); };
+    li.appendChild(a);
+    list.appendChild(li);
+  });
+  const current = list.querySelector("a.current");
+  if (current) current.scrollIntoView({ block: "nearest" });
+
+  const tocList = $("tocList");
+  tocList.innerHTML = "";
+  const headings = [];
+  book.pages.forEach((p, pi) => { for (const b of p.blocks) if (b.type === "heading") headings.push({ text: b.text, pi, num: p.pageNumber }); });
+  if (!headings.length) tocList.innerHTML = `<li><a class="hint">لا توجد عناوين</a></li>`;
+  for (const h of headings) {
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.innerHTML = `${escapeHtml(h.text || "(بدون عنوان)")} <span class="num">ص ${escapeHtml(h.num ?? "")}</span>`;
+    a.onclick = () => { currentPage = h.pi; renderAll(); };
+    li.appendChild(a);
+    tocList.appendChild(li);
+  }
+}
+$("pageFilter").addEventListener("input", renderSidebar);
+$("tabPages").onclick = () => { $("tabPages").classList.add("active"); $("tabToc").classList.remove("active"); $("pageList").style.display = ""; $("tocList").style.display = "none"; };
+$("tabToc").onclick = () => { $("tabToc").classList.add("active"); $("tabPages").classList.remove("active"); $("tocList").style.display = ""; $("pageList").style.display = "none"; };
+
+// ── page editor ─────────────────────────────────────────────────────────────
+
+function renderPage() {
+  const content = $("content");
+  if (!book.pages.length) {
+    content.innerHTML = readOnly ? "<p>لا توجد صفحات.</p>" : `<p>لا توجد صفحات.</p><button onclick="addPage(-1)">+ صفحة جديدة</button>`;
+    return;
+  }
+  currentPage = Math.max(0, Math.min(currentPage, book.pages.length - 1));
+  const p = book.pages[currentPage];
+  const dis = readOnly ? "disabled" : "";
+  content.innerHTML = "";
+
+  const nav = document.createElement("div");
+  nav.className = "nav-bar";
+  nav.innerHTML = `
+    <button ${currentPage === 0 ? "disabled" : ""} id="prevBtn">&rarr; السابقة</button>
+    <span>صفحة ${currentPage + 1} من ${book.pages.length} — الرقم المطبوع: <b>${escapeHtml(String(p.pageNumber ?? ""))}</b></span>
+    <button ${currentPage === book.pages.length - 1 ? "disabled" : ""} id="nextBtn">التالية &larr;</button>
+    <span class="hint">Alt + الأسهم للتنقل</span>`;
+  content.appendChild(nav);
+  nav.querySelector("#prevBtn").onclick = () => { currentPage--; renderAll(); };
+  nav.querySelector("#nextBtn").onclick = () => { currentPage++; renderAll(); };
+
+  const meta = document.createElement("div");
+  meta.className = "page-meta";
+  meta.innerHTML = `
+    <label>النوع
+      <select id="pageTypeSel" ${dis}>
+        <option value="main" ${p.pageType === "main" ? "selected" : ""}>صفحة من الكتاب</option>
+        <option value="frontMatter" ${p.pageType === "frontMatter" ? "selected" : ""}>مقدمة (بلا رقم)</option>
+      </select></label>
+    <label>الرقم المطبوع
+      <input type="text" class="small" id="pageNumberInput" value="${escapeHtml(p.pageNumber ?? "")}"
+        ${p.pageType === "frontMatter" || readOnly ? "disabled" : ""}></label>
+    <label><input type="checkbox" id="isBlankCk" ${p.isBlank ? "checked" : ""} ${dis}> صفحة بيضاء</label>`;
+  content.appendChild(meta);
+  meta.querySelector("#pageTypeSel").onchange = (e) => { p.pageType = e.target.value; markDirty(); renderAll(); };
+  meta.querySelector("#pageNumberInput").oninput = (e) => {
+    p.pageNumber = e.target.value;
+    const n = Number(e.target.value);
+    if (Number.isInteger(n) && n > 0) p.printedPage = n;
+    p.sourcePageLabel = e.target.value;
+    markDirty(); renderSidebar();
+  };
+  meta.querySelector("#isBlankCk").onchange = (e) => { p.isBlank = e.target.checked; markDirty(); renderSidebar(); };
+
+  const blocksWrap = document.createElement("div");
+  blocksWrap.id = "blocksWrap";
+  content.appendChild(blocksWrap);
+  renderBlocks(blocksWrap, p);
+
+  if (readOnly) return;
+  const pc = document.createElement("div");
+  pc.className = "page-controls";
+  pc.innerHTML = `
+    <button id="addPageAfter">+ صفحة جديدة بعد هذه</button>
+    <button id="mergeNext" ${currentPage === book.pages.length - 1 ? "disabled" : ""}>دمج الصفحة التالية في هذه</button>
+    <button id="movePageUp" ${currentPage === 0 ? "disabled" : ""}>&uarr; نقل للأعلى</button>
+    <button id="movePageDown" ${currentPage === book.pages.length - 1 ? "disabled" : ""}>&darr; نقل للأسفل</button>
+    <button id="deletePageBtn" class="danger">حذف الصفحة</button>`;
+  content.appendChild(pc);
+  pc.querySelector("#addPageAfter").onclick = () => addPage(currentPage);
+  pc.querySelector("#mergeNext").onclick = () => mergeNext(currentPage);
+  pc.querySelector("#movePageUp").onclick = () => movePage(currentPage, -1);
+  pc.querySelector("#movePageDown").onclick = () => movePage(currentPage, 1);
+  pc.querySelector("#deletePageBtn").onclick = () => deletePage(currentPage);
+}
+
+function renderBlocks(wrap, p) {
+  wrap.innerHTML = "";
+  if (!readOnly) wrap.appendChild(insertRow(p, 0));
+  p.blocks.forEach((b, bi) => {
+    wrap.appendChild(blockRow(p, b, bi));
+    if (!readOnly) wrap.appendChild(insertRow(p, bi + 1));
+  });
+  if (!p.blocks.length) wrap.insertAdjacentHTML("beforeend", `<p class="hint">لا توجد فقرات في هذه الصفحة.</p>`);
+}
+
+function insertRow(p, at) {
+  const div = document.createElement("div");
+  div.className = "insert-row";
+  const btn = document.createElement("button");
+  btn.textContent = "+ فقرة";
+  btn.onclick = () => { p.blocks.splice(at, 0, { type: "text", text: "" }); markDirty(); renderBlocks($("blocksWrap"), p); };
+  div.appendChild(btn);
+  return div;
+}
+
+const TYPE_LABEL = { text: "نص", heading: "عنوان", footnotes: "حاشية" };
+function blockRow(p, b, bi) {
+  const row = document.createElement("div");
+  row.className = "block-row " + (b.type || "text");
+  if (!readOnly) {
+    const handle = document.createElement("div");
+    handle.className = "handle";
+    const up = document.createElement("button"); up.textContent = "↑"; up.title = "نقل للأعلى"; up.disabled = bi === 0;
+    up.onclick = () => { [p.blocks[bi - 1], p.blocks[bi]] = [p.blocks[bi], p.blocks[bi - 1]]; markDirty(); renderBlocks($("blocksWrap"), p); };
+    const down = document.createElement("button"); down.textContent = "↓"; down.title = "نقل للأسفل"; down.disabled = bi === p.blocks.length - 1;
+    down.onclick = () => { [p.blocks[bi + 1], p.blocks[bi]] = [p.blocks[bi], p.blocks[bi + 1]]; markDirty(); renderBlocks($("blocksWrap"), p); };
+    const del = document.createElement("button"); del.textContent = "✕"; del.title = "حذف الفقرة";
+    del.onclick = () => {
+      if (b.type === "heading" && !confirm("هذا العنوان سيُحذف من الفهرس أيضاً. متابعة؟")) return;
+      p.blocks.splice(bi, 1); markDirty(); renderBlocks($("blocksWrap"), p);
+    };
+    handle.append(up, down, del);
+    row.appendChild(handle);
+  }
+  const typeSel = document.createElement("select");
+  for (const t of ["text", "heading", "footnotes"]) {
+    const opt = document.createElement("option"); opt.value = t; opt.textContent = TYPE_LABEL[t]; opt.selected = (b.type || "text") === t; typeSel.appendChild(opt);
+  }
+  typeSel.disabled = readOnly;
+  typeSel.onchange = () => { b.type = typeSel.value; if (b.type !== "heading") delete b.tocId; markDirty(); renderBlocks($("blocksWrap"), p); renderSidebar(); };
+  const ta = document.createElement("textarea");
+  ta.value = b.text || ""; ta.dir = "rtl"; ta.readOnly = readOnly;
+  ta.rows = Math.min(12, Math.max(2, Math.ceil((b.text || "").length / 90)));
+  ta.oninput = () => { b.text = ta.value; markDirty(); };
+  row.append(typeSel, ta);
+  return row;
+}
+
+function addPage(after) {
+  book.pages.splice(after + 1, 0, { pageType: "main", isBlank: false, pageNumber: "", blocks: [{ type: "text", text: "" }] });
+  currentPage = after + 1; markDirty(); renderAll();
+}
+function mergeNext(i) {
+  if (!confirm("نقل كل فقرات الصفحة التالية إلى نهاية هذه الصفحة وحذف الصفحة التالية؟")) return;
+  book.pages[i].blocks.push(...book.pages[i + 1].blocks);
+  book.pages.splice(i + 1, 1);
+  markDirty(); renderAll();
+}
+function movePage(i, d) {
+  const j = i + d;
+  if (j < 0 || j >= book.pages.length) return;
+  [book.pages[i], book.pages[j]] = [book.pages[j], book.pages[i]];
+  currentPage = j; markDirty(); renderAll();
+}
+function deletePage(i) {
+  if (!confirm("حذف هذه الصفحة؟")) return;
+  book.pages.splice(i, 1);
+  currentPage = Math.min(currentPage, book.pages.length - 1); markDirty(); renderAll();
+}
+
+// ── export: ids, orders and toc rebuilt from position (validate_book_v2's invariants) ──
+
+function buildExportObject() {
+  const out = { schemaVersion: 2, bookId: book.bookId || "900001", title: (book.title || "").trim(),
+    author: (book.author || "").trim(), metadata: book.metadata || {}, pages: [], toc: [] };
+  let front = 0, tocN = 0;
+  book.pages.forEach((p, pi) => {
+    const seq = pi + 1;
+    const pageId = `p-${pad(seq, 6)}`;
+    let pageNumber = String(p.pageNumber ?? "").trim();
+    if (p.pageType === "frontMatter") { front++; pageNumber = `0.${front}`; }
+    const blocks = p.blocks.map((b, bi) => {
+      const order = bi + 1;
+      const ob = { id: `${pageId}-b-${pad(order, 3)}`, type: b.type || "text", order, text: (b.text || "").normalize("NFC") };
+      if (ob.type === "heading") {
+        tocN++;
+        ob.tocId = `toc-${pad(tocN, 5)}`;
+        out.toc.push({ id: ob.tocId, order: tocN, title: ob.text, pageId, pageNumber });
+      }
+      return ob;
+    });
+    const printed = Number(pageNumber);
+    out.pages.push({
+      id: pageId, sequence: seq, isBlank: !!p.isBlank, blocks,
+      printedPage: p.pageType === "frontMatter" ? (p.printedPage ?? seq) : (Number.isInteger(printed) ? printed : (p.printedPage ?? seq)),
+      sourcePageLabel: p.sourcePageLabel ?? String(pageNumber),
+      pageType: p.pageType || "main", pageNumber,
+    });
+  });
+  return out;
+}
+
+// ── start ───────────────────────────────────────────────────────────────────
+
+api("GET", "/api/me").then(me => { $("userName").textContent = me.user; }).catch(() => {});
+route();
+</script>
+</body>
+</html>

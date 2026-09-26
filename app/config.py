@@ -41,12 +41,17 @@ class Settings(BaseSettings):
     # Also allow http://localhost:<any port> / 127.0.0.1, for developing the site locally.
     cors_allow_localhost: bool = True
 
+    # The conversion workbench's drafts folder (shared with the workbench container) and
+    # its public address, for the admin panel's review list (/admin/drafts).
+    workbench_root: Path = Path("data/workbench")
+    workbench_url: str = "https://convert.thaqalaynlibrary.com"
+
     # Guards the /admin control panel (HTTP Basic). Required, no default -- an admin
     # panel with a guessable or absent credential is worse than no panel at all.
     admin_username: str
     admin_password: str
 
-    @field_validator("books_root", "covers_root")
+    @field_validator("books_root", "covers_root", "workbench_root")
     @classmethod
     def _resolve_against_repo_root(cls, value: Path) -> Path:
         """Relative paths are interpreted relative to the repo, not the working directory —
