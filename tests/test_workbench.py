@@ -322,6 +322,40 @@ class TestFollowsWord:
         texts = [" ".join(p.text for p in pg) for pg in pages]
         assert texts == ["الصفحة الأولى", "الصفحة الثانية", "الصفحة الثالثة"]
 
+    def test_continuous_section_break_starts_no_page(self, tmp_path):
+        """The break after a section is decided by the section that follows it: a
+        continuous one goes on on the same page."""
+        from docx.enum.section import WD_SECTION
+        from workbench.conversion import converter
+        d = docx.Document()
+        d.add_paragraph("أول الصفحة")
+        d.add_section(WD_SECTION.CONTINUOUS)
+        d.add_paragraph("آخر الصفحة")
+        d.add_page_break()
+        d.add_paragraph("الصفحة الثانية")
+        d.save(tmp_path / "b.docx")
+        c = converter()
+        pages = c._split_pages(c.read_docx(tmp_path / "b.docx"))
+        assert [" ".join(p.text for p in pg) for pg in pages] == ["أول الصفحة آخر الصفحة", "الصفحة الثانية"]
+
+    def test_doc_section_marks_of_continuous_sections_are_not_pages(self):
+        """In a .doc a section mark is the same \\x0c as a page break; only the section
+        table (PlcfSed + each SEPX's sprmSBkc) tells them apart."""
+        import struct
+        from workbench.conversion import converter
+        c = converter()
+        # Three sections ending at CPs 10, 20, 30: the second is continuous, the third
+        # new-page, so only the mark ending the first section (CP 9) is inline.
+        sepx_at = 0x200
+        sepx = struct.pack("<HHB", 3, 0x3009, 0)  # cb=3, sprmSBkc = continuous
+        wd = bytearray(0x300)
+        wd[sepx_at:sepx_at + len(sepx)] = sepx
+        cps = struct.pack("<4I", 0, 10, 20, 30)
+        seds = b"".join(struct.pack("<hIhI", 0, fc, 0, 0) for fc in (0xFFFFFFFF, sepx_at, 0xFFFFFFFF))
+        tbl = cps + seds
+        struct.pack_into("<II", wd, 0x00CA, 0, len(tbl))
+        assert c._inline_section_marks(bytes(wd), tbl) == {9}
+
     def test_two_manual_breaks_still_make_a_blank_page(self, tmp_path):
         from workbench.conversion import converter
         d = docx.Document()

@@ -157,6 +157,39 @@ def _paragraph_istds(wd: bytes, tbl: bytes):
     return runs
 
 
+def _inline_section_marks(wd: bytes, tbl: bytes) -> set[int]:
+    """CPs of the section marks that start no new page. In the text a section mark is the
+    same \\x0c as a manual page break, but a section whose break kind (sprmSBkc) is
+    "continuous" or "new column" goes on on the same page. Counting those as pages put
+    dozens of empty pages into real books that Word doesn't show."""
+    fc, lcb = struct.unpack_from("<II", wd, 0x00CA)
+    if lcb < 4 + 4 + 12:
+        return set()
+    n = (lcb - 4) // 16
+    cps = struct.unpack_from("<%dI" % (n + 1), tbl, fc)
+    marks = set()
+    for i in range(1, n):  # the break kind of section i decides the mark ending section i-1
+        fc_sepx = struct.unpack_from("<I", tbl, fc + 4 * (n + 1) + 12 * i + 2)[0]
+        kind = 2  # new page, when the section says nothing
+        if fc_sepx != 0xFFFFFFFF and fc_sepx + 2 <= len(wd):
+            cb = struct.unpack_from("<H", wd, fc_sepx)[0]
+            grpprl = wd[fc_sepx + 2:fc_sepx + 2 + cb]
+            pos = 0
+            while pos + 2 <= len(grpprl):
+                sprm = struct.unpack_from("<H", grpprl, pos)[0]
+                pos += 2
+                spra = sprm >> 13
+                if sprm == 0x3009 and pos < len(grpprl):
+                    kind = grpprl[pos]
+                if spra == 6:
+                    pos += (grpprl[pos] if pos < len(grpprl) else 0) + 1
+                else:
+                    pos += {0: 1, 1: 1, 2: 2, 3: 4, 4: 2, 5: 2, 7: 3}[spra]
+        if kind in (0, 1):
+            marks.add(cps[i] - 1)
+    return marks
+
+
 def _clean_text(raw: str) -> str:
     """Drop field codes (keep a field's displayed result), pictures, and other control
     characters; keep \\r (paragraph end) and \\x0c (page break) for the caller."""
@@ -205,6 +238,13 @@ def read_doc(path: Path) -> list[Para | None]:
     ccp_text = struct.unpack_from("<I", wd, 0x4C)[0]
     pieces = _pieces(wd, tbl)
     raw = _story_text(wd, pieces, ccp_text)
+    # A mark of a section that goes on on the same page still ends its paragraph.
+    inline = [cp for cp in _inline_section_marks(wd, tbl) if cp < len(raw) and raw[cp] == "\x0c"]
+    if inline:
+        chars = list(raw)
+        for cp in inline:
+            chars[cp] = "\r"
+        raw = "".join(chars)
     names = _style_names(wd, tbl)
     runs = _paragraph_istds(wd, tbl)
     run_starts = [r[0] for r in runs]
@@ -279,6 +319,13 @@ def read_docx(path: Path) -> list[Para | None]:
     # Counting both put a blank page into one real book that Word itself doesn't show,
     # shifting every later page number by one.
     after_section_break = False
+    # A sectPr ends its section, but its w:type says how *that* section began; whether a
+    # new page follows it is up to the next section's type.
+    sections = list(document.element.body.iter(qn("w:sectPr")))
+    starts_page = {}
+    for sect, following in zip(sections, sections[1:]):
+        kind = following.find(qn("w:type"))
+        starts_page[id(sect)] = kind is None or kind.get(qn("w:val")) not in ("continuous", "nextColumn")
 
     def paragraph(p_el) -> None:
         para = Paragraph(p_el, document)
@@ -312,11 +359,9 @@ def read_docx(path: Path) -> list[Para | None]:
                 after_section_break = False
         ppr = p_el.find(qn("w:pPr"))
         sect = ppr.find(qn("w:sectPr")) if ppr is not None else None
-        if sect is not None:
-            kind = sect.find(qn("w:type"))
-            if kind is None or kind.get(qn("w:val")) != "continuous":
-                result.append(None)  # a next-page section break starts a new page
-                after_section_break = True
+        if sect is not None and starts_page.get(id(sect), True):
+            result.append(None)  # a next-page section break starts a new page
+            after_section_break = True
 
     def table(tbl_el) -> None:
         nonlocal after_section_break
