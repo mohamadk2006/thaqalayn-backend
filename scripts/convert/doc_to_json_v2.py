@@ -405,6 +405,9 @@ def _key(text: str) -> str:
     return re.sub(r"\s+", " ", normalize(_LEAD_NUM_RE.sub("", text))).strip("( [")
 
 
+MIN_PROBE = 6  # letters an index title needs before it is searched for in the body
+
+
 def anchor_toc(pages: list[list[Para]]):
     """Use the book's own TOC (paragraphs styled "TOC n" ending in a printed page number)
     to find, for each entry, the body paragraph it points at. Returns (anchors, toc_pages)
@@ -427,18 +430,25 @@ def anchor_toc(pages: list[list[Para]]):
                 m = _TOC_LINE_RE.match(text)
                 if m and _key(m.group(1)):
                     title = " ".join([*pending, m.group(1).strip()])
-                    entries.append((_key(m.group(1)), int(m.group(2)), title))
+                    # Matched by the title's beginning: the numbered line of a wrapped
+                    # title can be as little as a symbol ("9 159" -- the font's honorific),
+                    # which starts any number of unrelated body sentences.
+                    entries.append((_key(title), int(m.group(2)), title))
                     pending = []
                 elif text:
                     pending.append(text)
 
     anchors: list[tuple[int, int]] = []
+    matched: dict[tuple[int, int], Para] = {}  # anchor -> the paragraph made a heading for it
     last_page, last_idx = 1, -1
     prev_match: Para | None = None
     unmatched: list[tuple[str, int, str]] = []
     for key, number, title in entries:
         probe = key[:22]
         found = None
+        if len(probe) < MIN_PROBE:  # too little text to tell one paragraph from another
+            unmatched.append((probe, number, title))
+            continue
         for k in range(last_page, first_toc):
             start = last_idx + 1 if k == last_page else 0
             for i in range(start, len(pages[k - 1])):
@@ -455,6 +465,7 @@ def anchor_toc(pages: list[list[Para]]):
             continue
         k, i, p = found
         anchors.append((k, number))
+        matched.setdefault((k, number), p)
         last_page, last_idx = k, i
         # A title the TOC wrapped over two lines matches two adjacent body paragraphs.
         if prev_match is not None and pages[k - 1] and i > 0 and pages[k - 1][i - 1] is prev_match:
@@ -463,9 +474,24 @@ def anchor_toc(pages: list[list[Para]]):
         else:
             p.heading = True
             prev_match = p
-    anchors = _drop_outlier_anchors(anchors)
+    anchors = _consistent_anchors(pages, _drop_outlier_anchors(anchors))
     leftovers, soft = _fuzzy_headings(pages, anchors, unmatched)
-    anchors = _drop_outlier_anchors(sorted({*anchors, *soft}))
+    for k, number, p in soft:
+        matched.setdefault((k, number), p)
+    anchors = _consistent_anchors(pages, _drop_outlier_anchors(sorted({*anchors, *((k, n) for k, n, _ in soft)})))
+    # A rejected match that is plain text far from where its number points was the wrong
+    # paragraph -- a sentence that happens to start like the entry -- and is no heading. A
+    # heading-styled one, or one near its page, is the right heading with a number that
+    # doesn't fit (an index from another printing): it stays a heading.
+    kept = {id(matched[a]) for a in anchors if a in matched}
+    by_number = sorted((num, seq - num) for seq, num in anchors)
+    for (seq, number), p in matched.items():
+        if (seq, number) in anchors or id(p) in kept or not p.text or _HEADING_LIKE_RE.match(p.style):
+            continue
+        before = [off for num, off in by_number if num <= number]
+        offset = before[-1] if before else (by_number[0][1] if by_number else 0)
+        if abs(seq - (number + offset)) > WRONG_MATCH_DISTANCE:
+            p.heading = False
     _complete_chapter_titles(pages, toc_pages)
     recovered = _recover_missing(pages, anchors, leftovers, toc_pages[0])
     return anchors, toc_pages, recovered
@@ -506,7 +532,7 @@ def _fuzzy_headings(pages, anchors, unmatched) -> None:
 
     by_number = sorted((num, seq - num) for seq, num in anchors)
     leftovers = []
-    soft: list[tuple[int, int]] = []  # (position, printed number) from these matches
+    soft: list[tuple[int, int, Para]] = []  # (position, printed number, paragraph) from these matches
     for probe, number, title in unmatched:
         before = [off for num, off in by_number if num <= number]
         offset = before[-1] if before else (by_number[0][1] if by_number else 0)
@@ -521,7 +547,7 @@ def _fuzzy_headings(pages, anchors, unmatched) -> None:
                     best, target, target_k = score, p, k
         if target is not None and best >= 0.7:
             target.heading = True
-            soft.append((target_k, number))
+            soft.append((target_k, number, target))
             continue
         # The index often words an entry differently from the heading printed in the body
         # ("سياسة معاوية : الارهاب والتجويع" vs "أ ـ الإرهاب والتجويع"). Compare by shared
@@ -540,7 +566,7 @@ def _fuzzy_headings(pages, anchors, unmatched) -> None:
                     best, target, target_k = score, p, k
         if target is not None and best >= 0.6:
             target.heading = True
-            soft.append((target_k, number))
+            soft.append((target_k, number, target))
         else:
             leftovers.append((probe, number, title, expected))
     return leftovers, soft
@@ -635,6 +661,52 @@ def _drop_outlier_anchors(anchors: list[tuple[int, int]]) -> list[tuple[int, int
         else:
             i += 1
     return kept
+
+
+# How far (in pages) from where its number points a rejected plain-text match must be to be
+# taken for the wrong paragraph. Real headings under an index a few dozen pages off (another
+# printing) stay headings; the sentence that caused the 557 -> 159 jump was 400 pages away.
+WRONG_MATCH_DISTANCE = 50
+
+# How many printed numbers an index may jump ahead of the file between two entries: a
+# page or two the file lacks (a blank verso Word needed no break for). More is a wrong match.
+MAX_NUMBER_SKIP = 2
+
+
+def _consistent_anchors(pages: list[list[Para]], anchors: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The largest set of anchors that can all be true at once. Going through the book,
+    position and printed number both move forward; the file can run ahead of the numbers
+    only by empty pages it has in between (the break artifacts `artifact_pages` drops),
+    and the numbers can run ahead of the file only by MAX_NUMBER_SKIP. One index line
+    matching a like-worded sentence hundreds of pages away numbered a real book's last
+    30 pages 159, 160, ... after 557 -- the outlier check can't see a wrong match at
+    the end, with no neighbour after it."""
+    if len(anchors) < 2:
+        return anchors
+    empty_before = [0]
+    for pg in pages:
+        empty_before.append(empty_before[-1] + (not pg))
+
+    def fits(a, b):
+        (sa, na), (sb, nb) = a, b
+        if sb < sa or nb < na or (sb == sa and nb != na):
+            return False
+        drift = (sb - nb) - (sa - na)
+        between = empty_before[sb - 1] - empty_before[sa] if sb > sa else 0
+        return -MAX_NUMBER_SKIP <= drift <= between
+
+    best = [1] * len(anchors)
+    prev = [-1] * len(anchors)
+    for j in range(len(anchors)):
+        for i in range(j):
+            if best[i] + 1 > best[j] and fits(anchors[i], anchors[j]):
+                best[j], prev[j] = best[i] + 1, i
+    j = max(range(len(anchors)), key=lambda k: (best[k], -k))
+    chain = []
+    while j != -1:
+        chain.append(anchors[j])
+        j = prev[j]
+    return chain[::-1]
 
 
 def artifact_pages(pages: list[list[Para]], anchors: list[tuple[int, int]]) -> set[int]:

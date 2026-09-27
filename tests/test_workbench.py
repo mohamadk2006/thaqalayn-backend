@@ -356,6 +356,37 @@ class TestFollowsWord:
         struct.pack_into("<II", wd, 0x00CA, 0, len(tbl))
         assert c._inline_section_marks(bytes(wd), tbl) == {9}
 
+    def test_index_line_matching_a_sentence_far_away_is_ignored(self):
+        """An index entry whose words begin a sentence hundreds of pages on numbered a real
+        book's last pages 159, 160, ... after 557. Anchors must form a possible sequence;
+        the wrong one is dropped and its sentence is not made a heading."""
+        from workbench.conversion import converter
+        c = converter()
+        P = c.Para
+        pages = [[P(f"نص الصفحة رقم {k} من الكتاب", "Normal")] for k in range(1, 81)]
+        pages[1].insert(0, P("الفصل الأول في العلم", "Heading 1"))
+        pages[4].insert(0, P("الفصل الثاني في العمل", "Heading 1"))
+        sentence = P("الخاتمة في ذكر الشهادة كما رواه الثقات", "Normal")
+        pages[74].append(sentence)
+        pages[78] = [P("الفصل الأول في العلم 2", "TOC 2"), P("الفصل الثاني في العمل 5", "TOC 2")]
+        pages[79] = [P("الخاتمة في ذكر الشهادة 9", "TOC 2")]
+        anchors, _, _ = c.anchor_toc(pages)
+        assert (75, 9) not in anchors
+        assert c.page_labels(len(pages), anchors) == list(range(1, 81))
+        assert not sentence.heading
+
+    def test_consistent_anchors_allow_drift_only_by_empty_pages(self):
+        from workbench.conversion import converter
+        c = converter()
+        P = c.Para
+        pages = [[P("نص", "Normal")] for _ in range(20)]
+        pages[9] = []  # one empty page between file pages 5 and 15
+        # The file runs one page ahead after the empty page: fine. Two ahead: impossible.
+        assert c._consistent_anchors(pages, [(5, 5), (15, 14)]) == [(5, 5), (15, 14)]
+        assert len(c._consistent_anchors(pages, [(5, 5), (15, 13)])) == 1
+        # Numbers going backwards never survive.
+        assert c._consistent_anchors(pages, [(2, 2), (5, 5), (8, 3), (12, 12)]) == [(2, 2), (5, 5), (12, 12)]
+
     def test_two_manual_breaks_still_make_a_blank_page(self, tmp_path):
         from workbench.conversion import converter
         d = docx.Document()
