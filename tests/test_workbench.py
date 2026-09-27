@@ -420,6 +420,45 @@ class TestFollowsWord:
         warnings = {(w["code"], w["page"]) for w in page_checks({"pages": pages})}
         assert warnings == {("long-page", 5), ("short-page", 12), ("number-skip", 27)}
 
+    def test_doc_poem_table_becomes_one_block_per_verse(self):
+        """A .doc poem is a table of half-verse cells in reading order; glued together it
+        was one run-on paragraph. Each cell's own style counts, not the paragraph's after
+        the table (often a heading, which made the whole poem a heading)."""
+        from workbench.conversion import converter
+        c = converter()
+        part = ("لو كانَ يقعدُ فوقَ الشمسِ من كرمٍ  \x07\x07قومٌ بأوّلهم أو مجدهم قعدوا  \x07\x07"
+                "قومٌ أبوهم سنانٌ حين تنسِبُهم\x07\x07طابوا وطابَ من الأولادِ ما ولدوا\x07\x07فقال عمر : أحسن")
+        paras = c._table_paras(part, "Heading 1", ["rfdPoem"] * 8)
+        assert [(p.text, p.style) for p in paras] == [
+            ("لو كانَ يقعدُ فوقَ الشمسِ من كرمٍ * قومٌ بأوّلهم أو مجدهم قعدوا", "rfdPoem"),
+            ("قومٌ أبوهم سنانٌ حين تنسِبُهم * طابوا وطابَ من الأولادِ ما ولدوا", "rfdPoem"),
+            ("فقال عمر : أحسن", "Heading 1"),
+        ]
+
+    def test_index_table_cells_are_not_paired_as_verses(self):
+        from workbench.conversion import converter
+        c = converter()
+        paras = c._table_paras("للصحن العباسيّ\x07223\x07\x07أنصاب الحرم\x0741\x07\x07", "rfdVar0", ["rfdVar0"] * 6)
+        assert [p.text for p in paras] == ["للصحن العباسيّ", "223", "أنصاب الحرم", "41"]
+
+    def test_poem_lines_kept_and_footnote_poems_stay_footnotes(self):
+        from workbench.conversion import converter
+        c = converter()
+        P = c.Para
+        poem = P("فادح شبَّ في الحشى بأوار  ومصاب قد حَطّ كُلّ مناري  يوم نادى العلاء والدمع جاري",
+                 "rfdPoemFootnoteCenter")
+        prose = P("سطر أول سطر ثان", "rfdNormal0")
+        abx = c.build_abx([[P("نص الصفحة", "rfdNormal0"), prose, poem]], "t", "a", 0, [1], c.HEADING_STYLE_RE)
+        assert "سطر أول سطر ثان" in abx  # a soft break in prose is layout
+        for line in ("فادح شبَّ في الحشى بأوار", "ومصاب قد حَطّ كُلّ مناري", "يوم نادى العلاء والدمع جاري"):
+            assert f"< هامش > {line} < / هامش >" in abx
+
+    def test_toc_line_with_a_page_range_points_at_its_first_page(self):
+        from workbench.conversion import converter
+        c = converter()
+        m = c._TOC_RANGE_RE.match("البابُ الأوّل : هويّةُ العَبّاس الشَّخْصِيَّةُ 17 ـ 127")
+        assert m and m.group(2) == "17"
+
     def test_consistent_anchors_allow_drift_only_by_empty_pages(self):
         from workbench.conversion import converter
         c = converter()

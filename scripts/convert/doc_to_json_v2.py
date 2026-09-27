@@ -64,6 +64,17 @@ class DocError(Exception):
     pass
 
 
+def is_footnote_style(style: str) -> bool:
+    """rfdFootnote0, rfdFootnoteCenter, rfdPoemFootnoteCenter, ...: a poem in the footnotes
+    is still a footnote. Only "starts with rfdFootnote" was checked, and 28 of one real
+    book's 37 footnote poems came out as main text."""
+    return "footnote" in style.lower()
+
+
+def is_poem_style(style: str) -> bool:
+    return "poem" in style.lower()
+
+
 @dataclass
 class Para:
     text: str
@@ -210,7 +221,9 @@ def _clean_text(raw: str) -> str:
             out.append(ch)
         elif ch == "\x0b":
             out.append("\u2028")  # soft line break: kept so an inline heading can be split out
-        elif ch in ("\x07", "\t"):
+        elif ch == "\x07":
+            out.append("\x07")  # table cell end: read_doc lays the cells out
+        elif ch == "\t":
             out.append(" ")
         elif ch == "\x1e":
             out.append("-")
@@ -219,6 +232,42 @@ def _clean_text(raw: str) -> str:
         else:
             out.append(ch)
     return "".join(out)
+
+
+# A table cell longer than this is prose, not half a verse.
+HEMISTICH_MAX = 90
+
+
+def _is_poem_table(cells: list[tuple[str, str]]) -> bool:
+    """Half-verse cells: short, and set in a poem style -- or in plain Normal, as many of
+    the books' poem tables are. Indexes are tables too ("للصحن العباسيّ | 223"), in their own
+    styles and ending in page numbers; pairing their cells broke a real book's contents."""
+    if not all(len(c) <= HEMISTICH_MAX for c, _ in cells):
+        return False
+    if any(is_poem_style(st) for _, st in cells):
+        return True
+    return all(st == "Normal" for _, st in cells) and not any(re.search(r"\d\W*$", c) for c, _ in cells)
+
+
+def _table_paras(part: str, style: str, cell_styles: list[str]) -> list[Para]:
+    """The table cells ending in this paragraph (each ends with \\x07; a row adds one more),
+    then whatever follows the table. The books set a poem as a table of half-verse cells in
+    reading order -- first half, second half, first half, ... -- so short cells are paired
+    into one verse, "first * second", as a .docx poem table is. Glued together, a whole
+    poem became one run-on paragraph."""
+    *raw_cells, after = part.split("\x07")
+    clean = lambda t: re.sub(r"[ \u00a0\u2028]+", " ", t).strip()  # noqa: E731
+    cells = [(clean(c), st) for c, st in zip(raw_cells, cell_styles) if clean(c)]
+    out: list[Para] = []
+    if len(cells) >= 2 and _is_poem_table(cells):
+        for i in range(0, len(cells), 2):
+            pair = cells[i:i + 2]
+            out.append(Para(VERSE_JOINER.join(c for c, _ in pair), pair[0][1]))
+    else:
+        out += [Para(c, st) for c, st in cells]
+    if clean(after):
+        out.append(Para(clean(after), style))
+    return out
 
 
 def read_doc(path: Path) -> list[Para | None]:
@@ -271,9 +320,15 @@ def read_doc(path: Path) -> list[Para | None]:
         segment = raw[start:end]
         text = _clean_text(segment)
         parts = text.split("\x0c")
+        # A table cell's mark is its own paragraph mark and carries its own style; the
+        # paragraph mark at the end belongs to what follows the table (often a heading).
+        cell_styles = iter([style_at(start + j) for j, ch in enumerate(segment) if ch == "\x07"])
         for k, part in enumerate(parts):
             if k > 0:
                 result.append(None)
+            if "\x07" in part:
+                result.extend(_table_paras(part, style, [next(cell_styles, style) for _ in range(part.count("\x07"))]))
+                continue
             part = re.sub(r"[  ]+", " ", part).strip()
             if part:
                 result.append(Para(part, style))
@@ -394,6 +449,8 @@ def read_any(path: Path) -> list[Para | None]:
 # ── Recover printed page numbers + headings from the book's own table of contents ──
 
 _TOC_LINE_RE = re.compile(r"^\(?(.*?)\s+(\d{1,4})$")
+# A section's line gives its page range, "البابُ الأوّل ... 17 ـ 127": it starts on the first.
+_TOC_RANGE_RE = re.compile(r"^\(?(.*?)\s+(\d{1,4})\s*[ـ\-–]\s*\d{1,4}$")
 _LEAD_NUM_RE = re.compile(r"^[\s(\[]*\d+\s*[ـ\-–.)]\s*")
 
 
@@ -427,7 +484,7 @@ def anchor_toc(pages: list[list[Para]]):
                 if p.style.upper().startswith("TOC 1"):
                     pending = []
                     continue
-                m = _TOC_LINE_RE.match(text)
+                m = _TOC_RANGE_RE.match(text) or _TOC_LINE_RE.match(text)
                 if m and _key(m.group(1)):
                     title = " ".join([*pending, m.group(1).strip()])
                     # Matched by the title's beginning: the numbered line of a wrapped
@@ -456,7 +513,7 @@ def anchor_toc(pages: list[list[Para]]):
             start = last_idx + 1 if k == last_page else 0
             for i in range(start, len(pages[k - 1])):
                 p = pages[k - 1][i]
-                if p.style.lower().startswith("rfdfootnote") or SEPARATOR_RE.match(p.text):
+                if is_footnote_style(p.style) or SEPARATOR_RE.match(p.text):
                     continue
                 if _key(p.text).startswith(probe):
                     found = (k, i, p)
@@ -511,8 +568,10 @@ def _contents_run(entries):
     them in one real book -- and keep a short summary of the contents at the front. The
     contents runs through the book in order, so its numbers rise; an index's jump about.
     Cut the lines where the number falls back sharply, call a block of TOC_MIN_BLOCK or
-    more lines ordered, and keep the longest stretch of ordered blocks (a lone short
-    block between two ordered ones is a misprint inside the contents, not an index)."""
+    more lines ordered, and keep the stretch of ordered blocks that spans most of the book
+    (a lone short block between two ordered ones is a misprint inside the contents, not an
+    index). Span, not length: an index of poems listed by page rises too, but covers only
+    the pages with poems, while the contents runs from the first page to the last."""
     if len(entries) < TOC_MIN_BLOCK:
         return entries
     blocks, cur = [], [entries[0]]
@@ -523,17 +582,26 @@ def _contents_run(entries):
         cur.append(e)
     blocks.append(cur)
     ordered = [len(b) >= TOC_MIN_BLOCK for b in blocks]
-    best, best_len, i = None, 0, 0
+    best, best_len, i = None, (0, 0), 0
     while i < len(blocks):
         if not ordered[i]:
             i += 1
             continue
-        j = i
-        while j + 1 < len(blocks) and (ordered[j + 1] or (j + 2 < len(blocks) and ordered[j + 2])):
+        # A misprint falls back inside the pages already covered (122, then 65, in a run
+        # from 2); a new list starts below all of them (an index of poems by page, 274 ...
+        # 350, then the contents from 2) and is not joined on.
+        j, low = i, blocks[i][0][1]
+
+        def joins(k):
+            return k < len(blocks) and ordered[k] and blocks[k][0][1] >= low
+
+        while j + 1 < len(blocks) and (joins(j + 1) or (not ordered[j + 1] and joins(j + 2))):
             j += 1
+            low = min(low, min(e[1] for e in blocks[j]))
         while not ordered[j]:
             j -= 1
-        size = sum(len(b) for b in blocks[i:j + 1])
+        numbers = [e[1] for b in blocks[i:j + 1] for e in b]
+        size = (max(numbers) - min(numbers), len(numbers))
         if size > best_len:
             best, best_len = (i, j), size
         i = j + 1
@@ -667,7 +735,7 @@ def _recover_missing(pages, anchors, leftovers, toc_set):
                 continue
             ps = pages[k - 1]
             for i, q in enumerate(ps):
-                if q.heading or "\u2028" not in q.text or q.style.lower().startswith("rfdfootnote"):
+                if q.heading or "\u2028" not in q.text or is_footnote_style(q.style):
                     continue
                 segs = q.text.split("\u2028")
                 for j, seg in enumerate(segs):
@@ -858,7 +926,7 @@ def _split_merged_pages(pages: list[list[Para]]) -> list[list[Para]]:
         cuts = []
         for a, b in zip(bars, bars[1:]):
             j = next((i for i in range(a + 1, b)
-                      if ps[i].text and not ps[i].style.lower().startswith("rfdfootnote")), None)
+                      if ps[i].text and not is_footnote_style(ps[i].style)), None)
             if j is not None:
                 cuts.append(j)
         start = 0
@@ -871,6 +939,18 @@ def _split_merged_pages(pages: list[list[Para]]) -> list[list[Para]]:
 
 def _strip_angles(s: str) -> str:
     return s.replace("<", "").replace(">", "")
+
+
+def _verse_lines(p: Para) -> list[str]:
+    """A poem keeps its lines: one block per line as Word shows it (the library's verses are
+    one block each). A poem is a poem-styled paragraph, or a centred one broken into three or
+    more lines; any other soft line break is just layout and becomes a space."""
+    lines = [re.sub(r"[ \u00a0]+", " ", x).strip() for x in _strip_angles(p.text).split("\u2028")]
+    lines = [x for x in lines if x]
+    poem = is_poem_style(p.style) or ("center" in p.style.lower() and len(lines) >= 3)
+    if poem and len(lines) > 1:
+        return lines
+    return [" ".join(lines)] if lines else []
 
 
 def build_abx(pages, title, author, front_pages, labels, heading_re) -> str:
@@ -891,12 +971,12 @@ def build_abx(pages, title, author, front_pages, labels, heading_re) -> str:
             if SEPARATOR_RE.match(text):
                 in_footnotes = True
                 continue
-            if in_footnotes or p.style.lower().startswith("rfdfootnote"):
-                lines.append(f"< هامش > {text} < / هامش >")
+            if in_footnotes or is_footnote_style(p.style):
+                lines += [f"< هامش > {line} < / هامش >" for line in _verse_lines(p)]
             elif p.heading or heading_re.match(p.style):
                 lines += ["< فهرس الموضوعات >", text, "< / فهرس الموضوعات >"]
             else:
-                lines.append(text)
+                lines += _verse_lines(p)
     lines.append("< / الكتاب >")
     return "\n".join(lines)
 
