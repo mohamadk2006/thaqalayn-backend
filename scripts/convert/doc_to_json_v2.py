@@ -417,7 +417,7 @@ def anchor_toc(pages: list[list[Para]]):
     toc_pages = [k for k, ps in enumerate(pages, 1) if any(p.style.upper().startswith("TOC") for p in ps)]
     if not toc_pages:
         return [], [], []
-    first_toc = toc_pages[0]
+    toc_set = set(toc_pages)
     entries = []
     pending: list[str] = []  # unnumbered first lines of a wrapped TOC 2 title
     for k in toc_pages:
@@ -437,6 +437,7 @@ def anchor_toc(pages: list[list[Para]]):
                     pending = []
                 elif text:
                     pending.append(text)
+    entries = _contents_run(entries)
 
     anchors: list[tuple[int, int]] = []
     matched: dict[tuple[int, int], Para] = {}  # anchor -> the paragraph made a heading for it
@@ -449,7 +450,9 @@ def anchor_toc(pages: list[list[Para]]):
         if len(probe) < MIN_PROBE:  # too little text to tell one paragraph from another
             unmatched.append((probe, number, title))
             continue
-        for k in range(last_page, first_toc):
+        for k in range(last_page, len(pages) + 1):
+            if k in toc_set:
+                continue
             start = last_idx + 1 if k == last_page else 0
             for i in range(start, len(pages[k - 1])):
                 p = pages[k - 1][i]
@@ -493,8 +496,53 @@ def anchor_toc(pages: list[list[Para]]):
         if abs(seq - (number + offset)) > WRONG_MATCH_DISTANCE:
             p.heading = False
     _complete_chapter_titles(pages, toc_pages)
-    recovered = _recover_missing(pages, anchors, leftovers, toc_pages[0])
+    recovered = _recover_missing(pages, anchors, leftovers, toc_set)
     return anchors, toc_pages, recovered
+
+
+# A drop in page number bigger than this between two index lines starts a new block.
+TOC_RESTART = 20
+TOC_MIN_BLOCK = 5  # lines in order it takes for a block to be (part of) a table of contents
+
+
+def _contents_run(entries):
+    """The table of contents among everything styled TOC. A book can also style its
+    alphabetical indexes (hadith, verses, names, sources) as TOC lines -- thousands of
+    them in one real book -- and keep a short summary of the contents at the front. The
+    contents runs through the book in order, so its numbers rise; an index's jump about.
+    Cut the lines where the number falls back sharply, call a block of TOC_MIN_BLOCK or
+    more lines ordered, and keep the longest stretch of ordered blocks (a lone short
+    block between two ordered ones is a misprint inside the contents, not an index)."""
+    if len(entries) < TOC_MIN_BLOCK:
+        return entries
+    blocks, cur = [], [entries[0]]
+    for e in entries[1:]:
+        if e[1] < cur[-1][1] - TOC_RESTART:
+            blocks.append(cur)
+            cur = []
+        cur.append(e)
+    blocks.append(cur)
+    ordered = [len(b) >= TOC_MIN_BLOCK for b in blocks]
+    best, best_len, i = None, 0, 0
+    while i < len(blocks):
+        if not ordered[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(blocks) and (ordered[j + 1] or (j + 2 < len(blocks) and ordered[j + 2])):
+            j += 1
+        while not ordered[j]:
+            j -= 1
+        size = sum(len(b) for b in blocks[i:j + 1])
+        if size > best_len:
+            best, best_len = (i, j), size
+        i = j + 1
+    if best is None:
+        return entries
+    run = [e for b in blocks[best[0]:best[1] + 1] for e in b]
+    while len(run) > 1 and run[0][1] > run[1][1]:  # the last line of an index just before it
+        run.pop(0)
+    return run
 
 
 def _complete_chapter_titles(pages, toc_pages) -> None:
@@ -507,7 +555,10 @@ def _complete_chapter_titles(pages, toc_pages) -> None:
     )
     if not blob:
         return
-    for k in range(1, toc_pages[0]):
+    toc_set = set(toc_pages)
+    for k in range(1, len(pages) + 1):
+        if k in toc_set:
+            continue
         ps = pages[k - 1]
         for i, p in enumerate(ps):
             if not (p.text and p.style.lower().startswith("heading")):
@@ -576,7 +627,7 @@ def _words(text: str) -> set[str]:
     return {w for w in _key(text).split() if len(w) >= 3}
 
 
-def _recover_missing(pages, anchors, leftovers, first_toc):
+def _recover_missing(pages, anchors, leftovers, toc_set):
     """Index entries with no heading paragraph of their own. Each is one of:
     a continuation line of a title the index wrapped (merged into that heading), a title
     glued into another paragraph after a soft line break (that paragraph is split so the
@@ -587,10 +638,12 @@ def _recover_missing(pages, anchors, leftovers, first_toc):
 
     report = []
     for probe, number, title, expected in leftovers:
-        lo, hi = max(1, expected - 1), min(first_toc - 1, expected + 2)
+        lo, hi = max(1, expected - 1), min(len(pages), expected + 2)
         done = False
         # (a) continuation of a wrapped title already present as a heading
         for k in range(lo, hi + 1):
+            if k in toc_set:
+                continue
             ps = pages[k - 1]
             for i, q in enumerate(ps):
                 if q.heading and probe in _key(q.text):
@@ -610,6 +663,8 @@ def _recover_missing(pages, anchors, leftovers, first_toc):
             continue
         # (b) heading glued into a longer paragraph after a soft line break
         for k in range(lo, hi + 1):
+            if k in toc_set:
+                continue
             ps = pages[k - 1]
             for i, q in enumerate(ps):
                 if q.heading or "\u2028" not in q.text or q.style.lower().startswith("rfdfootnote"):
@@ -636,9 +691,13 @@ def _recover_missing(pages, anchors, leftovers, first_toc):
             report.append((number, title, "split out of the paragraph it was glued into"))
             continue
         # (c) not in the body at all: heading with the index's title at the page's top
-        target = max(1, min(first_toc - 1, expected))
-        pages[target - 1].insert(0, Para(title, "toc-inserted", heading=True))
-        report.append((number, title, f"inserted at the top of page {target}"))
+        # Only where the number points into the body: clamping a number the file doesn't
+        # have to its first or last page stacked thousands of titles onto one page.
+        if 1 <= expected <= len(pages) and expected not in toc_set:
+            pages[expected - 1].insert(0, Para(title, "toc-inserted", heading=True))
+            report.append((number, title, f"inserted at the top of page {expected}"))
+        else:
+            report.append((number, title, "not placed: its page is not in the body"))
     return report
 
 

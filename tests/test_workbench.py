@@ -375,6 +375,31 @@ class TestFollowsWord:
         assert c.page_labels(len(pages), anchors) == list(range(1, 81))
         assert not sentence.heading
 
+    def test_alphabetical_indexes_styled_toc_are_not_the_contents(self):
+        """A real book styled its hadith/verse/name indexes as TOC lines too (2,700 of
+        them) and had a short summary at the front: only the full contents, whose numbers
+        rise through the book, is used."""
+        from workbench.conversion import converter
+        c = converter()
+        summary = [("s", n, "s") for n in (9, 15, 145, 233, 371)]
+        index = [("i", n, "i") for n in (245, 12, 388, 97, 150, 3, 410, 77, 260, 31, 199, 5)]
+        contents = [("c", n, "c") for n in range(2, 400, 12)]
+        misprint = [("c", 121, "c"), ("c", 65, "c")]  # one line out of order inside it
+        entries = summary + index + contents[:15] + misprint + contents[15:]
+        assert c._contents_run(entries) == contents[:15] + misprint + contents[15:]
+
+    def test_contents_at_the_front_is_searched_for_in_the_pages_after_it(self):
+        from workbench.conversion import converter
+        c = converter()
+        P = c.Para
+        pages = [[P(f"نص الصفحة رقم {k} من الكتاب", "Normal")] for k in range(1, 21)]
+        pages[1] = [P("الفصل الأول في العلم 5", "TOC 2"), P("الفصل الثاني في العمل 12", "TOC 2")]
+        pages[4].insert(0, P("الفصل الأول في العلم", "Normal"))
+        pages[11].insert(0, P("الفصل الثاني في العمل", "Normal"))
+        anchors, _, _ = c.anchor_toc(pages)
+        assert anchors == [(5, 5), (12, 12)]
+        assert pages[4][0].heading and pages[11][0].heading
+
     def test_consistent_anchors_allow_drift_only_by_empty_pages(self):
         from workbench.conversion import converter
         c = converter()
