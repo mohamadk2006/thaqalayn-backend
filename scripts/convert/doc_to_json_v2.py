@@ -75,6 +75,65 @@ def is_poem_style(style: str) -> bool:
     return "poem" in style.lower()
 
 
+# rafed.net books set honorifics and Qur'an brackets as plain characters in a symbol font
+# (ALAEM, "Rafed Alaem"), through a character style named for it (rfdAlaem): read as text
+# they were "أمير المؤمنين 7", "النبي 9". Worked out from where each one stands in twelve
+# real books (7 after علي and الحسين 1,000+ times, 3 after فاطمة and زينب, 8 after "الحسن
+# والحسين", ":" after "أهل البيت", "2 وأرضاه", 4 after "العائلة الكريمة ... جميعاً") and,
+# for "1", from the library's own text of the same sentence ("من خط الشهيد قدس سره").
+HONORIFICS = {
+    "7": "عليه السلام",
+    "9": "صلى الله عليه وآله",
+    "6": "صلى الله عليه وآله وسلم",
+    "3": "عليها السلام",
+    "8": "عليهما السلام",
+    ":": "عليهم السلام",
+    "2": "رضي الله عنه",
+    "4": "رضي الله عنهم",
+    "1": "قدس سره",
+    ";": "رحمه الله",
+    "(": "\ufd3f",  # ornate brackets round a Qur'an quote, as the library's books have them
+    ")": "\ufd3e",
+}
+_HONORIFIC_MARK = {ch: chr(0xE100 + i) for i, ch in enumerate(HONORIFICS)}
+_HONORIFIC_TEXT = {mark: HONORIFICS[ch] for ch, mark in _HONORIFIC_MARK.items()}
+_HONORIFIC_RE = re.compile("[" + "".join(_HONORIFIC_MARK.values()) + "]")
+
+
+def is_honorific_style(style: str) -> bool:
+    return "alaem" in style.lower()
+
+
+def _honorific_marks(text: str) -> str:
+    """A symbol-font run's characters, each as a placeholder until the paragraph is done."""
+    return "".join(_HONORIFIC_MARK.get(ch, ch) for ch in text)
+
+
+def _spell_honorifics(text: str) -> str:
+    def one(m):
+        phrase = _HONORIFIC_TEXT[m.group(0)]
+        if phrase in ("\ufd3f", "\ufd3e"):
+            return phrase
+        before = text[m.start() - 1] if m.start() else ""
+        after = text[m.end()] if m.end() < len(text) else ""
+        lead = " " if before and not before.isspace() and before not in "(«[\ufd3f" else ""
+        trail = " " if after and (after.isalnum() or after in "(«\ufd3f") else ""
+        return lead + phrase + trail
+    return _HONORIFIC_RE.sub(one, text)
+
+
+def _finish(items: list) -> list:
+    """Honorifics spelt out, and every text in one Unicode form (NFC): Word files mix
+    composed and decomposed Arabic letters (hamza on alef, madda), which the validator flags
+    and which look alike but compare differently."""
+    import unicodedata
+
+    for p in items:
+        if p is not None and p.text:
+            p.text = unicodedata.normalize("NFC", _spell_honorifics(p.text))
+    return items
+
+
 @dataclass
 class Para:
     text: str
@@ -201,6 +260,36 @@ def _inline_section_marks(wd: bytes, tbl: bytes) -> set[int]:
     return marks
 
 
+def _character_styles(wd: bytes, tbl: bytes):
+    """Sorted (fc_start, fc_end, istd) of text runs formatted with a character style
+    (sprmCIstd), from the CHPX bin table."""
+    fc, lcb = struct.unpack_from("<II", wd, 0x00FA)
+    plc = tbl[fc:fc + lcb]
+    n = (lcb - 4) // 8
+    runs = []
+    for pn in struct.unpack_from("<%dI" % n, plc, 4 * (n + 1)):
+        page = wd[pn * 512:(pn + 1) * 512]
+        crun = page[511]
+        rgfc = struct.unpack_from("<%dI" % (crun + 1), page, 0)
+        for i in range(crun):
+            off = page[4 * (crun + 1) + i] * 2
+            if not off:
+                continue
+            grpprl = page[off + 1:off + 1 + page[off]]
+            pos = 0
+            while pos + 2 <= len(grpprl):
+                sprm = struct.unpack_from("<H", grpprl, pos)[0]
+                pos += 2
+                spra = sprm >> 13
+                if sprm == 0x4A30 and pos + 2 <= len(grpprl):  # sprmCIstd
+                    runs.append((rgfc[i], rgfc[i + 1], struct.unpack_from("<H", grpprl, pos)[0]))
+                if spra == 6:
+                    pos += (grpprl[pos] if pos < len(grpprl) else 0) + 1
+                else:
+                    pos += {0: 1, 1: 1, 2: 2, 3: 4, 4: 2, 5: 2, 7: 3}[spra]
+    return sorted(runs)
+
+
 def _clean_text(raw: str) -> str:
     """Drop field codes (keep a field's displayed result), pictures, and other control
     characters; keep \\r (paragraph end) and \\x0c (page break) for the caller."""
@@ -312,6 +401,21 @@ def read_doc(path: Path) -> list[Para | None]:
         istd = runs[i][2]
         return names[istd] if istd < len(names) else ""
 
+    # Honorifics: characters in the symbol-font character style become placeholders here,
+    # where each one's position is still its CP.
+    honorific_styles = {i for i, name in enumerate(names) if is_honorific_style(name)}
+    if honorific_styles:
+        char_runs = [r for r in _character_styles(wd, tbl) if r[2] in honorific_styles]
+        char_starts = [r[0] for r in char_runs]
+        chars = list(raw)
+        for cp, ch in enumerate(chars):
+            if ch in _HONORIFIC_MARK and char_runs:
+                fc = cp_to_fc(cp)
+                i = bisect.bisect_right(char_starts, fc) - 1
+                if i >= 0 and fc < char_runs[i][1]:
+                    chars[cp] = _HONORIFIC_MARK[ch]
+        raw = "".join(chars)
+
     result: list[Para | None] = []
     start = 0
     for m in re.finditer("\r", raw):
@@ -340,7 +444,7 @@ def read_doc(path: Path) -> list[Para | None]:
     tail = _clean_text(raw[start:]).strip()
     if tail:
         result.append(Para(tail, ""))
-    return result
+    return _finish(result)
 
 
 # ── .docx reading ───────────────────────────────────────────────────────────────
@@ -396,6 +500,16 @@ def read_docx(path: Path) -> list[Para | None]:
     SKIP = {qn("w:txbxContent"), _MC_FALLBACK, qn("w:del"), qn("w:instrText"), qn("w:delText"),
             qn("w:pPr"), W_RPR, qn("w:sym"), qn("w:moveFrom")}
     manual = sum(1 for br in body.iter(W_BR) if br.get(qn("w:type")) == "page")
+    char_style_names: dict[str, str] = {}
+
+    def char_style(style_id: str) -> str:
+        if style_id not in char_style_names:
+            try:
+                style = document.styles.get_by_id(style_id, 2)  # 2: WD_STYLE_TYPE.CHARACTER
+            except Exception:  # noqa: BLE001
+                style = None
+            char_style_names[style_id] = style.name if style is not None else style_id
+        return char_style_names[style_id]
     marks = sum(1 for _ in body.iter(W_MARK))
     by_marks = marks > 0 and manual * FLOWING_TEXT_RATIO < marks
 
@@ -409,6 +523,11 @@ def read_docx(path: Path) -> list[Para | None]:
                 rpr = child.find(W_RPR)
                 if rpr is not None and rpr.find(W_VANISH) is not None:
                     continue  # hidden text
+                rstyle = rpr.find(qn("w:rStyle")) if rpr is not None else None
+                if rstyle is not None and is_honorific_style(char_style(rstyle.get(qn("w:val")))):
+                    for kind, value in walk(child):
+                        yield (kind, _honorific_marks(value)) if kind == "text" else (kind, value)
+                    continue
             if tag == W_T:
                 yield "text", child.text or ""
             elif tag == W_TAB:
@@ -554,7 +673,7 @@ def read_docx(path: Path) -> list[Para | None]:
     for child in body.iterchildren():
         block(child)
     result.extend(Para(n, "footnote text") for n in pending_notes)
-    return result
+    return _finish(result)
 
 
 _W_T_RE = re.compile(r"<w:t(?: [^>]*)?>([^<]*)</w:t>")

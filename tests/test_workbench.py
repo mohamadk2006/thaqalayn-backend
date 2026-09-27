@@ -670,3 +670,36 @@ class TestWordLayout:
         out = c._split_toc_pages(pages)
         assert len(out) == 14 and out[-1][0].text == "الفهرس الإجمالي"
         assert sum(len(pg) for pg in out[9:13]) == len(toc)
+
+
+class TestHonorifics:
+    """rafed.net books set honorifics as digits in a symbol font, through a character style
+    (rfdAlaem); read as text they were "أمير المؤمنين 7"."""
+
+    def test_symbol_font_characters_are_spelt_out(self, tmp_path):
+        from docx.enum.style import WD_STYLE_TYPE
+        from workbench.conversion import converter
+        d = docx.Document()
+        d.styles.add_style("rfdAlaem", WD_STYLE_TYPE.CHARACTER)
+        p = d.add_paragraph("قال أمير المؤمنين ")
+        p.add_run("7").style = "rfdAlaem"
+        p.add_run(" وقال رسول الله")
+        p.add_run("9").style = "rfdAlaem"
+        p.add_run(": ")
+        p.add_run("(").style = "rfdAlaem"
+        p.add_run("إنّا أعطيناك الكوثر")
+        p.add_run(")").style = "rfdAlaem"
+        p.add_run(" وروى الشيخ المفيد 7 أيضاً")  # a real 7, in no symbol style, stays a 7
+        d.save(tmp_path / "a.docx")
+        texts = [x.text for x in converter().read_docx(tmp_path / "a.docx") if x]
+        assert texts == ["قال أمير المؤمنين عليه السلام وقال رسول الله صلى الله عليه وآله: "
+                         "﴿إنّا أعطيناك الكوثر﴾ وروى الشيخ المفيد 7 أيضاً"]
+
+    def test_text_is_one_unicode_form(self, tmp_path):
+        import unicodedata
+        from workbench.conversion import converter
+        d = docx.Document()
+        d.add_paragraph(unicodedata.normalize("NFD", "آمنوا بالله وأطيعوا"))
+        d.save(tmp_path / "a.docx")
+        [p] = converter().read_docx(tmp_path / "a.docx")
+        assert p.text == unicodedata.normalize("NFC", "آمنوا بالله وأطيعوا")
