@@ -545,3 +545,128 @@ class TestComparePdf:
         from workbench.conversion import page_map
         book = {"pages": [{"blocks": [{"type": "text", "text": " ".join(["كلمة"] * 200)}]}] * 3}
         assert page_map(book, [[], [], ["غلاف"]]) == []  # no text to match: by number instead
+
+
+def flowing_docx(path: Path, body_xml: str, footnotes: dict[int, str] | None = None,
+                 final_type: str | None = None) -> Path:
+    """A .docx typed the way a real series of books is: no page breaks, Word's saved page
+    marks (lastRenderedPageBreak) where its pages began, real Word footnotes."""
+    import re
+    import zipfile
+
+    d = docx.Document()
+    d.add_paragraph("x")
+    d.save(path)
+    with zipfile.ZipFile(path) as z:
+        files = {n: z.read(n) for n in z.namelist()}
+    xml = files["word/document.xml"].decode()
+    xml = re.sub(r"<w:body>.*?(<w:sectPr)", lambda m: "<w:body>" + body_xml + m.group(1), xml, flags=re.S)
+    if final_type:  # how the last section (the body's own sectPr) starts
+        xml = re.sub(r"(<w:sectPr\b[^>]*>)(?!.*<w:sectPr)", rf'\1<w:type w:val="{final_type}"/>', xml, count=1, flags=re.S)
+    files["word/document.xml"] = xml.encode()
+    if footnotes:
+        w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+        notes = "".join(
+            f'<w:footnote w:id="{i}"><w:p><w:r><w:t>(</w:t></w:r><w:r><w:footnoteRef/></w:r>'
+            f'<w:r><w:t xml:space="preserve">) {t}</w:t></w:r></w:p></w:footnote>' for i, t in footnotes.items())
+        files["word/footnotes.xml"] = (
+            f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:footnotes {w}>'
+            '<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>'
+            f'{notes}</w:footnotes>').encode()
+        rels = files["word/_rels/document.xml.rels"].decode().replace(
+            "</Relationships>",
+            '<Relationship Id="rIdFn" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" '
+            'Target="footnotes.xml"/></Relationships>')
+        files["word/_rels/document.xml.rels"] = rels.encode()
+        types = files["[Content_Types].xml"].decode().replace(
+            "</Types>",
+            '<Override PartName="/word/footnotes.xml" '
+            'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/></Types>')
+        files["[Content_Types].xml"] = types.encode()
+        settings = files["word/settings.xml"].decode()
+        files["word/settings.xml"] = re.sub(
+            r"(<w:settings[^>]*>)", r'\1<w:footnotePr><w:numRestart w:val="eachPage"/></w:footnotePr>', settings, count=1).encode()
+    with zipfile.ZipFile(path, "w") as z:
+        for n, data in files.items():
+            z.writestr(n, data)
+    return path
+
+
+def run(text: str = "", mark: bool = False, note: int | None = None) -> str:
+    inner = ("<w:lastRenderedPageBreak/>" if mark else "")
+    inner += f'<w:footnoteReference w:id="{note}"/>' if note is not None else f'<w:t xml:space="preserve">{text}</w:t>'
+    return f"<w:r>{inner}</w:r>"
+
+
+def para(*runs: str, extra: str = "") -> str:
+    return f"<w:p>{extra}{''.join(runs)}</w:p>"
+
+
+class TestWordLayout:
+    """Books whose text flows (no page breaks): Word's own pagination, saved in the file."""
+
+    def read(self, path):
+        from workbench.conversion import converter
+        c = converter()
+        return c, c._split_pages(c.read_docx(path))
+
+    def texts(self, pages):
+        return [" | ".join(p.text for p in pg) for pg in pages]
+
+    def test_pages_follow_words_saved_marks_even_mid_paragraph(self, tmp_path):
+        body = (para(run("الصفحة الأولى")) + para(run("آخر الأولى "), run("أول الثانية", mark=True))
+                + para(run("الثالثة", mark=True)))
+        c, pages = self.read(flowing_docx(tmp_path / "a.docx", body))
+        assert self.texts(pages) == ["الصفحة الأولى | آخر الأولى", "أول الثانية", "الثالثة"]
+        assert c.docx_layout(tmp_path / "a.docx")["pagesFrom"] == "word-layout"
+
+    def test_footnotes_go_under_the_page_citing_them_numbered_per_page(self, tmp_path):
+        body = (para(run("قال تعالى"), run("("), run(note=2), run(")"), run(" وقال"), run(note=3))
+                + para(run("صفحة ثانية", mark=True), run(note=4)))
+        c, pages = self.read(flowing_docx(tmp_path / "a.docx", body, {2: "النحل 44.", 3: "الحشر 21.", 4: "الكافي 1."}))
+        assert [[(p.text, c.is_footnote_style(p.style)) for p in pg] for pg in pages] == [
+            [("قال تعالى(1) وقال(2)", False), ("(1) النحل 44.", True), ("(2) الحشر 21.", True)],
+            [("صفحة ثانية(1)", False), ("(1) الكافي 1.", True)],
+        ]
+
+    def test_a_section_starting_on_an_odd_page_gets_words_blank_page(self, tmp_path):
+        """The cover ends on page 1; the next section must start on an odd page, so Word
+        prints page 2 blank -- there is nothing in the file to mark it."""
+        body = para(run("غلاف"), extra="<w:pPr><w:sectPr/></w:pPr>") + para(run("المقدمة", mark=True))
+        _, pages = self.read(flowing_docx(tmp_path / "a.docx", body, final_type="oddPage"))
+        assert self.texts(pages) == ["غلاف", "", "المقدمة"]
+
+    def test_text_inside_links_and_list_numbers_are_read(self, tmp_path):
+        from workbench.conversion import converter
+        d = docx.Document()
+        d.add_paragraph("الأول", style="List Number")
+        d.add_paragraph("الثاني", style="List Number")
+        d.save(tmp_path / "a.docx")
+        c = converter()
+        texts = [p.text for p in c.read_docx(tmp_path / "a.docx") if p]
+        assert texts == ["1. الأول", "2. الثاني"]
+        body = para('<w:hyperlink w:anchor="_Toc1"><w:r><w:t>مقدّمة</w:t></w:r><w:r><w:tab/></w:r>'
+                    '<w:r><w:t>5</w:t></w:r></w:hyperlink>')
+        texts = [p.text for p in c.read_docx(flowing_docx(tmp_path / "b.docx", body)) if p]
+        assert texts == ["مقدّمة 5"]
+
+    def test_incomplete_word_layout_blocks_submission(self, tmp_path):
+        from workbench import conversion
+        body = para(run("أول", mark=True)) + "".join(para(run("نص لم يخططه Word بعد " * 5)) for _ in range(20))
+        path = flowing_docx(tmp_path / "a.docx", body)
+        c = conversion.converter()
+        content, _ = c.convert_doc(path, "t", "a", 0, 1, c.HEADING_STYLE_RE)
+        report = conversion.source_report(c, path, content)
+        assert [i["code"] for i in report["sourceIssues"]] == ["word-layout-incomplete"]
+        assert report["textCoverage"] >= 0.995
+
+    def test_words_toc_on_one_page_is_spread_over_the_pages_it_takes(self):
+        from workbench.conversion import converter
+        c = converter()
+        P = c.Para
+        toc = [P("الفهرس التفصيلي", "Heading 1")] + [P(f"عنوان رقم {k} في الكتاب {k + 2}", "toc 2") for k in range(60)]
+        toc[1:3] = [P("الفهرس التفصيلي 10", "toc 1"), P("الفهرس الإجمالي 14", "toc 1")]
+        pages = [[P("نص", "Normal")] for _ in range(9)] + [toc, [P("الفهرس الإجمالي", "Heading 1")]]
+        out = c._split_toc_pages(pages)
+        assert len(out) == 14 and out[-1][0].text == "الفهرس الإجمالي"
+        assert sum(len(pg) for pg in out[9:13]) == len(toc)

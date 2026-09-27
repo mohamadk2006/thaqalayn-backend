@@ -223,6 +223,7 @@ async def save_book(draft_id: str, book: dict, user: str = Depends(current_user)
         raise HTTPException(400, "ليس كتاباً بصيغة v2")
     book["bookId"] = "900001"
     issues = await asyncio.to_thread(conversion.issues_of, book)
+    issues += (meta.get("report") or {}).get("sourceIssues", [])  # the Word file's own, from conversion
     drafts.save_book(root(), draft_id, book)
     report = dict(meta.get("report") or {}, pages=len(book["pages"]), tocEntries=len(book.get("toc", [])))
     return drafts.update(root(), draft_id, issues=issues, title=book.get("title", ""),
@@ -310,7 +311,8 @@ def submit(draft_id: str, note: str = Form(""), user: str = Depends(current_user
     book = drafts.load_book(root(), draft_id)
     if book is None:
         raise HTTPException(409, "لم يتم تحويل هذا الكتاب بعد")
-    problems = [i["detail"] for i in conversion.issues_of(book) if i["severity"] == "error"]
+    issues = conversion.issues_of(book) + (meta.get("report") or {}).get("sourceIssues", [])
+    problems = [i["detail"] for i in issues if i["severity"] == "error"]
     if not (book.get("title") or "").strip():
         problems.insert(0, "عنوان الكتاب فارغ")
     if not (book.get("author") or "").strip():

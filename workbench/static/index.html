@@ -461,6 +461,7 @@ function renderReport() {
     ${r.pages ? `<span>${r.pages} صفحة (${r.frontPages || 0} مقدمة) — الأرقام المطبوعة ${escapeHtml(r.printedFirst ?? "")} … ${escapeHtml(r.printedLast ?? "")}</span>` : ""}
     ${r.tocEntries !== undefined ? `<span>${r.tocEntries} عنوان في الفهرس</span>` : ""}
     ${r.pageNumbersFrom ? `<span class="hint">${r.pageNumbersFrom === "toc" ? "أرقام الصفحات من فهرس الكتاب" : "أرقام الصفحات متسلسلة (لم يُستخدم فهرس)"}</span>` : ""}
+    ${r.pagesFrom === "word-layout" ? `<span class="hint" title="الملف بلا فواصل صفحات؛ الصفحات كما رتّبها Word عند آخر حفظ للملف">الصفحات من تخطيط Word المحفوظ</span>` : ""}
     <span>${errors ? `<span class="err">${errors} خطأ</span>` : `<span style="color:var(--ok)">لا أخطاء</span>`}${warnings ? ` · <span class="warnc">${warnings} تنبيه</span>` : ""}</span>
     <a onclick="showIssues()">التفاصيل</a>
     <span class="hint">${renderText}</span>
@@ -488,6 +489,8 @@ function showIssues() {
       <ul class="issues">${r.recovered.map(x => `<li>ص ${escapeHtml(x.page)} — ${escapeHtml(x.title)}</li>`).join("")}</ul>`;
   }
   if (r.anchors !== undefined) html += `<p class="hint">نقاط ربط أرقام الصفحات بالفهرس: ${r.anchors}</p>`;
+  if (r.pagesFrom) html += `<p class="hint">مصدر الصفحات: ${r.pagesFrom === "word-layout" ? "تخطيط Word المحفوظ في الملف (لا فواصل صفحات فيه)" : "فواصل الصفحات في ملف Word"}</p>`;
+  if (r.textCoverage !== undefined) html += `<p class="hint">نُقل ${Math.min(100, Math.round(r.textCoverage * 1000) / 10)}% من نص الملف (المتن والحواشي).</p>`;
   $("issuesBody").innerHTML = html;
   for (const a of $("issuesBody").querySelectorAll("a.goto")) {
     a.onclick = () => { currentPage = Math.min(Number(a.dataset.page), book.pages.length - 1); $("issuesDialog").close(); renderAll(); };

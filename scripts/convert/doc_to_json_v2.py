@@ -329,7 +329,7 @@ def read_doc(path: Path) -> list[Para | None]:
             if "\x07" in part:
                 result.extend(_table_paras(part, style, [next(cell_styles, style) for _ in range(part.count("\x07"))]))
                 continue
-            part = re.sub(r"[  ]+", " ", part).strip()
+            part = re.sub(r"[ \u00a0]+", " ", part).strip()
             if part:
                 result.append(Para(part, style))
             elif "\x01" in segment and len(parts) == 1:
@@ -348,9 +348,33 @@ def read_doc(path: Path) -> list[Para | None]:
 VERSE_JOINER = " * "  # the library's convention: one block per verse, hemistichs joined by " * "
 
 
+# Word's saved layout is used for the pages when a file has at most one page break of
+# its own per this many of Word's page marks: its text flows, and Word laid out the pages.
+FLOWING_TEXT_RATIO = 10
+_NOTE = "\ue000{}\ue001"  # a footnote reference's place in the text until its number is known
+_NOTE_RE = re.compile(r"(\(?)\ue000(-?\d+)\ue001(\)?)")
+_OWN_MARK = "\ue002"  # a footnote's own number, where Word shows it inside the note
+_OWN_MARK_RE = re.compile(r"\(?\ue002\)?")
+_MC_FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
+
+
 def read_docx(path: Path) -> list[Para | None]:
     """Same output as read_doc for a .docx: paragraphs in order (style names kept), `None`
-    at each page boundary (a manual page break, or a next-page section break).
+    at each page boundary.
+
+    Where pages end: a book typed with a page break at the end of every printed page gives
+    them itself (manual breaks and next-page section breaks). A book whose text just flows
+    has no such breaks -- Word decides -- but Word records where each page began when it
+    last saved the file (w:lastRenderedPageBreak); those marks are Word's own pagination,
+    and a section that must start on an odd (even) page gets the blank page Word prints
+    before it. One real series of books had no page break at all: read by breaks, a
+    450-page book became 25 pages.
+
+    Everything a paragraph shows is read, wherever Word nests it (links -- a Word TOC is
+    all links --, tracked insertions, content controls, fields' results), but not text
+    boxes, deleted text or hidden text. Real Word footnotes (Insert Footnote) are put at
+    the bottom of the page that cites them, numbered on each page from 1 as Word does, the
+    mark "(n)" in the text; list numbers Word generates ("1-", "أ-") are written out.
 
     Tables are read in place, in document order. A row of several cells is a verse -- the
     non-empty cells joined with " * " -- and a row with one cell is plain text. Skipping
@@ -358,8 +382,6 @@ def read_docx(path: Path) -> list[Para | None]:
     try:
         import docx
         from docx.oxml.ns import qn
-        from docx.table import Table
-        from docx.text.paragraph import Paragraph
     except ImportError as exc:
         raise DocError("python-docx is required: uv run --with olefile --with python-docx ...") from exc
     try:
@@ -367,79 +389,362 @@ def read_docx(path: Path) -> list[Para | None]:
     except Exception as exc:
         raise DocError(f"not a .docx file: {exc}") from exc
 
-    w_t, w_tab, w_br = qn("w:t"), qn("w:tab"), qn("w:br")
+    body = document.element.body
+    W_T, W_TAB, W_BR, W_CR = qn("w:t"), qn("w:tab"), qn("w:br"), qn("w:cr")
+    W_MARK, W_NOTE, W_NOTEREF = qn("w:lastRenderedPageBreak"), qn("w:footnoteReference"), qn("w:footnoteRef")
+    W_R, W_RPR, W_VANISH, W_P, W_TBL, W_SDT = qn("w:r"), qn("w:rPr"), qn("w:vanish"), qn("w:p"), qn("w:tbl"), qn("w:sdt")
+    SKIP = {qn("w:txbxContent"), _MC_FALLBACK, qn("w:del"), qn("w:instrText"), qn("w:delText"),
+            qn("w:pPr"), W_RPR, qn("w:sym"), qn("w:moveFrom")}
+    manual = sum(1 for br in body.iter(W_BR) if br.get(qn("w:type")) == "page")
+    marks = sum(1 for _ in body.iter(W_MARK))
+    by_marks = marks > 0 and manual * FLOWING_TEXT_RATIO < marks
+
+    def walk(el):
+        """(kind, value) for what el shows, in reading order."""
+        for child in el:
+            tag = child.tag
+            if tag in SKIP:
+                continue
+            if tag == W_R:
+                rpr = child.find(W_RPR)
+                if rpr is not None and rpr.find(W_VANISH) is not None:
+                    continue  # hidden text
+            if tag == W_T:
+                yield "text", child.text or ""
+            elif tag == W_TAB:
+                yield "text", " "
+            elif tag == W_CR:
+                yield "text", "\u2028"
+            elif tag == W_BR:
+                kind = child.get(qn("w:type"))
+                yield ("page", None) if kind == "page" else ("text", "\u2028" if kind in (None, "textWrapping") else " ")
+            elif tag == W_MARK:
+                yield "mark", None
+            elif tag == W_NOTE:
+                yield "text", _NOTE.format(child.get(qn("w:id")))
+            elif tag == W_NOTEREF:
+                yield "text", _OWN_MARK
+            else:
+                yield from walk(child)
+
+    notes = _docx_footnotes(document, walk)
+    numbering = _DocxNumbering(document)
+    restart_each_page = _footnotes_restart_each_page(document)
+
     result: list[Para | None] = []
-    # Word starts no extra page for a manual page break that directly follows a next-page
-    # section break (only empty paragraphs between): the section already began a new page.
-    # Counting both put a blank page into one real book that Word itself doesn't show,
-    # shifting every later page number by one.
-    after_section_break = False
+    pending_notes: list[str] = []  # footnotes of the page being read, numbered
+    note_count = 0
+    physical_page = 1
+    parity_needed: str | None = None  # "oddPage"/"evenPage": the next page must be one
+
+    def number_notes(text: str) -> str:
+        nonlocal note_count
+
+        def one(m):
+            nonlocal note_count
+            if m.group(2) not in notes:
+                return m.group(1) + m.group(3)
+            note_count += 1
+            body_text, marked = _OWN_MARK_RE.subn(f"({note_count})", notes[m.group(2)], count=1)
+            if not marked:
+                body_text = f"({note_count}) {body_text}"
+            pending_notes.append(body_text)
+            return f"({note_count})"
+        return _NOTE_RE.sub(one, text)
+
+    def end_page() -> None:
+        """Close the page: its footnotes at the bottom, then the page boundary."""
+        nonlocal note_count, physical_page, parity_needed
+        result.extend(Para(n, "footnote text") for n in pending_notes)
+        pending_notes.clear()
+        if restart_each_page:
+            note_count = 0
+        result.append(None)
+        physical_page += 1
+        if parity_needed and (physical_page % 2 == 1) != (parity_needed == "oddPage"):
+            result.append(None)  # the blank page Word prints so the section starts on the right side
+            physical_page += 1
+        parity_needed = None
+
     # A sectPr ends its section, but its w:type says how *that* section began; whether a
     # new page follows it is up to the next section's type.
-    sections = list(document.element.body.iter(qn("w:sectPr")))
-    starts_page = {}
+    sections = list(body.iter(qn("w:sectPr")))
+    following_type = {}
     for sect, following in zip(sections, sections[1:]):
         kind = following.find(qn("w:type"))
-        starts_page[id(sect)] = kind is None or kind.get(qn("w:val")) not in ("continuous", "nextColumn")
+        following_type[id(sect)] = kind.get(qn("w:val")) if kind is not None else "nextPage"
 
-    def paragraph(p_el) -> None:
-        para = Paragraph(p_el, document)
-        style = para.style.name if para.style is not None else ""
+    # Word starts no extra page for a manual page break that directly follows a next-page
+    # section break (only empty paragraphs between): the section already began a new page.
+    # Counting both put a blank page into one real book that Word itself doesn't show.
+    after_section_break = False
+
+    def paragraph(p_el, style: str) -> None:
+        nonlocal after_section_break, parity_needed
+        label = numbering.label(p_el)
         segments = [""]
-        for run in para.runs:
-            for child in run._element:
-                if child.tag == w_t:
-                    segments[-1] += child.text or ""
-                elif child.tag == w_tab:
-                    segments[-1] += " "
-                elif child.tag == w_br:
-                    if child.get(qn("w:type")) == "page":
-                        segments.append("")
-                    else:
-                        segments[-1] += "\u2028"  # soft line break, kept for heading recovery
+        for kind, value in walk(p_el):
+            if kind == "text":
+                segments[-1] += value
+            elif (kind == "mark") == by_marks and kind in ("mark", "page"):
+                segments.append("")
         has_picture = bool(p_el.findall(".//" + qn("w:drawing")) or p_el.findall(".//" + qn("w:pict")))
-        nonlocal after_section_break
         for k, seg in enumerate(segments):
             if k > 0:
-                if after_section_break:
+                if after_section_break and not by_marks:
                     after_section_break = False
                 else:
-                    result.append(None)
+                    end_page()
             seg = re.sub(r"[ \u00a0]+", " ", seg).strip(" ")
+            if k == 0 and label and seg.strip():
+                seg = f"{label} {seg.strip()}"
             if seg.strip():
-                result.append(Para(seg.strip(), style))
+                result.append(Para(number_notes(seg.strip()), style))
                 after_section_break = False
             elif has_picture and len(segments) == 1:
                 result.append(Para("", "picture"))
                 after_section_break = False
         ppr = p_el.find(qn("w:pPr"))
         sect = ppr.find(qn("w:sectPr")) if ppr is not None else None
-        if sect is not None and starts_page.get(id(sect), True):
-            result.append(None)  # a next-page section break starts a new page
-            after_section_break = True
+        if sect is not None:
+            kind = following_type.get(id(sect), "nextPage")
+            if by_marks:
+                # Word's mark at the next page's start ends this one; only the side matters.
+                if kind in ("oddPage", "evenPage"):
+                    parity_needed = kind
+            elif kind not in ("continuous", "nextColumn"):
+                end_page()  # a next-page section break starts a new page
+                after_section_break = True
 
     def table(tbl_el) -> None:
         nonlocal after_section_break
         after_section_break = False
-        tbl = Table(tbl_el, document)
-        for row in tbl.rows:
-            seen, cells = set(), []
-            for cell in row.cells:
-                if id(cell._tc) in seen:  # a merged cell is reported once per grid column
-                    continue
-                seen.add(id(cell._tc))
-                text = " ".join(t.strip() for t in cell.text.split("\n") if t.strip())
+        for row in tbl_el.findall(qn("w:tr")):
+            cells, new_page = [], False
+            for tc in row.findall(qn("w:tc")):
+                parts = []
+                for p in tc.iter(W_P):  # a cell's paragraphs, a space between them
+                    for kind, value in walk(p):
+                        if kind == "text":
+                            parts.append(value)
+                        elif (kind == "mark") == by_marks and kind in ("mark", "page"):
+                            new_page = True
+                    parts.append(" ")
+                text = re.sub(r"[ \u00a0\u2028]+", " ", "".join(parts)).strip()
                 if text:
-                    cells.append(re.sub(r"[ \u00a0]+", " ", text))
+                    cells.append(text)
+            if new_page and (result and result[-1] is not None):
+                end_page()
             if cells:
-                result.append(Para(VERSE_JOINER.join(cells), "table-verse" if len(cells) > 1 else "table-text"))
+                result.append(Para(number_notes(VERSE_JOINER.join(cells)), "table-verse" if len(cells) > 1 else "table-text"))
 
-    for child in document.element.body.iterchildren():
-        if child.tag == qn("w:p"):
-            paragraph(child)
-        elif child.tag == qn("w:tbl"):
-            table(child)
+    def block(el) -> None:
+        if el.tag == W_P:
+            ppr = el.find(qn("w:pPr"))
+            sid = ppr.find(qn("w:pStyle")) if ppr is not None else None
+            style = _docx_style_name(document, sid.get(qn("w:val")) if sid is not None else None)
+            paragraph(el, style)
+        elif el.tag == W_TBL:
+            table(el)
+        elif el.tag == W_SDT:  # a content control around paragraphs (a Word TOC often is one)
+            content = el.find(qn("w:sdtContent"))
+            for child in (content if content is not None else []):
+                block(child)
+
+    for child in body.iterchildren():
+        block(child)
+    result.extend(Para(n, "footnote text") for n in pending_notes)
     return result
+
+
+_W_T_RE = re.compile(r"<w:t(?: [^>]*)?>([^<]*)</w:t>")
+_DROPPED_XML_RE = re.compile(r"<mc:Fallback>.*?</mc:Fallback>|<w:del\b.*?</w:del>", re.S)
+
+
+def _letters(text: str) -> int:
+    return len(re.findall(r"[^\W\d_]", text))
+
+
+def docx_layout(path: Path) -> dict:
+    """Where a .docx's pages come from, and whether Word's saved layout covers the whole
+    file. Word writes its page marks only for the pages it had laid out when it saved; one
+    real book had them for its first 40% -- the rest of it would be one enormous page."""
+    import zipfile
+
+    xml = zipfile.ZipFile(path).read("word/document.xml").decode("utf8", "replace")
+    body = _DROPPED_XML_RE.sub("", xml.split("<w:body>", 1)[-1])
+    manual = body.count('w:type="page"')
+    marks = body.count("lastRenderedPageBreak")
+    by_marks = marks > 0 and manual * FLOWING_TEXT_RATIO < marks
+    total = _letters("".join(_W_T_RE.findall(body)))
+    last = body.rfind("lastRenderedPageBreak")
+    after = _letters("".join(_W_T_RE.findall(body[last:]))) if last >= 0 else total
+    # The book's own TOC comes last and holds no marks (Word writes none inside it).
+    toc_tail = _letters("".join(_W_T_RE.findall("".join(
+        re.findall(r'<w:p\b(?:(?!</w:p>).)*?w:val="(?:TOC|toc)[^"]*"(?:(?!</w:p>).)*</w:p>', body[last:], re.S)))))
+    return {
+        "pagesFrom": "word-layout" if by_marks else "page-breaks",
+        "marks": marks,
+        "pageBreaks": manual,
+        "unlaidOut": round((after - toc_tail) / total, 3) if by_marks and total else 0.0,
+    }
+
+
+def text_coverage(path: Path, content: dict) -> tuple[int, int]:
+    """(letters in the file, letters in the converted book): body and footnotes, not
+    headers. Whatever the reader doesn't know how to read -- a text box, a field it skips
+    -- shows up as a difference instead of silently disappearing."""
+    import zipfile
+
+    if path.suffix.lower() == ".docx":
+        z = zipfile.ZipFile(path)
+        xml = _DROPPED_XML_RE.sub("", z.read("word/document.xml").decode("utf8", "replace"))
+        source = _letters("".join(_W_T_RE.findall(xml.split("<w:body>", 1)[-1])))
+        if "word/footnotes.xml" in z.namelist():
+            notes = z.read("word/footnotes.xml").decode("utf8", "replace")
+            notes = re.sub(r'<w:footnote [^>]*w:type="[^"]*"[^>]*>.*?</w:footnote>', "", notes, flags=re.S)
+            source += _letters("".join(_W_T_RE.findall(_DROPPED_XML_RE.sub("", notes))))
+    else:
+        import olefile
+
+        ole = olefile.OleFileIO(str(path))
+        wd = ole.openstream("WordDocument").read()
+        flags = struct.unpack_from("<H", wd, 0x0A)[0]
+        tbl = ole.openstream("1Table" if flags & 0x0200 else "0Table").read()
+        ccp_text, ccp_ftn = struct.unpack_from("<II", wd, 0x4C)
+        source = _letters(_clean_text(_story_text(wd, _pieces(wd, tbl), ccp_text + ccp_ftn)))
+    converted = _letters(" ".join(b.get("text") or "" for p in content.get("pages", []) for b in p.get("blocks", [])))
+    return source, converted
+
+
+def _docx_style_name(document, style_id: str | None) -> str:
+    try:
+        style = document.styles.get_by_id(style_id, 1)  # 1: WD_STYLE_TYPE.PARAGRAPH
+    except Exception:  # noqa: BLE001 -- an unknown id is the default style
+        style = None
+    return style.name if style is not None else ""
+
+
+def _docx_footnotes(document, walk) -> dict[str, str]:
+    """Footnote id -> its text (the reference mark inside it kept as _NOTE), from the
+    footnotes part. The separator entries (ids -1 and 0) are Word's own lines, not notes."""
+    from docx.oxml.ns import qn
+    from lxml import etree
+
+    part = next((rel.target_part for rel in document.part.rels.values()
+                 if rel.reltype.endswith("/footnotes")), None)
+    if part is None:
+        return {}
+    root = etree.fromstring(part.blob)
+    notes = {}
+    for fn in root.iter(qn("w:footnote")):
+        if fn.get(qn("w:type")) in ("separator", "continuationSeparator", "continuationNotice"):
+            continue
+        paras = []
+        for p in fn.iter(qn("w:p")):
+            text = "".join(v for kind, v in walk(p) if kind == "text")
+            text = re.sub(r"[ \u00a0\u2028]+", " ", text).strip()
+            if text:
+                paras.append(text)
+        notes[fn.get(qn("w:id"))] = " ".join(paras)
+    return notes
+
+
+def _footnotes_restart_each_page(document) -> bool:
+    from docx.oxml.ns import qn
+
+    settings = document.settings.element
+    for el in [*settings.iter(qn("w:footnotePr")), *document.element.body.iter(qn("w:footnotePr"))]:
+        restart = el.find(qn("w:numRestart"))
+        if restart is not None:
+            return restart.get(qn("w:val")) == "eachPage"
+    return False
+
+
+_ARABIC_ALPHA = "أبتثجحخدذرزسشصضطظعغفقكلمنهوي"
+_ARABIC_ABJAD = "أبجدهوزحطيكلمنسعفصقرشتثخذضظغ"
+
+
+class _DocxNumbering:
+    """The label Word generates for a numbered paragraph ("1-", "أ)", "•"): list numbers are
+    not text in the file, and without them "1- ... 2- ..." read as run-on sentences."""
+
+    def __init__(self, document):
+        from docx.oxml.ns import qn
+
+        self.qn = qn
+        self.document = document
+        self.levels: dict[str, dict[int, tuple[str, str, int]]] = {}
+        self.abstract_of: dict[str, str] = {}
+        self.counters: dict[str, list[int]] = {}
+        try:
+            root = document.part.numbering_part.element
+        except Exception:  # noqa: BLE001 -- no numbering part: nothing is numbered
+            return
+        abstract = {}
+        for an in root.iter(qn("w:abstractNum")):
+            lv = {}
+            for lvl in an.iter(qn("w:lvl")):
+                fmt = lvl.find(qn("w:numFmt"))
+                text = lvl.find(qn("w:lvlText"))
+                start = lvl.find(qn("w:start"))
+                lv[int(lvl.get(qn("w:ilvl")))] = (
+                    fmt.get(qn("w:val")) if fmt is not None else "decimal",
+                    text.get(qn("w:val")) if text is not None else "",
+                    int(start.get(qn("w:val"))) if start is not None else 1,
+                )
+            abstract[an.get(qn("w:abstractNumId"))] = lv
+        for num in root.iter(qn("w:num")):
+            ref = num.find(qn("w:abstractNumId"))
+            if ref is not None and ref.get(qn("w:val")) in abstract:
+                self.levels[num.get(qn("w:numId"))] = abstract[ref.get(qn("w:val"))]
+
+    def _num_pr(self, p_el):
+        qn = self.qn
+        ppr = p_el.find(qn("w:pPr"))
+        num_pr = ppr.find(qn("w:numPr")) if ppr is not None else None
+        if num_pr is None and ppr is not None and ppr.find(qn("w:pStyle")) is not None:
+            try:
+                style = self.document.styles.get_by_id(ppr.find(qn("w:pStyle")).get(qn("w:val")), 1)
+                sppr = style.element.find(qn("w:pPr")) if style is not None else None
+                num_pr = sppr.find(qn("w:numPr")) if sppr is not None else None
+            except Exception:  # noqa: BLE001
+                num_pr = None
+        if num_pr is None:
+            return None
+        num_id = num_pr.find(qn("w:numId"))
+        ilvl = num_pr.find(qn("w:ilvl"))
+        return (num_id.get(qn("w:val")) if num_id is not None else None,
+                int(ilvl.get(qn("w:val"))) if ilvl is not None else 0)
+
+    def label(self, p_el) -> str:
+        pr = self._num_pr(p_el)
+        if not pr or pr[0] in (None, "0") or pr[0] not in self.levels:
+            return ""
+        num_id, ilvl = pr
+        levels = self.levels[num_id]
+        if ilvl not in levels:
+            return ""
+        counters = self.counters.setdefault(num_id, [0] * 10)
+        counters[ilvl] = counters[ilvl] + 1 if counters[ilvl] else levels[ilvl][2]
+        for deeper in range(ilvl + 1, 10):
+            counters[deeper] = 0
+        fmt, text, _ = levels[ilvl]
+        if fmt == "bullet":
+            return "•"
+        if fmt == "none":
+            return ""
+
+        def render(m):
+            k = int(m.group(1)) - 1
+            n = counters[k] or (levels.get(k, ("decimal", "", 1))[2])
+            f = levels.get(k, (fmt,))[0]
+            if f == "arabicAlpha":
+                return _ARABIC_ALPHA[(n - 1) % len(_ARABIC_ALPHA)]
+            if f == "arabicAbjad":
+                return _ARABIC_ABJAD[(n - 1) % len(_ARABIC_ABJAD)]
+            return str(n)
+        return re.sub(r"%(\d)", render, text).strip()
 
 
 def read_any(path: Path) -> list[Para | None]:
@@ -981,10 +1286,65 @@ def build_abx(pages, title, author, front_pages, labels, heading_re) -> str:
     return "\n".join(lines)
 
 
+def _toc_numbers(pages: list[list[Para]]) -> dict[str, int]:
+    """Index title (normalised) -> the page number the book's own TOC gives it."""
+    out = {}
+    for ps in pages:
+        for p in ps:
+            if p.style.upper().startswith("TOC"):
+                text = p.text.replace("\u2028", " ").strip()
+                m = _TOC_RANGE_RE.match(text) or _TOC_LINE_RE.match(text)
+                if m and _key(m.group(1)):
+                    out.setdefault(_key(m.group(1))[:22], int(m.group(2)))
+    return out
+
+
+def _split_toc_pages(pages: list[list[Para]]) -> list[list[Para]]:
+    """Word writes no page marks inside its own TOC field, so a TOC several pages long read
+    by Word's marks arrives as one page (a real book: 173 lines, printed on 7 pages, on one;
+    the book came out 6 pages short). The TOC gives its own page and the next heading's,
+    which says how many pages it takes; its lines are all one height, so they are shared
+    out evenly."""
+    numbers = _toc_numbers(pages)
+    if not numbers:
+        return pages
+
+    def heading_number(ps):
+        for p in ps:
+            if p.text and not p.style.upper().startswith("TOC") and HEADING_STYLE_RE.match(p.style):
+                return numbers.get(_key(p.text)[:22])
+        return None
+
+    out: list[list[Para]] = []
+    k = 0
+    while k < len(pages):
+        ps = pages[k]
+        toc_lines = [p for p in ps if p.style.upper().startswith("TOC")]
+        own = heading_number(ps)
+        nxt = next(((j, heading_number(pages[j])) for j in range(k + 1, min(len(pages), k + 6))
+                    if heading_number(pages[j]) is not None), None)
+        if len(toc_lines) >= 20 and own is not None and nxt is not None:
+            j, following = nxt
+            extra = (following - own) - (j - k)
+            if 0 < extra <= len(toc_lines) // 5:
+                n = extra + 1
+                head = [p for p in ps if p not in toc_lines]
+                size = -(-len(toc_lines) // n)
+                chunks = [toc_lines[i:i + size] for i in range(0, len(toc_lines), size)]
+                out.append(head + chunks[0])
+                out.extend(chunks[1:])
+                out.extend([] for _ in range(n - len(chunks)))
+                k += 1
+                continue
+        out.append(ps)
+        k += 1
+    return out
+
+
 def convert_doc(path, title, author, front_pages, first_printed, heading_re, book_id="900001",
                 use_toc=True, extra_metadata=None, blank_pages=()):
     items = read_any(path)
-    pages = _split_pages(items)
+    pages = _split_toc_pages(_split_pages(items))
     # A blank page the source file cannot show (Word pushes a break paragraph onto a fresh
     # page when the page before it is full, leaving nothing in the file) -- stated by the
     # caller, given as its final page number. Held as a picture-style paragraph so it is a

@@ -109,7 +109,49 @@ def convert(folder: Path, meta: dict, keep: dict | None = None) -> tuple[dict, d
         "anchors": len(anchors),
         "recovered": [{"page": n, "title": t, "how": how} for n, t, how in recovered],
     }
-    return content, report, issues_of(content)
+    report.update(source_report(conv, folder / meta["sourceFile"], content))
+    return content, report, issues_of(content) + report["sourceIssues"]
+
+
+# Word's saved layout must cover the book: more than this share of its text laid out
+# nowhere means Word never paginated it (it gets no pages of its own).
+MAX_UNLAID_OUT = 0.05
+# Converted text may fall this far short of the file's before it is called a loss.
+MIN_TEXT_COVERAGE = 0.995
+
+
+def source_report(conv, source: Path, content: dict) -> dict:
+    """What the Word file itself says about the conversion -- where the pages came from,
+    whether any of its text was left out -- with issues for what needs the employee.
+    Kept in the report, since saving an edited book re-checks the book, not the file."""
+    issues: list[dict] = []
+    out: dict = {"pagesFrom": "page-breaks"}
+    if source.suffix.lower() == ".docx":
+        layout = conv.docx_layout(source)
+        out["pagesFrom"] = layout["pagesFrom"]
+        if layout["unlaidOut"] > MAX_UNLAID_OUT:
+            issues.append({
+                "severity": "error", "code": "word-layout-incomplete",
+                "detail": f"صفحات هذا الملف مأخوذة من تخطيط Word المحفوظ فيه، لكن Word لم يُخطّط سوى "
+                          f"{100 - 100 * layout['unlaidOut']:.0f}% منه عند آخر حفظ، فبقيته بلا صفحات. "
+                          "الحل: افتح الملف في Word، واذهب إلى آخر صفحة (Ctrl+End) وانتظر حتى يظهر عدد "
+                          "الصفحات كاملاً، ثم احفظه وارفعه من جديد.",
+            })
+    try:
+        source_letters, converted = conv.text_coverage(source, content)
+    except Exception:  # noqa: BLE001 -- the check must never stop a conversion
+        source_letters, converted = 0, 0
+    if source_letters:
+        out["textCoverage"] = round(converted / source_letters, 4)
+        if converted < source_letters * MIN_TEXT_COVERAGE:
+            issues.append({
+                "severity": "warning", "code": "text-loss",
+                "detail": f"لم يُنقل حوالي {source_letters - converted} حرفاً من نص الملف "
+                          f"({100 - 100 * converted / source_letters:.1f}%) — ربما في مربعات نص أو "
+                          "عناصر لا يقرؤها المحوّل. قارن الكتاب بالأصل وأبلغ المسؤول.",
+            })
+    out["sourceIssues"] = issues
+    return out
 
 
 def issues_of(content: dict) -> list[dict]:
@@ -247,7 +289,12 @@ def render_pdf(folder: Path, source_file: str, timeout: int = 600) -> int:
             if not source.exists():
                 raise RuntimeError("LibreOffice could not read the .doc file")
         preview = tmp_dir / "preview.docx"
-        stretch_pages(source, preview)
+        if converter().docx_layout(source)["pagesFrom"] == "page-breaks":
+            stretch_pages(source, preview)
+        else:
+            # Text that flows has no breaks of the book's own to keep a taller page in step
+            # with: Word laid it out, and a page of the book's own size comes closest.
+            shutil.copy(source, preview)
         _soffice(["--convert-to", "pdf", "--outdir", str(tmp_dir), str(preview)], profile, timeout)
         produced = tmp_dir / "preview.pdf"
         if not produced.exists():
