@@ -325,3 +325,52 @@ class TestFollowsWord:
         (w1, h1), (w2, h2) = size(tmp_path / "a.docx"), size(tmp_path / "b.docx")
         assert w1 == w2 and int(h2) == round(int(h1) * 1.5)
         assert docx.Document(tmp_path / "b.docx").paragraphs[0].text == "نص"
+
+
+class TestComparePdf:
+    """An uploaded PDF as the original to compare against -- one saved from Word itself
+    matches Word exactly, which a LibreOffice render can't."""
+
+    @pytest.fixture
+    def fake_pdf_tools(self, monkeypatch):
+        # pdfinfo/pdftotext aren't installed on dev machines; the workbench's own logic is
+        # what's under test here (the image has the real tools).
+        def use_pdf(folder, data):
+            if not data.startswith(b"%PDF"):
+                raise ValueError("الملف ليس PDF")
+            (folder / "original.pdf").write_bytes(data)
+            return 3
+        monkeypatch.setattr(wb.conversion, "use_pdf", use_pdf)
+        monkeypatch.setattr(wb.conversion, "extract_original_words",
+                            lambda folder, pages: (folder / "original_words.json").write_text("[[], [], []]"))
+
+    async def test_upload_a_pdf_for_an_existing_book(self, employee, fake_pdf_tools):
+        meta = (await upload(employee)).json()
+        r = await employee.post(f"/api/drafts/{meta['id']}/pdf", files={"file": ("كتاب.pdf", b"%PDF-1.4 x")})
+        assert r.status_code == 200, r.text
+        render = (await employee.get(f"/api/drafts/{meta['id']}")).json()["render"]
+        assert render == {"status": "done", "pages": 3, "error": None, "source": "pdf", "pdfName": "كتاب.pdf"}
+
+    async def test_pdf_given_with_the_word_file(self, employee, fake_pdf_tools):
+        r = await employee.post("/api/drafts", files={"file": ("كتاب.docx", make_docx()),
+                                                      "pdf": ("كتاب.pdf", b"%PDF-1.4 x")})
+        assert r.status_code == 200, r.text
+        assert r.json()["report"]["pages"] == 3
+        render = (await employee.get(f"/api/drafts/{r.json()['id']}")).json()["render"]
+        assert render["source"] == "pdf" and render["status"] == "done"
+
+    async def test_not_a_pdf_is_refused(self, employee, fake_pdf_tools):
+        meta = (await upload(employee)).json()
+        r = await employee.post(f"/api/drafts/{meta['id']}/pdf", files={"file": ("x.pdf", b"hello")})
+        assert r.status_code == 400
+
+    async def test_back_to_the_word_render(self, employee, fake_pdf_tools):
+        meta = (await upload(employee)).json()
+        await employee.post(f"/api/drafts/{meta['id']}/pdf", files={"file": ("x.pdf", b"%PDF-1.4 x")})
+        r = await employee.post(f"/api/drafts/{meta['id']}/render")
+        assert r.json()["render"]["source"] == "word"
+
+    def test_scanned_pdf_pairs_pages_by_number(self):
+        from workbench.conversion import page_map
+        book = {"pages": [{"blocks": [{"type": "text", "text": " ".join(["كلمة"] * 200)}]}] * 3}
+        assert page_map(book, [[], [], ["غلاف"]]) == []  # no text to match: by number instead

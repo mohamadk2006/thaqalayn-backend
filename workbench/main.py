@@ -103,20 +103,47 @@ def _run_conversion(draft_id: str, user: str, keep: dict | None) -> dict:
 
 
 def _render(draft_id: str) -> None:
+    """The original to compare against, rendered from the Word file by LibreOffice."""
     folder = drafts.draft_dir(root(), draft_id)
     meta = drafts.load(root(), draft_id)
+    word = {"source": "word", "pdfName": None}
     if not conversion.renderer_available():
         drafts.update(root(), draft_id, render={"status": "unavailable", "pages": 0,
-                                                "error": "LibreOffice is not installed here"})
+                                                "error": "LibreOffice is not installed here", **word})
         return
-    drafts.update(root(), draft_id, render={"status": "running", "pages": 0, "error": None})
+    drafts.update(root(), draft_id, render={"status": "running", "pages": 0, "error": None, **word})
     try:
         pages = conversion.render_pdf(folder, meta["sourceFile"])
         conversion.extract_original_words(folder, pages)
-        drafts.update(root(), draft_id, render={"status": "done", "pages": pages, "error": None})
+        drafts.update(root(), draft_id, render={"status": "done", "pages": pages, "error": None, **word})
     except Exception as exc:  # noqa: BLE001
         log.exception("rendering %s failed", draft_id)
-        drafts.update(root(), draft_id, render={"status": "failed", "pages": 0, "error": str(exc)[:300]})
+        drafts.update(root(), draft_id, render={"status": "failed", "pages": 0, "error": str(exc)[:300], **word})
+
+
+def _index_pdf(draft_id: str, pages: int, name: str) -> None:
+    """After an uploaded PDF replaced the original: read its words for page matching."""
+    pdf = {"source": "pdf", "pdfName": name}
+    try:
+        conversion.extract_original_words(drafts.draft_dir(root(), draft_id), pages)
+        drafts.update(root(), draft_id, render={"status": "done", "pages": pages, "error": None, **pdf})
+    except Exception as exc:  # noqa: BLE001
+        log.exception("reading PDF of %s failed", draft_id)
+        drafts.update(root(), draft_id, render={"status": "failed", "pages": 0, "error": str(exc)[:300], **pdf})
+
+
+async def _accept_pdf(draft_id: str, upload: UploadFile, background: BackgroundTasks) -> dict:
+    name = Path(upload.filename or "original.pdf").name
+    data = await upload.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "ملف PDF أكبر من المسموح (150 ميغابايت)")
+    try:
+        pages = await asyncio.to_thread(conversion.use_pdf, drafts.draft_dir(root(), draft_id), data)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    background.add_task(_index_pdf, draft_id, pages, name)
+    return drafts.update(root(), draft_id, render={"status": "running", "pages": pages, "error": None,
+                                                    "source": "pdf", "pdfName": name})
 
 
 # ── pages ───────────────────────────────────────────────────────────────────
@@ -150,6 +177,7 @@ async def create_draft(
     background: BackgroundTasks,
     file: UploadFile = File(...),
     readme: UploadFile | None = File(None),
+    pdf: UploadFile | None = File(None),
     user: str = Depends(current_user),
 ) -> dict:
     name = Path(file.filename or "").name
@@ -162,6 +190,11 @@ async def create_draft(
     meta = drafts.create(root(), source_name=name, source_bytes=data, created_by=user,
                          readme_bytes=readme_bytes)
     meta = await asyncio.to_thread(_run_conversion, meta["id"], user, None)
+    if pdf is not None and pdf.filename:
+        try:
+            return await _accept_pdf(meta["id"], pdf, background)
+        except HTTPException:
+            pass  # a bad PDF doesn't lose the upload: fall back to rendering the Word file
     background.add_task(_render, meta["id"])
     return meta
 
@@ -210,11 +243,23 @@ async def reconvert(draft_id: str, options: dict, user: str = Depends(current_us
 
 @app.post("/api/drafts/{draft_id}/render")
 def rerender(draft_id: str, background: BackgroundTasks, _: str = Depends(current_user)) -> dict:
+    """Compare against the Word file rendered by LibreOffice (again, or instead of a PDF)."""
     meta = _meta_or_404(draft_id)
     if meta["render"]["status"] == "running":
         return meta
     background.add_task(_render, draft_id)
-    return drafts.update(root(), draft_id, render={"status": "pending", "pages": 0, "error": None})
+    return drafts.update(root(), draft_id, render={"status": "pending", "pages": 0, "error": None,
+                                                    "source": "word", "pdfName": None})
+
+
+@app.post("/api/drafts/{draft_id}/pdf")
+async def upload_pdf(draft_id: str, background: BackgroundTasks, file: UploadFile = File(...),
+                     _: str = Depends(current_user)) -> dict:
+    """Compare against an uploaded PDF instead: best is one saved from Word itself."""
+    meta = _meta_or_404(draft_id)
+    if meta["render"]["status"] == "running":
+        raise HTTPException(409, "الأصل قيد التجهيز، حاول بعد قليل")
+    return await _accept_pdf(draft_id, file, background)
 
 
 @app.get("/api/drafts/{draft_id}/original/{number}")

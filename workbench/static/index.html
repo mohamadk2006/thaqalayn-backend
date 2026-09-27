@@ -151,6 +151,10 @@
       <input type="file" name="file" accept=".doc,.docx" required>
       <label>ملف readme.txt <span class="hint">(اختياري)</span></label>
       <input type="file" name="readme" accept=".txt">
+      <label>ملف PDF للمقارنة <span class="hint">(اختياري، موصى به)</span></label>
+      <div><input type="file" name="pdf" accept=".pdf,application/pdf">
+        <div class="hint">أفضل مقارنة: افتح ملف Word في برنامج Word واحفظه PDF (File ← Save As ← PDF) — تطابق صفحاته Word تماماً.
+          يمكن أيضاً رفع PDF الكتاب المطبوع. بدون PDF تُعرض صفحات Word بعد تحويلها تلقائياً (قد تختلف قليلاً عن Word).</div></div>
       <span></span>
       <div><button class="primary" type="submit">رفع وتحويل</button>
         <span class="hint">يُقرأ العنوان والمؤلف والناشر من readme.txt إن وُجد، ويمكن تعديلها بعد التحويل.</span></div>
@@ -185,13 +189,16 @@
     <div id="content"></div>
     <div id="original">
       <div class="bar">
-        <strong>الأصل (Word)</strong>
+        <strong id="origTitle">الأصل</strong>
         <button id="origPrev">&rarr;</button>
         <span id="origLabel"></span>
         <button id="origNext">&larr;</button>
         <label title="عند التفعيل يُعرض من الأصل ما يقابل نص الصفحة المحوّلة"><input type="checkbox" id="origLink" checked> ربط</label>
         <span id="origOffset" class="hint"></span>
         <span class="spacer"></span>
+        <button id="origPdfBtn" title="قارن مع ملف PDF (مثلاً محفوظ من Word)">رفع PDF</button>
+        <button id="origWordBtn" style="display:none" title="العودة إلى صفحات ملف Word">عرض Word</button>
+        <input type="file" id="origPdfInput" accept=".pdf,application/pdf" style="display:none">
         <button id="origZoom" title="تكبير (عرض كامل العرض)">🔍</button>
       </div>
       <div class="viewer fit" id="origViewer"><div class="placeholder">جاري التحميل…</div></div>
@@ -366,7 +373,7 @@ $("showPublished").addEventListener("change", showList);
 $("uploadForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = new FormData(e.target);
-  if (!form.get("readme") || !form.get("readme").name) form.delete("readme");
+  for (const k of ["readme", "pdf"]) if (!form.get(k) || !form.get(k).name) form.delete(k);
   busy("جاري رفع الملف وتحويله… قد يستغرق دقيقة للكتب الكبيرة");
   try {
     const meta = await api("POST", "/api/drafts", form, true);
@@ -526,12 +533,17 @@ function renderOriginal() {
     $("origLabel").textContent = ""; $("origOffset").textContent = "";
     return;
   }
+  const fromPdf = rs.source === "pdf";
+  $("origTitle").textContent = fromPdf ? "الأصل (PDF)" : "الأصل (Word)";
+  $("origTitle").title = fromPdf ? (rs.pdfName || "") : "صفحات ملف Word بعد تحويلها تلقائياً";
+  $("origWordBtn").style.display = fromPdf ? "" : "none";
   const linked = $("origLink").checked;
   let [a, b] = linked ? linkedRange() : [origPage, origPage];
   a = Math.max(1, Math.min(a, rs.pages)); b = Math.max(a, Math.min(b, rs.pages));
   origPage = a;
   $("origLabel").textContent = a === b ? `صفحة ${a} من ${rs.pages}` : `صفحات ${a}–${b} من ${rs.pages}`;
-  $("origOffset").textContent = linked && !pageMap[currentPage] ? "(تقريبي)" : "";
+  $("origOffset").textContent = !linked ? "" : pageMap.length ? (pageMap[currentPage] ? "" : "(تقريبي)")
+    : `(حسب رقم الصفحة${origOffset ? `، إزاحة ${origOffset > 0 ? "+" : ""}${origOffset}` : ""})`;
   $("origPrev").disabled = a <= 1;
   $("origNext").disabled = b >= rs.pages;
   const key = `${draft.id}:${a}-${b}`;
@@ -549,6 +561,14 @@ function renderOriginal() {
   if (linked && next) for (let n = next[0]; n <= next[1]; n++) new Image().src = `/api/drafts/${draft.id}/original/${n}`;
 }
 function moveOriginal(delta) {
+  if ($("origLink").checked && !pageMap.length) {
+    // No text to match on (a scanned PDF): pages are paired by number, and the arrows
+    // shift that pairing -- e.g. past a cover and blank pages at the front of the PDF.
+    origOffset += delta;
+    safeStorage.set("wb_offset_" + draft.id, String(origOffset));
+    renderOriginal();
+    return;
+  }
   // Browsing the original by hand: unlink, and step one rendered page at a time.
   if ($("origLink").checked) {
     const [a, b] = linkedRange();
@@ -568,8 +588,26 @@ $("origZoom").onclick = () => {
   $("origZoom").title = zoomed ? "عرض الصفحة كاملة" : "تكبير";
 };
 async function rerender() {
-  try { draft = await api("POST", `/api/drafts/${draft.id}/render`); pollRender(); } catch (e) { alert(e.message); }
+  try { draft = await api("POST", `/api/drafts/${draft.id}/render`); pageMap = []; pollRender(); } catch (e) { alert(e.message); }
 }
+$("origPdfBtn").onclick = () => $("origPdfInput").click();
+$("origPdfInput").onchange = async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  const form = new FormData(); form.set("file", file);
+  busy("جاري رفع ملف PDF…");
+  try {
+    draft = await api("POST", `/api/drafts/${draft.id}/pdf`, form, true);
+    pageMap = []; origOffset = 0; safeStorage.remove("wb_offset_" + draft.id);
+    $("origLink").checked = true;
+    renderReport(); pollRender();
+  } catch (err) { alert("تعذّر استخدام الملف: " + err.message); }
+  finally { idle(); }
+};
+$("origWordBtn").onclick = () => {
+  if (confirm("العودة إلى صفحات ملف Word (بدلاً من PDF)؟")) { origOffset = 0; rerender(); }
+};
 
 // ── dirty / save ────────────────────────────────────────────────────────────
 

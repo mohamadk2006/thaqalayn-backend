@@ -184,6 +184,29 @@ def render_pdf(folder: Path, source_file: str, timeout: int = 600) -> int:
     return int(match.group(1)) if match else 0
 
 
+def use_pdf(folder: Path, data: bytes) -> int:
+    """Use an uploaded PDF as the original to compare against -- one saved from Word
+    itself matches Word exactly (its real fonts and page breaks), which a LibreOffice
+    render of the Word file can't; a scan of the printed book works too. Returns its
+    page count, or raises ValueError if it isn't a readable PDF."""
+    if not data.startswith(b"%PDF"):
+        raise ValueError("الملف ليس PDF")
+    candidate = folder / ".uploaded.pdf"
+    candidate.write_bytes(data)
+    try:
+        info = subprocess.run(["pdfinfo", str(candidate)], capture_output=True, text=True, timeout=60)
+        match = re.search(r"^Pages:\s+(\d+)", info.stdout, re.MULTILINE)
+        if info.returncode != 0 or not match or int(match.group(1)) < 1:
+            raise ValueError("تعذّرت قراءة ملف PDF")
+    except BaseException:
+        candidate.unlink(missing_ok=True)
+        raise
+    candidate.replace(folder / "original.pdf")
+    for stale in (folder / "img").glob("*.png") if (folder / "img").exists() else []:
+        stale.unlink()
+    return int(match.group(1))
+
+
 def page_image(folder: Path, number: int) -> Path:
     """PNG of one original page (1-based), rendered once and cached."""
     out_dir = folder / "img"
@@ -236,8 +259,12 @@ def page_map(book: dict, pdf_words: list[list[str]], gram: int = 3) -> list[list
     for n, words in enumerate(pdf_words, 1):
         stream.extend(words)
         page_of.extend([n] * len(words))
-    if not stream:
-        return [None] * len(book.get("pages", []))
+    book_words = sum(len(text_words(" ".join(b.get("text", "") for b in p.get("blocks", []))))
+                     for p in book.get("pages", []))
+    if not stream or len(stream) < book_words // 5:
+        # Barely any text in the original: a scanned PDF. Nothing to match on -- the
+        # viewer pairs pages by number (with an adjustable offset) instead.
+        return []
     index: dict[tuple, list[int]] = {}
     for i in range(len(stream) - gram + 1):
         index.setdefault(tuple(stream[i:i + gram]), []).append(i)
