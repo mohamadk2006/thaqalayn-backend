@@ -116,6 +116,9 @@ def convert(folder: Path, meta: dict, keep: dict | None = None) -> tuple[dict, d
 # Word's saved layout must cover the book: more than this share of its text laid out
 # nowhere means Word never paginated it (it gets no pages of its own).
 MAX_UNLAID_OUT = 0.05
+# A book whose pages hold this many letters on average got no pages from its file: a real
+# one with neither page breaks nor Word's saved layout came out as 24 "pages" for 332.
+NO_PAGINATION_LETTERS = 6000
 # Converted text may fall this far short of the file's before it is called a loss.
 MIN_TEXT_COVERAGE = 0.995
 
@@ -134,9 +137,19 @@ def source_report(conv, source: Path, content: dict) -> dict:
                 "severity": "error", "code": "word-layout-incomplete",
                 "detail": f"صفحات هذا الملف مأخوذة من تخطيط Word المحفوظ فيه، لكن Word لم يُخطّط سوى "
                           f"{100 - 100 * layout['unlaidOut']:.0f}% منه عند آخر حفظ، فبقيته بلا صفحات. "
-                          "الحل: افتح الملف في Word، واذهب إلى آخر صفحة (Ctrl+End) وانتظر حتى يظهر عدد "
-                          "الصفحات كاملاً، ثم احفظه وارفعه من جديد.",
+                          "الحل: افتحه في Word على جهاز مثبّتة عليه خطوط الكتاب نفسها (مثل Mosawi)، واذهب "
+                          "إلى آخر صفحة (Ctrl+End) وانتظر حتى يكتمل عدد الصفحات، ثم احفظه وارفعه من جديد. "
+                          "لا تحفظه على جهاز ينقصه خط الكتاب: سيحفظ Word صفحاتٍ غير صفحات الكتاب.",
             })
+    pages = content.get("pages") or []
+    letters = sum(len(b.get("text") or "") for pg in pages for b in pg.get("blocks") or [])
+    if out["pagesFrom"] == "page-breaks" and pages and letters / len(pages) > NO_PAGINATION_LETTERS:
+        issues.append({
+            "severity": "error", "code": "no-page-information",
+            "detail": f"هذا الملف لا يحمل معلومات عن صفحات الكتاب: لا فواصل صفحات فيه ولا تخطيط Word "
+                      f"محفوظ، فخرج في {len(pages)} صفحة فقط. الحل: افتحه في Word على جهاز مثبّتة عليه "
+                      "خطوط الكتاب، واذهب إلى آخر صفحة (Ctrl+End)، ثم احفظه بصيغة docx وارفعه من جديد.",
+        })
     try:
         source_letters, converted = conv.text_coverage(source, content)
     except Exception:  # noqa: BLE001 -- the check must never stop a conversion

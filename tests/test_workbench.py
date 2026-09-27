@@ -703,3 +703,14 @@ class TestHonorifics:
         d.save(tmp_path / "a.docx")
         [p] = converter().read_docx(tmp_path / "a.docx")
         assert p.text == unicodedata.normalize("NFC", "آمنوا بالله وأطيعوا")
+
+
+def test_a_file_with_no_page_information_is_refused(tmp_path):
+    """Neither page breaks nor Word's saved layout: the book would come out as a few
+    enormous pages (a real one: 24 for 332)."""
+    from workbench import conversion
+    body = "".join(para(run("نص متصل بلا فواصل صفحات ولا تخطيط محفوظ " * 10)) for _ in range(40))
+    path = flowing_docx(tmp_path / "a.docx", body)
+    c = conversion.converter()
+    content, _ = c.convert_doc(path, "t", "a", 0, 1, c.HEADING_STYLE_RE)
+    assert [i["code"] for i in conversion.source_report(c, path, content)["sourceIssues"]] == ["no-page-information"]
