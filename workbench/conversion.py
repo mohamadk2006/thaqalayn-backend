@@ -114,7 +114,84 @@ def convert(folder: Path, meta: dict, keep: dict | None = None) -> tuple[dict, d
 
 def issues_of(content: dict) -> list[dict]:
     val = converter().val
-    return [{"severity": i.severity, "code": i.code, "detail": i.detail} for i in val.validate(content)]
+    found = [{"severity": i.severity, "code": i.code, "detail": i.detail} for i in val.validate(content)]
+    return found + page_checks(content)
+
+
+# A page this many times longer than the book's usual page probably holds two printed pages
+# (a page break missing in the Word file); one this much shorter, in the middle of a
+# chapter, probably half of one (a stray break). Pages come only from the file's breaks,
+# so a typesetter's slip there is copied into the book -- these point the employee at it.
+LONG_PAGE = 1.8
+_CHAPTER_START_RE = re.compile(r"^\W*(ال)?(فصل|باب|مبحث|مجلس|قسم|مقصد|خاتمه|مقدمه|تمهيد)\b")
+SHORT_PAGE = 0.3
+MAX_PER_CHECK = 40
+FOOTNOTE_WEIGHT = 0.6  # footnotes are set smaller: more of them fit on a page
+
+
+def page_checks(content: dict) -> list[dict]:
+    """Warnings, each with the page's position ("page", 0-based) so the editor can jump to it."""
+    pages = content.get("pages") or []
+
+    def length(p):  # footnotes count, at their smaller type: a page of mostly footnotes is full
+        return sum(len(b.get("text") or "") * (FOOTNOTE_WEIGHT if b.get("type") == "footnotes" else 1)
+                   for b in p.get("blocks") or [])
+
+    def label(p, i):
+        return f"{p.get('pageNumber')}" if str(p.get("pageNumber") or "").strip() else f"رقم {i + 1} في الترتيب"
+
+    def starts_with_heading(p):  # a new chapter, marked as a heading or not
+        blocks = [b for b in p.get("blocks") or [] if (b.get("text") or "").strip()]
+        return bool(blocks) and (blocks[0].get("type") == "heading"
+                                 or bool(_CHAPTER_START_RE.match(normalize(blocks[0]["text"]))))
+
+    lengths = [length(p) for p in pages]
+    main = sorted(n for p, n in zip(pages, lengths) if p.get("pageType") == "main" and n > 0)
+    out: list[dict] = []
+    if len(main) >= 10:
+        usual = main[len(main) // 2]
+        long_pages, short_pages = [], []
+        for i, (p, n) in enumerate(zip(pages, lengths)):
+            if p.get("pageType") != "main" or not n:
+                continue
+            # Against the pages around it: an index's pages are all dense, a page holding two
+            # printed pages is twice its neighbours.
+            around = sorted(m for m in lengths[max(0, i - 5):i] + lengths[i + 1:i + 6] if m)
+            local = around[len(around) // 2] if around else usual
+            if n > max(usual, local) * LONG_PAGE:
+                long_pages.append({
+                    "severity": "warning", "code": "long-page", "page": i,
+                    "detail": f"الصفحة {label(p, i)} أطول من الصفحات حولها بـ{n / max(usual, local):.1f} مرة "
+                              "— ربما ينقصها فاصل صفحة في ملف Word (استعمل ✂ لتقسيمها).",
+                })
+            elif (n < usual * SHORT_PAGE and 0 < i < len(pages) - 1
+                  and lengths[i - 1] and lengths[i + 1]  # a title page stands next to a blank one
+                  and not starts_with_heading(pages[i + 1]) and not starts_with_heading(p)
+                  and any(b.get("type") == "text" for b in p.get("blocks") or [])):
+                short_pages.append({
+                    "severity": "warning", "code": "short-page", "page": i,
+                    "detail": f"الصفحة {label(p, i)} قصيرة جداً وسط الفصل — ربما فاصل صفحة زائد "
+                              "(ادمجها مع التالية إن كانت جزءاً منها).",
+                })
+        out += long_pages[:MAX_PER_CHECK] + short_pages[:MAX_PER_CHECK]
+
+    jumps = []
+    prev = None
+    for i, p in enumerate(pages):
+        num = str(p.get("pageNumber") or "").strip()
+        if p.get("pageType") != "main" or not num.isdigit():
+            continue
+        n = int(num)
+        if prev is not None and n != prev[1] + 1:
+            back = n <= prev[1]
+            jumps.append({
+                "severity": "warning", "code": "number-back" if back else "number-skip", "page": i,
+                "detail": (f"ترقيم الصفحات يرجع من {prev[1]} إلى {n}" if back
+                           else f"ترقيم الصفحات يقفز من {prev[1]} إلى {n}")
+                          + " — تحقّق من الصفحات هنا (صفحة ناقصة أو زائدة، أو رقم خاطئ).",
+            })
+        prev = (i, n)
+    return out + jumps[:MAX_PER_CHECK]
 
 
 # ── the original, rendered ───────────────────────────────────────────────────

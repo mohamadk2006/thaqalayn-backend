@@ -400,6 +400,26 @@ class TestFollowsWord:
         assert anchors == [(5, 5), (12, 12)]
         assert pages[4][0].heading and pages[11][0].heading
 
+    def test_page_checks_point_at_likely_break_mistakes(self):
+        """Pages come only from the Word file's breaks, so a typesetter's slip is copied into
+        the book; the checks point the employee at it (and nowhere else)."""
+        from workbench.conversion import page_checks
+        full = "نص " * 330  # a normal page of about 1000 letters
+
+        def page(n, *blocks):
+            return {"pageType": "main", "pageNumber": str(n), "blocks": [{"type": t, "text": x} for t, x in blocks]}
+
+        pages = [page(n, ("text", full)) for n in range(1, 31)]
+        pages[5] = page(6, ("text", full * 2))                                # two pages in one
+        pages[12] = page(13, ("text", "سطر قصير"))                             # half a page
+        pages[20] = page(21, ("text", "آخر الفصل"))                            # a chapter's end ...
+        pages[21] = page(22, ("text", "الفصل الثاني في العمل"), ("text", full))  # ... then a chapter
+        pages[25] = page(26, ("text", "قليل"), ("footnotes", "(1) " + full * 2))  # mostly footnotes
+        for k in range(27, 30):
+            pages[k] = page(k + 2, ("text", full))                              # 27 then 29: a skip
+        warnings = {(w["code"], w["page"]) for w in page_checks({"pages": pages})}
+        assert warnings == {("long-page", 5), ("short-page", 12), ("number-skip", 27)}
+
     def test_consistent_anchors_allow_drift_only_by_empty_pages(self):
         from workbench.conversion import converter
         c = converter()

@@ -121,6 +121,7 @@
   ul.issues { margin: 6px 0; padding-right: 18px; font-size: 13.5px; }
   ul.issues li.error { color: #7a1f1f; }
   ul.issues li.warning { color: var(--warn); }
+  ul.issues a.goto { color: #1a5276; cursor: pointer; text-decoration: underline; margin-inline-start: 6px; white-space: nowrap; }
   #busy { position: fixed; inset: 0; background: rgba(255,255,255,.6); display: none; align-items: center; justify-content: center; font-size: 16px; z-index: 50; }
   #busy .box { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 18px 26px; }
   @media (max-width: 1000px) { #original { display: none; } }
@@ -473,16 +474,46 @@ function showIssues() {
   const issues = draft.issues || [];
   let html = "";
   if (draft.error) html += `<p style="color:var(--danger)">${escapeHtml(draft.error)}</p>`;
+  const goTo = (i) => Number.isInteger(i) ? ` <a class="goto" data-page="${i}">انتقل إلى الصفحة</a>` : "";
   html += issues.length
-    ? `<ul class="issues">${issues.map(i => `<li class="${i.severity}">${i.severity === "error" ? "خطأ" : "تنبيه"} — <code>${escapeHtml(i.code)}</code>: ${escapeHtml(i.detail)}</li>`).join("")}</ul>`
+    ? `<ul class="issues">${issues.map(i => `<li class="${i.severity}">${i.severity === "error" ? "خطأ" : "تنبيه"} — <code>${escapeHtml(i.code)}</code>: ${escapeHtml(i.detail)}${goTo(i.page)}</li>`).join("")}</ul>`
     : `<p style="color:var(--ok)">لا توجد أخطاء أو تنبيهات من أداة التحقق.</p>`;
+  const fromPdf = pdfBreakChecks();
+  if (fromPdf.length) {
+    html += `<h4>مقارنة بملف PDF الأصلي</h4><p class="hint">مواضع لا تطابق فيها الصفحاتُ المحوّلة صفحاتِ الـPDF واحدةً بواحدة:</p>
+      <ul class="issues">${fromPdf.map(x => `<li class="warning">${escapeHtml(x.detail)}${goTo(x.page)}</li>`).join("")}</ul>`;
+  }
   if (r.recovered && r.recovered.length) {
     html += `<h4>عناوين أُضيفت من فهرس الكتاب (لم تُعثر كعنوان داخل النص)</h4><p class="hint">تحقق منها في الصفحات المذكورة:</p>
       <ul class="issues">${r.recovered.map(x => `<li>ص ${escapeHtml(x.page)} — ${escapeHtml(x.title)}</li>`).join("")}</ul>`;
   }
   if (r.anchors !== undefined) html += `<p class="hint">نقاط ربط أرقام الصفحات بالفهرس: ${r.anchors}</p>`;
   $("issuesBody").innerHTML = html;
+  for (const a of $("issuesBody").querySelectorAll("a.goto")) {
+    a.onclick = () => { currentPage = Math.min(Number(a.dataset.page), book.pages.length - 1); $("issuesDialog").close(); renderAll(); };
+  }
   $("issuesDialog").showModal();
+}
+
+// With a PDF of the book itself, the original pages are the truth: two converted pages
+// shown against the same PDF page means a break too many; a PDF page skipped between two
+// converted pages means one of them holds two pages (a break missing in the Word file).
+function pdfBreakChecks() {
+  if ((draft.render || {}).source !== "pdf" || !pageMap.length || !book) return [];
+  const out = [];
+  let prev = null;
+  book.pages.forEach((p, i) => {
+    const hit = pageMap[i];
+    if (!hit || p.pageType !== "main" || p.isBlank) { prev = null; return; }
+    const shown = hit[2] ?? hit[0];
+    if (prev) {
+      const delta = shown - prev.shown;
+      if (delta === 0) out.push({ page: i, detail: `الصفحتان ${prev.label} و${p.pageNumber} تقابلان صفحة PDF واحدة (${shown}) — ربما فاصل صفحة زائد.` });
+      else if (delta === 2) out.push({ page: prev.i, detail: `صفحة PDF رقم ${shown - 1} لا تقابلها صفحة — ربما تحتويها الصفحة ${prev.label} مع صفحتها (فاصل ناقص، استعمل ✂).` });
+    }
+    prev = { i, shown, label: p.pageNumber };
+  });
+  return out.slice(0, 40);
 }
 $("issuesClose").onclick = () => $("issuesDialog").close();
 
@@ -914,12 +945,14 @@ function blockRow(p, b, bi) {
     up.onclick = () => { [p.blocks[bi - 1], p.blocks[bi]] = [p.blocks[bi], p.blocks[bi - 1]]; markDirty(); renderBlocks($("blocksWrap"), p); };
     const down = document.createElement("button"); down.textContent = "↓"; down.title = "نقل للأسفل"; down.disabled = bi === p.blocks.length - 1;
     down.onclick = () => { [p.blocks[bi + 1], p.blocks[bi]] = [p.blocks[bi], p.blocks[bi + 1]]; markDirty(); renderBlocks($("blocksWrap"), p); };
+    const cut = document.createElement("button"); cut.textContent = "✂"; cut.title = "صفحة جديدة تبدأ من هذه الفقرة"; cut.disabled = bi === 0;
+    cut.onclick = () => splitPage(currentPage, bi);
     const del = document.createElement("button"); del.textContent = "✕"; del.title = "حذف الفقرة";
     del.onclick = () => {
       if (b.type === "heading" && !confirm("هذا العنوان سيُحذف من الفهرس أيضاً. متابعة؟")) return;
       p.blocks.splice(bi, 1); markDirty(); renderBlocks($("blocksWrap"), p);
     };
-    handle.append(up, down, del);
+    handle.append(up, down, cut, del);
     row.appendChild(handle);
   }
   const typeSel = document.createElement("select");
@@ -977,6 +1010,27 @@ function addPage(after) {
   }
   book.pages.splice(after + 1, 0, page);
   currentPage = after + 1; markDirty(); renderAll();
+}
+function splitPage(i, bi) {
+  // A page break missing in the Word file: this paragraph and the ones after it become the
+  // next page. A footnote goes with the text that cites its marker, e.g. "(2)".
+  const here = book.pages[i];
+  if (!confirm("نقل هذه الفقرة وما بعدها إلى صفحة جديدة بعد هذه الصفحة؟" +
+    (autoRenumber() && numbered(here) ? "\nستُزاح أرقام الصفحات التي بعدها رقماً واحداً." : ""))) return;
+  const moved = here.blocks.splice(bi);
+  const citedIn = (blocks, mark) => blocks.some(b => b.type !== "footnotes" && (b.text || "").includes(mark));
+  const stay = moved.filter(b => {
+    const m = b.type === "footnotes" && /^\s*(\(\s*[0-9٠-٩]+\s*\))/.exec(b.text || "");
+    return m && citedIn(here.blocks, m[1].replace(/\s+/g, "")) && !citedIn(moved, m[1].replace(/\s+/g, ""));
+  });
+  here.blocks.push(...stay);
+  const page = { pageType: here.pageType, isBlank: false, pageNumber: "", blocks: moved.filter(b => !stay.includes(b)) };
+  if (autoRenumber() && numbered(here)) {
+    shiftNumbersFrom(i + 1, 1);
+    setNumber(page, Number(here.pageNumber) + 1);
+  }
+  book.pages.splice(i + 1, 0, page);
+  currentPage = i + 1; markDirty(); renderAll();
 }
 function mergeNext(i) {
   if (!confirm("نقل كل فقرات الصفحة التالية إلى نهاية هذه الصفحة وحذف الصفحة التالية؟" +
