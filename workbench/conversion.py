@@ -251,9 +251,123 @@ def extract_original_words(folder: Path, pages: int) -> None:
     (folder / "original_words.json").write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
 
 
-def page_map(book: dict, pdf_words: list[list[str]], gram: int = 3) -> list[list[int] | None]:
-    """For each converted page (in order), [first, last] rendered page it spans (1-based),
-    or None where it can't be located."""
+def _locate_by_letters(book: dict, pdf_words: list[list[str]]) -> list[list[int] | None]:
+    """Proposer 2 for page_map: [first, last, main] per converted page, found by runs of
+    letters rather than words: spaces are dropped on both sides and runs of letters
+    are looked up. PDF text extraction splits justified Arabic into fragments ("وس ار
+    قاص دا" for "وسار قاصدا") and drops ligature glyphs, which breaks whole-word matching
+    but leaves long letter runs intact."""
+    page_of: list[int] = []
+    chunks: list[str] = []
+    for n, words in enumerate(pdf_words, 1):
+        letters = "".join(words)
+        chunks.append(letters)
+        page_of.extend([n] * len(letters))
+    stream = "".join(chunks)
+    pages = book.get("pages", [])
+    texts = ["".join(text_words(" ".join(b.get("text", "") for b in p.get("blocks", [])))) for p in pages]
+    if not stream or len(stream) < sum(map(len, texts)) // 5:
+        # Barely any text in the original: a scanned PDF. Nothing to match on -- the
+        # viewer pairs pages by number (with an adjustable offset) instead.
+        return []
+
+    def probe_len(text: str) -> int:
+        return 14 if len(text) >= 40 else max(6, len(text) // 2)
+
+    def find(text: str, lo: int, hi: int, from_end: bool) -> int | None:
+        """Stream position of the page's first (or last) letter, from a run of letters
+        near its start (or end) found within [lo, hi]. Several runs are tried, in case one
+        is damaged in the extraction."""
+        k = probe_len(text)
+        if len(text) < k:
+            return None
+        lo, hi = max(lo, 0), min(hi, len(stream))
+        for step in range(0, min(len(text) - k + 1, 12 * k), max(k // 2, 3)):
+            if from_end:
+                probe = text[len(text) - k - step:len(text) - step]
+                pos = stream.rfind(probe, lo, hi)
+                if pos != -1:
+                    return min(pos + k + step - 1, len(stream) - 1)
+            else:
+                probe = text[step:step + k]
+                pos = stream.find(probe, lo, hi)
+                if pos != -1:
+                    return max(pos - step, 0)
+        return None
+
+    spans: list[tuple[int, int] | None] = []  # stream positions of each page's first/last letter
+    cursor = 0
+    skipped = 0  # letters of pages not located since the last one that was
+    for text in texts:
+        # Look ahead only as far as the pages skipped since the last match could reach.
+        start = find(text, cursor, cursor + 3000 + int(skipped * 1.5), from_end=False)
+        if start is None:
+            spans.append(None)
+            skipped += len(text)
+            continue
+        expected = start + len(text) - 1
+        slack = max(120, len(text) // 4)
+        # An ending found far from where the page's own length puts it belongs to another
+        # page (the real ending was damaged in extraction): ignore it and estimate.
+        end = find(text, max(start, expected - slack), expected + slack + 1, from_end=True)
+        if end is None:
+            end = min(expected, len(stream) - 1)
+            cursor = start + (len(text) * 4) // 5  # an estimate: leave the next page findable
+        else:
+            cursor = end + 1
+        spans.append((start, end))
+        skipped = 0
+
+    # A page ends before the next located page begins.
+    located = [i for i, span in enumerate(spans) if span]
+    for i, j in zip(located, located[1:]):
+        start, end = spans[i]
+        spans[i] = (start, max(start, min(end, spans[j][0] - 1)))
+
+    def main_page(span: tuple[int, int]) -> int:
+        """The rendered page holding most of the page's letters: where its breaks differ
+        slightly from the original's, a few lines sit on a neighbouring page -- the page
+        shown is the one that is really this page."""
+        counts: dict[int, int] = {}
+        for pos in range(span[0], span[1] + 1):
+            counts[page_of[pos]] = counts.get(page_of[pos], 0) + 1
+        return max(counts, key=lambda n: (counts[n], -n))
+
+    result: list[list[int] | None] = [
+        [page_of[span[0]], page_of[span[1]], main_page(span)] if span else None for span in spans
+    ]
+
+    # Runs of pages not located (no text of their own, or text that didn't match) take,
+    # in order, the rendered pages between their located neighbours.
+    i = 0
+    while i < len(result):
+        if result[i] is not None:
+            i += 1
+            continue
+        j = i
+        while j < len(result) and result[j] is None:
+            j += 1
+        first = result[i - 1][1] + 1 if i > 0 else 1
+        last = result[j][0] - 1 if j < len(result) else len(pdf_words)
+        free = last - first + 1
+        run = j - i
+        if free >= 1:
+            for r in range(run):
+                a = first + r * free // run
+                b = first + (r + 1) * free // run - 1
+                result[i + r] = [a, max(a, b), a] if a <= last else [last, last, last]
+        i = j
+    # A rendered page between two consecutive pages' ranges (an overflow whose text didn't
+    # extract cleanly, or a blank page) is counted with the page before it.
+    for k in range(len(result) - 1):
+        if result[k] and result[k + 1] and result[k + 1][0] - result[k][1] > 1:
+            result[k] = [result[k][0], result[k + 1][0] - 1, result[k][2]]
+    return result
+
+
+def _locate_by_words(book: dict, pdf_words: list[list[str]], gram: int = 3) -> list[list[int] | None]:
+    """Proposer 1 for page_map: [first, last] rendered pages per converted page, found by
+    whole-word n-grams. Good on clean text; lost where extraction fragments words."""
     stream: list[str] = []
     page_of: list[int] = []
     for n, words in enumerate(pdf_words, 1):
@@ -350,4 +464,51 @@ def page_map(book: dict, pdf_words: list[list[str]], gram: int = 3) -> list[list
     for k in range(len(result) - 1):
         if result[k] and result[k + 1] and result[k + 1][0] - result[k][1] > 1:
             result[k] = [result[k][0], result[k + 1][0] - 1]
+    return result
+
+
+def _letters(text: str) -> str:
+    return "".join(text_words(text))
+
+
+def _overlap(page_letters: str, original_letters: str, probe: int = 12, every: int = 24) -> float:
+    """Share of the page's letter runs that occur on an original page."""
+    runs = [page_letters[i:i + probe] for i in range(0, max(len(page_letters) - probe, 1), every)]
+    return sum(1 for r in runs if r in original_letters) / max(len(runs), 1)
+
+
+def page_map(book: dict, pdf_words: list[list[str]]) -> list[list[int] | None]:
+    """For each converted page (in order), [first, last, shown]: the rendered/original pages
+    (1-based) its text spans, and the single page to show next to it -- or None.
+
+    Two locators propose where each page is (whole words, and letter runs -- see each);
+    neither is right everywhere, since PDF text extraction damages text in different ways.
+    The page shown is then decided by the text itself: of the proposed pages and their
+    neighbours, the one containing the most of this page's text. Returns [] for an
+    original with barely any text (a scanned PDF), which the viewer pairs by number."""
+    by_letters = _locate_by_letters(book, pdf_words)
+    if not by_letters:
+        return []
+    by_words = _locate_by_words(book, pdf_words)
+    originals = ["".join(words) for words in pdf_words]
+    total = len(originals)
+    result: list[list[int] | None] = []
+    for i, page in enumerate(book.get("pages", [])):
+        a = by_letters[i] if i < len(by_letters) else None
+        b = by_words[i] if i < len(by_words) else None
+        proposals = [x for x in (a and a[2], b and b[0], b and b[1]) if x]
+        if not proposals:
+            result.append(None)
+            continue
+        letters = _letters(" ".join(bl.get("text", "") for bl in page.get("blocks", [])))
+        shown = proposals[0]
+        if len(letters) >= 40:
+            candidates = sorted({n + d for n in proposals for d in (-1, 0, 1) if 1 <= n + d <= total})
+            scores = {n: _overlap(letters, originals[n - 1]) for n in candidates}
+            best = max(candidates, key=lambda n: (scores[n], -abs(n - proposals[0])))
+            if scores[best] > scores.get(shown, 0):
+                shown = best
+        first = min(x for x in (a and a[0], b and b[0], shown) if x)
+        last = max(x for x in (a and a[1], b and b[1], shown) if x)
+        result.append([first, last, shown])
     return result

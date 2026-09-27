@@ -515,11 +515,12 @@ async function loadPageMap() {
 // reproduced exactly), so a converted page is shown next to the rendered page(s) holding
 // its own text -- found by the server from the words -- not "the page with the same number".
 function linkedRange() {
+  // [first, last, main] original pages for the current converted page (see page_map).
   const total = (draft.render || {}).pages || 0;
   const hit = pageMap[currentPage];
-  if (hit) return hit;
+  if (hit) return [hit[0], hit[1], hit[2] ?? hit[0]];
   const n = Math.max(1, Math.min(currentPage + 1 + origOffset, total));
-  return [n, n];
+  return [n, n, n];
 }
 
 function renderOriginal() {
@@ -538,27 +539,27 @@ function renderOriginal() {
   $("origTitle").title = fromPdf ? (rs.pdfName || "") : "صفحات ملف Word بعد تحويلها تلقائياً";
   $("origWordBtn").style.display = fromPdf ? "" : "none";
   const linked = $("origLink").checked;
-  let [a, b] = linked ? linkedRange() : [origPage, origPage];
-  a = Math.max(1, Math.min(a, rs.pages)); b = Math.max(a, Math.min(b, rs.pages));
+  // One original page: the one holding most of this page's text. Where the two break
+  // pages a few lines apart, say so -- the arrows show the neighbour.
+  const [first, last, main] = linked ? linkedRange() : [origPage, origPage, origPage];
+  const a = Math.max(1, Math.min(main, rs.pages)), b = a;
   origPage = a;
-  $("origLabel").textContent = a === b ? `صفحة ${a} من ${rs.pages}` : `صفحات ${a}–${b} من ${rs.pages}`;
-  $("origOffset").textContent = !linked ? "" : pageMap.length ? (pageMap[currentPage] ? "" : "(تقريبي)")
+  const spill = linked && last > first
+    ? (first < a ? `بداية النص في صفحة ${first}` : "") + (first < a && last > a ? "، " : "") + (last > a ? `تكملته في صفحة ${last}` : "")
+    : "";
+  $("origLabel").textContent = `صفحة ${a} من ${rs.pages}`;
+  $("origOffset").textContent = !linked ? "" : pageMap.length ? (pageMap[currentPage] ? (spill ? `(${spill})` : "") : "(تقريبي)")
     : `(حسب رقم الصفحة${origOffset ? `، إزاحة ${origOffset > 0 ? "+" : ""}${origOffset}` : ""})`;
   $("origPrev").disabled = a <= 1;
   $("origNext").disabled = b >= rs.pages;
-  const key = `${draft.id}:${a}-${b}`;
+  const key = `${draft.id}:${a}`;
   if (viewer.dataset.key === key) return;
   viewer.dataset.key = key;
-  let html = "";
-  for (let n = a; n <= b; n++) {
-    if (b > a) html += `<div class="pgtag">صفحة ${n}${n > a ? " (تكملة)" : ""}</div>`;
-    html += `<img alt="صفحة الأصل ${n}" src="/api/drafts/${draft.id}/original/${n}">`;
-  }
-  viewer.innerHTML = html;
+  viewer.innerHTML = `<img alt="صفحة الأصل ${a}" src="/api/drafts/${draft.id}/original/${a}">`;
   viewer.scrollTop = 0;
-  // Warm the next converted page's images so flipping feels instant.
+  // Warm the next converted page's original so flipping feels instant.
   const next = pageMap[currentPage + 1];
-  if (linked && next) for (let n = next[0]; n <= next[1]; n++) new Image().src = `/api/drafts/${draft.id}/original/${n}`;
+  if (linked && next) new Image().src = `/api/drafts/${draft.id}/original/${next[2] ?? next[0]}`;
 }
 function moveOriginal(delta) {
   if ($("origLink").checked && !pageMap.length) {
@@ -571,8 +572,7 @@ function moveOriginal(delta) {
   }
   // Browsing the original by hand: unlink, and step one rendered page at a time.
   if ($("origLink").checked) {
-    const [a, b] = linkedRange();
-    origPage = delta > 0 ? b : a;
+    origPage = linkedRange()[2];
     $("origLink").checked = false;
   }
   origPage += delta;

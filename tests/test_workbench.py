@@ -245,14 +245,36 @@ class TestPageMap:
         w1 = text_words(p1)
         pdf = [w1[:30], w1[30:], text_words(p2), text_words(p3)]
         book = {"pages": [self.page(p1), self.page(p2), self.page(p3)]}
-        assert page_map(book, pdf) == [[1, 2], [3, 3], [4, 4]]
+        assert page_map(book, pdf) == [[1, 2, 1], [3, 3, 3], [4, 4, 4]]
+
+    def test_the_page_shown_is_the_one_holding_most_of_the_text(self):
+        """The PDF breaks a few lines earlier than the conversion: page 2's first lines sit
+        at the bottom of PDF page 1. Page 2 is still PDF page 2, not 1."""
+        from workbench.conversion import page_map, text_words
+        p1, p2 = self.words(40, "ا"), self.words(40, "ب")
+        w1, w2 = text_words(p1), text_words(p2)
+        pdf = [w1 + w2[:5], w2[5:]]
+        assert page_map({"pages": [self.page(p1), self.page(p2)]}, pdf) == [[1, 1, 1], [1, 2, 2]]
+
+    def test_fragmented_extraction_still_finds_the_page(self):
+        """PDF text of justified Arabic comes out split mid-word ("وس ار قاص دا"); the
+        page whose text it is must still be the one shown."""
+        from workbench.conversion import page_map, text_words
+        texts = ["وسار قاصدا كربلاء لقتال الامام الحسين في جيش عظيم من اهل الكوفة " * 3,
+                 "فان صدقوا فيما يقولون انني ساعطيهم الامان واكتب الى الامير بذلك " * 3,
+                 "ثم نزل الحسين بارض كربلاء في اليوم الثاني من المحرم سنة احدى وستين " * 3]
+        def fragment(t):  # break every word after its second letter, as extraction does
+            return " ".join(w[:2] + " " + w[2:] if len(w) > 3 else w for w in t.split())
+        pdf = [text_words(fragment(t)) for t in texts]
+        book = {"pages": [self.page(t) for t in texts]}
+        assert [x[2] for x in page_map(book, pdf)] == [1, 2, 3]
 
     def test_pages_without_text_sit_between_their_neighbours(self):
         from workbench.conversion import page_map, text_words
         p1, p3 = self.words(20, "ا"), self.words(20, "ج")
         pdf = [text_words(p1), [], text_words(p3)]
         book = {"pages": [self.page(p1), self.page(""), self.page(p3)]}
-        assert page_map(book, pdf) == [[1, 1], [2, 2], [3, 3]]
+        assert page_map(book, pdf) == [[1, 1, 1], [2, 2, 2], [3, 3, 3]]
 
     def test_a_repeated_phrase_far_ahead_does_not_derail_the_rest(self):
         from workbench.conversion import page_map, text_words
@@ -263,7 +285,7 @@ class TestPageMap:
         # can't be found nearby, and must not be matched to a later page's same phrase.
         pdf[1] = text_words(self.words(30, "ب")) + ["مختلف", "تماما", "هنا"]
         book = {"pages": [self.page(p) for p in pages]}
-        assert page_map(book, pdf) == [[1, 1], [2, 2], [3, 3], [4, 4]]
+        assert page_map(book, pdf) == [[1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4]]
 
     def test_diacritics_and_presentation_forms_still_match(self):
         from workbench.conversion import page_map, text_words
@@ -272,7 +294,7 @@ class TestPageMap:
         import unicodedata
         extracted = "ﻗﺎﻝ ﺍﻻﻣﺎﻡ ﺍﻟﺼﺎﺩﻕ ﻋﻠﻴﻪ ﺍﻟﺴﻼﻡ ﺍﻟﻌﻠﻢ ﻧﻮﺭ ﻳﻘﺬﻓﻪ ﺍﻟﻠﻪ"
         assert unicodedata.normalize("NFKC", extracted) != extracted
-        assert page_map({"pages": [self.page(page_text)]}, [text_words(extracted)]) == [[1, 1]]
+        assert page_map({"pages": [self.page(page_text)]}, [text_words(extracted)]) == [[1, 1, 1]]
 
     async def test_endpoint_is_empty_until_the_original_is_rendered(self, employee):
         meta = (await upload(employee)).json()
