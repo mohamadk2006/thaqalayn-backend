@@ -869,8 +869,13 @@ function renderPage() {
     <button id="mergeNext" ${currentPage === book.pages.length - 1 ? "disabled" : ""}>دمج الصفحة التالية في هذه</button>
     <button id="movePageUp" ${currentPage === 0 ? "disabled" : ""}>&uarr; نقل للأعلى</button>
     <button id="movePageDown" ${currentPage === book.pages.length - 1 ? "disabled" : ""}>&darr; نقل للأسفل</button>
-    <button id="deletePageBtn" class="danger">حذف الصفحة</button>`;
+    <button id="deletePageBtn" class="danger">حذف الصفحة</button>
+    <button id="renumberBtn" title="يعطي هذه الصفحة وكل ما بعدها أرقاماً متسلسلة">ترقيم متسلسل من هنا…</button>
+    <label class="hint" style="display:flex;align-items:center;gap:4px" title="عند حذف أو إضافة أو دمج صفحة تُزاح أرقام الصفحات التي بعدها">
+      <input type="checkbox" id="autoRenumber" ${autoRenumber() ? "checked" : ""}> تعديل أرقام الصفحات التالية تلقائياً</label>`;
   content.appendChild(pc);
+  pc.querySelector("#renumberBtn").onclick = () => renumberFrom(currentPage);
+  pc.querySelector("#autoRenumber").onchange = (e) => safeStorage.set("wb_autorenumber", e.target.checked ? "1" : "0");
   pc.querySelector("#addPageAfter").onclick = () => addPage(currentPage);
   pc.querySelector("#mergeNext").onclick = () => mergeNext(currentPage);
   pc.querySelector("#movePageUp").onclick = () => movePage(currentPage, -1);
@@ -931,25 +936,75 @@ function blockRow(p, b, bi) {
   return row;
 }
 
+// ── page numbers: kept in step when pages are added, removed or moved ────────
+// Only numbered pages of the book itself (pageType main, a plain number) are touched:
+// front matter is numbered automatically on export, and a label like "أ" is left alone.
+
+const autoRenumber = () => safeStorage.get("wb_autorenumber") !== "0";
+const numbered = (p) => p && p.pageType === "main" && /^\d+$/.test(String(p.pageNumber ?? "").trim());
+function setNumber(p, n) { p.pageNumber = String(n); p.printedPage = n; p.sourcePageLabel = String(n); }
+function shiftNumbersFrom(index, delta) {
+  for (let k = index; k < book.pages.length; k++) {
+    const p = book.pages[k];
+    if (numbered(p)) setNumber(p, Math.max(1, Number(p.pageNumber) + delta));
+  }
+}
+function renumberFrom(i) {
+  const here = book.pages[i];
+  const before = [...book.pages.slice(0, i)].reverse().find(numbered);
+  const guess = numbered(here) ? Number(here.pageNumber) : before ? Number(before.pageNumber) + 1 : 1;
+  const answer = prompt("رقم هذه الصفحة؟ ستأخذ الصفحات التالية أرقاماً متسلسلة بعده (صفحات المقدمة لا تتأثر).", guess);
+  if (answer === null) return;
+  let n = Number(String(answer).trim().replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d)));
+  if (!Number.isInteger(n) || n < 1) { alert("أدخل رقماً صحيحاً"); return; }
+  let changed = 0;
+  for (let k = i; k < book.pages.length; k++) {
+    const p = book.pages[k];
+    if (p.pageType === "frontMatter") continue;
+    if (String(p.pageNumber) !== String(n)) changed++;
+    setNumber(p, n++);
+  }
+  markDirty(); renderAll();
+  setStatus(`أُعيد الترقيم: تغيّر رقم ${changed} من الصفحات — غير محفوظ`, "dirty");
+}
+
 function addPage(after) {
-  book.pages.splice(after + 1, 0, { pageType: "main", isBlank: false, pageNumber: "", blocks: [{ type: "text", text: "" }] });
+  const prev = book.pages[after];
+  const page = { pageType: "main", isBlank: false, pageNumber: "", blocks: [{ type: "text", text: "" }] };
+  if (autoRenumber() && numbered(prev)) {
+    shiftNumbersFrom(after + 1, 1);
+    setNumber(page, Number(prev.pageNumber) + 1);
+  }
+  book.pages.splice(after + 1, 0, page);
   currentPage = after + 1; markDirty(); renderAll();
 }
 function mergeNext(i) {
-  if (!confirm("نقل كل فقرات الصفحة التالية إلى نهاية هذه الصفحة وحذف الصفحة التالية؟")) return;
-  book.pages[i].blocks.push(...book.pages[i + 1].blocks);
+  if (!confirm("نقل كل فقرات الصفحة التالية إلى نهاية هذه الصفحة وحذف الصفحة التالية؟" +
+    (autoRenumber() ? "\nستُزاح أرقام الصفحات التي بعدها رقماً واحداً." : ""))) return;
+  const removed = book.pages[i + 1];
+  book.pages[i].blocks.push(...removed.blocks);
   book.pages.splice(i + 1, 1);
+  if (autoRenumber() && numbered(removed)) shiftNumbersFrom(i + 1, -1);
   markDirty(); renderAll();
 }
 function movePage(i, d) {
   const j = i + d;
   if (j < 0 || j >= book.pages.length) return;
-  [book.pages[i], book.pages[j]] = [book.pages[j], book.pages[i]];
+  const [a, b] = [book.pages[i], book.pages[j]];
+  [book.pages[i], book.pages[j]] = [b, a];
+  // The numbers stay with the positions, so the book's numbering stays in order.
+  if (autoRenumber() && numbered(a) && numbered(b)) {
+    const [na, nb] = [a.pageNumber, b.pageNumber];
+    setNumber(a, Number(nb)); setNumber(b, Number(na));
+  }
   currentPage = j; markDirty(); renderAll();
 }
 function deletePage(i) {
-  if (!confirm("حذف هذه الصفحة؟")) return;
+  const removed = book.pages[i];
+  const shift = autoRenumber() && numbered(removed);
+  if (!confirm("حذف هذه الصفحة؟" + (shift ? "\nستُزاح أرقام الصفحات التي بعدها رقماً واحداً (مثلاً 11 تصبح 10)." : ""))) return;
   book.pages.splice(i, 1);
+  if (shift) shiftNumbersFrom(i, -1);
   currentPage = Math.min(currentPage, book.pages.length - 1); markDirty(); renderAll();
 }
 
