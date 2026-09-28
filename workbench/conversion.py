@@ -648,4 +648,56 @@ def page_map(book: dict, pdf_words: list[list[str]]) -> list[list[int] | None]:
         first = min(x for x in (a and a[0], b and b[0], shown) if x)
         last = max(x for x in (a and a[1], b and b[1], shown) if x)
         result.append([first, last, shown])
+    return _keep_in_step(book, originals, result)
+
+
+# A match is trusted to anchor its neighbours when it holds this much of the page's text.
+SURE_MATCH = 0.5
+IN_STEP_WINDOW = 25  # pages either side whose trusted matches say where a page should be
+IN_STEP_SLACK = 2    # PDF pages either side of where it should be that are compared
+
+
+def _keep_in_step(book: dict, originals: list[str], matched: list[list[int] | None]) -> list[list[int] | None]:
+    """Book pages and PDF pages run in the same order, but each page above was matched on
+    its own: in a book whose text repeats (genealogies, poems, index lists) the locators
+    propose pages far away, and only pages near those were compared -- in one real book
+    280 of 603 pages were shown the wrong PDF page (page 147 with page 166, 38% alike,
+    while page 147 held 88%). Here each page is compared again with the PDF pages where
+    its trusted neighbours put it, and where the whole book's trusted matches put it (the
+    same number, for a PDF of the book itself); a page too short to judge by its text
+    (a title, a blank page) takes that page too."""
+    import statistics
+
+    total = len(originals)
+    pages = book.get("pages", [])
+    letters = [_letters(" ".join(bl.get("text", "") for bl in p.get("blocks", []))) for p in pages]
+
+    def score(i: int, n: int) -> float:
+        return _overlap(letters[i], originals[n - 1]) if len(letters[i]) >= 40 else 0.0
+
+    trusted = {i: m[2] - (i + 1) for i, m in enumerate(matched) if m and score(i, m[2]) >= SURE_MATCH}
+    if not trusted:
+        return matched
+    overall = int(statistics.median(trusted.values()))
+    clamp = lambda n: min(max(n, 1), total)  # noqa: E731
+    result: list[list[int] | None] = []
+    for i, m in enumerate(matched):
+        near = [o for j, o in trusted.items() if abs(j - i) <= IN_STEP_WINDOW]
+        expected = clamp(i + 1 + (int(statistics.median(near)) if near else overall))
+        whole = clamp(i + 1 + overall)
+        candidates = {n for e in (expected, whole)
+                      for n in range(e - IN_STEP_SLACK, e + IN_STEP_SLACK + 1) if 1 <= n <= total}
+        if m:
+            candidates |= {n + d for n in m for d in (-1, 0, 1) if 1 <= n + d <= total}
+        if len(letters[i]) >= 40:
+            scores = {n: score(i, n) for n in candidates}
+            shown = max(candidates, key=lambda n: (scores[n], -abs(n - expected)))
+            if scores[shown] == 0:
+                shown = expected
+        else:
+            shown = expected
+        if m and m[0] <= shown <= m[1] and m[1] - m[0] <= 1:
+            result.append([m[0], m[1], shown])  # the text spills onto the next page or from the last
+        else:
+            result.append([shown, shown, shown])
     return result

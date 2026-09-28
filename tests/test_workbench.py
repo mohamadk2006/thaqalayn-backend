@@ -247,6 +247,20 @@ class TestPageMap:
         book = {"pages": [self.page(p1), self.page(p2), self.page(p3)]}
         assert page_map(book, pdf) == [[1, 2, 1], [3, 3, 3], [4, 4, 4]]
 
+    def test_pages_far_from_their_neighbours_are_pulled_back_in_step(self):
+        """Matched one by one, pages of repeated text were shown PDF pages far away (a real
+        book: page 147 with page 166). Where trusted neighbours put a page, it is compared
+        again; a page too short to judge by its text takes where they put it."""
+        from workbench.conversion import _keep_in_step, text_words
+        texts = [self.words(40, chr(0x0627 + k)) for k in range(10)]
+        book = {"pages": [self.page(t) for t in texts[:4]] + [self.page("عنوان")] + [self.page(t) for t in texts[5:]]}
+        originals = ["".join(text_words(t)) for t in texts]
+        matched = [[k + 1] * 3 for k in range(10)]
+        matched[2] = [9, 9, 9]   # a wrong far-away match for page 3
+        matched[4] = None        # a title page: no text to locate
+        fixed = _keep_in_step(book, originals, matched)
+        assert [m[2] for m in fixed] == list(range(1, 11))
+
     def test_the_page_shown_is_the_one_holding_most_of_the_text(self):
         """The PDF breaks a few lines earlier than the conversion: page 2's first lines sit
         at the bottom of PDF page 1. Page 2 is still PDF page 2, not 1."""
