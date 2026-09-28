@@ -26,10 +26,22 @@ from app.schemas.catalog import (
 )
 
 
+# Persian names are written in Arabic without Persian letters: "الكلبايكاني" for
+# "الگلپايگاني". Title and author search treats each Persian letter as its Arabic
+# stand-in, on both sides. Only here: in page text, Persian "گل" (flower) must not match
+# the ubiquitous Arabic "كل".
+_PERSIAN, _ARABIC = "گپچژ", "كبجز"
+_PERSIAN_FOLD = str.maketrans(_PERSIAN, _ARABIC)
+
+
+def _folded(column):
+    return func.translate(column, _PERSIAN, _ARABIC)
+
+
 def _query_words(q: str | None) -> list[str]:
     """The query's words in the same folded form as title_norm/name_norm (diacritics,
     alef/hamza forms, taa marbuta...), so "الكافى" finds "الكافي" and "أصول" finds "اصول"."""
-    return normalize(q or "").split()[:10]
+    return normalize(q or "").translate(_PERSIAN_FOLD).split()[:10]
 
 
 def _matches_title_or_author(words: list[str]):
@@ -39,10 +51,10 @@ def _matches_title_or_author(words: list[str]):
     conditions = []
     for w in words:
         conditions.append(or_(
-            Work.title_norm.contains(w, autoescape=True),
-            Work.author_id.in_(select(Author.id).where(Author.name_norm.contains(w, autoescape=True))),
+            _folded(Work.title_norm).contains(w, autoescape=True),
+            Work.author_id.in_(select(Author.id).where(_folded(Author.name_norm).contains(w, autoescape=True))),
             Work.id.in_(select(Book.work_id).where(
-                Book.is_published.is_(True), Book.title_norm.contains(w, autoescape=True))),
+                Book.is_published.is_(True), _folded(Book.title_norm).contains(w, autoescape=True))),
         ))
     return conditions
 
@@ -168,11 +180,12 @@ async def list_works(
     )
     if words:
         phrase = " ".join(words)
+        title = _folded(Work.title_norm)
         rank = case(
-            (Work.title_norm == phrase, 0),
-            (Work.title_norm.startswith(phrase, autoescape=True), 1),
-            (Work.title_norm.contains(phrase, autoescape=True), 2),
-            (and_(*[Work.title_norm.contains(w, autoescape=True) for w in words]), 3),
+            (title == phrase, 0),
+            (title.startswith(phrase, autoescape=True), 1),
+            (title.contains(phrase, autoescape=True), 2),
+            (and_(*[title.contains(w, autoescape=True) for w in words]), 3),
             else_=4,  # found through a volume's title or the author's name
         )
         order = (rank, func.length(Work.title_norm), Work.title_norm)
@@ -296,10 +309,10 @@ async def list_authors(session: AsyncSession, q: str | None = None) -> list[Auth
     query = select(Author)
     words = _query_words(q)
     for w in words:
-        query = query.where(Author.name_norm.contains(w, autoescape=True))
+        query = query.where(_folded(Author.name_norm).contains(w, autoescape=True))
     if words:
         phrase = " ".join(words)
-        query = query.order_by(case((Author.name_norm.startswith(phrase, autoescape=True), 0), else_=1),
+        query = query.order_by(case((_folded(Author.name_norm).startswith(phrase, autoescape=True), 0), else_=1),
                                Author.name_norm)
     else:
         query = query.order_by(Author.name_norm)

@@ -342,3 +342,22 @@ class TestTitleAuthorSearch:
     async def test_authors_search(self, imported: AsyncClient):
         response = await imported.get("/api/authors", params={"q": "مؤلِّف الإختبار"})
         assert [a["name"] for a in response.json()] == ["مؤلف الاختبار"]
+
+
+async def test_arabic_spelling_of_a_persian_name_finds_it(imported: AsyncClient):
+    """"الكلبايكاني" for "الگلپايگاني": Arabic writes Persian names without گ پ چ ژ."""
+    async with get_sessionmaker()() as session:
+        await session.execute(text("UPDATE authors SET name = 'الشيخ الگلپايگاني', name_norm = 'الشيخ الگلپايگاني' "
+                                   "WHERE name_norm = 'مؤلف اخر'"))
+        await session.commit()
+    try:
+        for q in ("الكلبايكاني", "الگلپايگاني", "گلپایگانی"):
+            authors = (await imported.get("/api/authors", params={"q": q})).json()
+            assert [a["name"] for a in authors] == ["الشيخ الگلپايگاني"], q
+            works = (await imported.get("/api/works", params={"q": q})).json()["items"]
+            assert {w["title"] for w in works} == {"كتاب الاختبار الثاني"}, q
+    finally:
+        async with get_sessionmaker()() as session:
+            await session.execute(text("UPDATE authors SET name = 'مؤلف آخر', name_norm = 'مؤلف اخر' "
+                                       "WHERE name_norm = 'الشيخ الگلپايگاني'"))
+            await session.commit()
