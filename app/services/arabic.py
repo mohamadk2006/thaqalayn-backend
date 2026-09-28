@@ -75,6 +75,14 @@ _LETTER_FOLDING = {
     "ی": "ي",  # ی → ي  Persian yeh
     "ھ": "ه",  # ھ → ه  heh doachashmee
     "ۀ": "ه",  # ۀ → ه  heh with yeh above
+    # Persian letters Arabic has no letter for, → the Arabic letter written in their place.
+    # Arabic spells Persian names and words without them ("الكلبايكاني" for "الگلپايگاني"),
+    # so the same name appears both ways; the iPhone app's own search folds them too. The
+    # cost: a Persian word also finds its Arabic look-alike (گل finds كل).
+    "گ": "ك",  # گ → ك  gaf
+    "پ": "ب",  # پ → ب  pe
+    "چ": "ج",  # چ → ج  che
+    "ژ": "ز",  # ژ → ز  zhe
 }
 
 # Arabic-Indic and Persian digits → ASCII, so "١٤٠٢" and "1402" are the same query.

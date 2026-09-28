@@ -156,3 +156,37 @@ class TestReindex:
 
     def test_unreadable_json_is_none(self, tmp_path: Path):
         assert R.book_page_texts(tmp_path, 123) is None
+
+
+class TestPersianLetters:
+    """گ پ چ ژ fold into ك ب ج ز, as Arabic spells Persian names ("الكلبايكاني" for
+    "الگلپايگاني") -- in the query, the page index, and the snippet highlight."""
+
+    def test_query_folds_them(self):
+        from app.services.arabic import normalize
+        assert normalize("الگلپايگاني چژ") == normalize("الكلبايكاني جز") == "الكلبايكاني جز"
+
+    def test_highlight_finds_the_persian_spelling(self):
+        from app.services.arabic import find_original_match, normalize
+        m = find_original_match("قال آية الله الگلپايگاني في رسالته", normalize("الكلبايكاني"))
+        assert m and m.group(0) == "الگلپايگاني"
+
+    async def test_folding_a_stored_index_equals_indexing_afresh(self):
+        """persian_fold_tsvector(old index) must be exactly what the new arabic_normalize
+        gives from the text itself -- positions included, so phrase search still works."""
+        from sqlalchemy import text as sql
+        from app.db import get_sessionmaker
+        page = "گل و كل پدر؛ گلپايگان چشمه ژرف گل پدر"
+        # The index as it was built before, with the four letters as they are (this text
+        # has nothing else the old function folded: no hamza forms, no taa marbuta).
+        async with get_sessionmaker()() as session:
+            before = await session.scalar(sql(
+                "SELECT to_tsvector('simple', lower(regexp_replace(normalize(:t, NFC), '\\s+', ' ', 'g')))"),
+                {"t": page})
+            folded = await session.scalar(sql("SELECT persian_fold_tsvector(CAST(:v AS tsvector))::text"), {"v": before})
+            fresh = await session.scalar(sql("SELECT to_tsvector('simple', arabic_normalize(:t))::text"), {"t": page})
+            phrase = await session.scalar(sql(
+                "SELECT persian_fold_tsvector(CAST(:v AS tsvector)) @@ phraseto_tsquery('simple', arabic_normalize('كل بدر'))"),
+                {"v": before})
+        assert folded == fresh
+        assert phrase

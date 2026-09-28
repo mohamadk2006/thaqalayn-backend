@@ -347,8 +347,8 @@ class TestTitleAuthorSearch:
 async def test_arabic_spelling_of_a_persian_name_finds_it(imported: AsyncClient):
     """"الكلبايكاني" for "الگلپايگاني": Arabic writes Persian names without گ پ چ ژ."""
     async with get_sessionmaker()() as session:
-        await session.execute(text("UPDATE authors SET name = 'الشيخ الگلپايگاني', name_norm = 'الشيخ الگلپايگاني' "
-                                   "WHERE name_norm = 'مؤلف اخر'"))
+        await session.execute(text("UPDATE authors SET name = 'الشيخ الگلپايگاني', "
+                                   "name_norm = arabic_normalize('الشيخ الگلپايگاني') WHERE name_norm = 'مؤلف اخر'"))
         await session.commit()
     try:
         for q in ("الكلبايكاني", "الگلپايگاني", "گلپایگانی"):
@@ -359,5 +359,5 @@ async def test_arabic_spelling_of_a_persian_name_finds_it(imported: AsyncClient)
     finally:
         async with get_sessionmaker()() as session:
             await session.execute(text("UPDATE authors SET name = 'مؤلف آخر', name_norm = 'مؤلف اخر' "
-                                       "WHERE name_norm = 'الشيخ الگلپايگاني'"))
+                                       "WHERE name = 'الشيخ الگلپايگاني'"))
             await session.commit()

@@ -40,12 +40,13 @@ AS $$
                     -- Folded pairs, in the same order as _LETTER_FOLDING then
                     -- _DIGIT_FOLDING in app/services/arabic.py:
                     --   أ إ آ ٱ → ا      ى → ي      ة → ه
-                    --   ک → ك   ی → ي   ھ ۀ → ه     ٠-٩ and ۰-۹ → 0-9
+                    --   ک → ك   ی → ي   ھ ۀ → ه     گ → ك   پ → ب   چ → ج   ژ → ز
+                    --   ٠-٩ and ۰-۹ → 0-9
                     -- Adjacent U&'' literals do not concatenate, so each argument is a
                     -- single literal. ASCII digits are escaped too (\0030-\0039) purely
-                    -- to keep the two strings visually aligned at 30 characters each.
-                    U&'\0623\0625\0622\0671\0649\0629\06A9\06CC\06BE\06C0\0660\0661\0662\0663\0664\0665\0666\0667\0668\0669\06F0\06F1\06F2\06F3\06F4\06F5\06F6\06F7\06F8\06F9',
-                    U&'\0627\0627\0627\0627\064A\0647\0643\064A\0647\0647\0030\0031\0032\0033\0034\0035\0036\0037\0038\0039\0030\0031\0032\0033\0034\0035\0036\0037\0038\0039'
+                    -- to keep the two strings visually aligned at 34 characters each.
+                    U&'\0623\0625\0622\0671\0649\0629\06A9\06CC\06BE\06C0\06AF\067E\0686\0698\0660\0661\0662\0663\0664\0665\0666\0667\0668\0669\06F0\06F1\06F2\06F3\06F4\06F5\06F6\06F7\06F8\06F9',
+                    U&'\0627\0627\0627\0627\064A\0647\0643\064A\0647\0647\0643\0628\062C\0632\0030\0031\0032\0033\0034\0035\0036\0037\0038\0039\0030\0031\0032\0033\0034\0035\0036\0037\0038\0039'
                 )
             ),
             -- Explicit whitespace class rather than \s: PostgreSQL's \s and Python's are
@@ -60,6 +61,6 @@ $$;
 
 COMMENT ON FUNCTION arabic_normalize(text) IS
     'Folds Arabic text to its canonical searchable form: NFC, strip tashkeel/tatweel/'
-    'invisibles, fold alef+ya+ta-marbuta+Persian letterforms, fold Arabic-Indic digits, '
+    'invisibles, fold alef+ya+ta-marbuta+Persian letters (incl. گ پ چ ژ), fold Arabic-Indic digits, '
     'lowercase, collapse whitespace. Mirrored byte-for-byte by app/services/arabic.py. '
     'For matching only — never modifies stored or displayed text.';
