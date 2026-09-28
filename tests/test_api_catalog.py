@@ -306,3 +306,39 @@ class TestMetadata:
         response = await imported.get("/api/authors")
         names = {row["name"] for row in response.json()}
         assert "مؤلف الاختبار" in names
+
+
+class TestTitleAuthorSearch:
+    """`q` on /api/works and /api/authors: titles and author names, for the website."""
+
+    async def titles(self, client: AsyncClient, **params) -> list[str]:
+        response = await client.get("/api/works", params={"limit": 200, **params})
+        assert response.status_code == 200
+        return [w["title"] for w in response.json()["items"]]
+
+    async def test_finds_a_title_whatever_its_spelling(self, imported: AsyncClient):
+        # hamza, taa marbuta, diacritics all folded as in title_norm
+        assert "كتاب الاختبار الأول" in await self.titles(imported, q="كِتاب الإختبار الاول")
+
+    async def test_every_word_must_match_title_or_author(self, imported: AsyncClient):
+        found = await self.titles(imported, q="الاختبار آخر")  # title word + author word
+        assert "كتاب الاختبار الثاني" in found and "كتاب الاختبار الأول" not in found
+
+    async def test_finds_works_by_author_name(self, imported: AsyncClient):
+        assert "كتاب الاختبار الأول" in await self.titles(imported, q="مؤلف الاختبار")
+
+    async def test_exact_title_comes_first(self, imported: AsyncClient):
+        found = await self.titles(imported, q="كتاب الاختبار الثاني")
+        assert found[0] == "كتاب الاختبار الثاني"
+
+    async def test_combines_with_filters_and_counts(self, imported: AsyncClient):
+        response = await imported.get("/api/works", params={"q": "الاختبار", "subject": "فقه المذهب الحنفي"})
+        body = response.json()
+        assert [w["title"] for w in body["items"]] == ["كتاب الاختبار الثاني"] and body["total"] == 1
+
+    async def test_like_wildcards_are_plain_characters(self, imported: AsyncClient):
+        assert await self.titles(imported, q="%") == []
+
+    async def test_authors_search(self, imported: AsyncClient):
+        response = await imported.get("/api/authors", params={"q": "مؤلِّف الإختبار"})
+        assert [a["name"] for a in response.json()] == ["مؤلف الاختبار"]

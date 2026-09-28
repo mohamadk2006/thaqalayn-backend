@@ -7,7 +7,7 @@ had already named the endpoint /api/categories and there was no reason to break 
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -18,8 +18,11 @@ router = APIRouter(tags=["metadata"])
 
 
 @router.get("/authors", response_model=list[AuthorOut])
-async def list_authors(session: AsyncSession = Depends(get_session)) -> list[AuthorOut]:
-    return await catalog_service.list_authors(session)
+async def list_authors(
+    q: str | None = Query(None, max_length=200, description="Search author names"),
+    session: AsyncSession = Depends(get_session),
+) -> list[AuthorOut]:
+    return await catalog_service.list_authors(session, q=q)
 
 
 @router.get("/categories", response_model=list[CategoryOut])

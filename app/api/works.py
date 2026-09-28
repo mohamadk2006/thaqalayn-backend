@@ -21,12 +21,13 @@ async def list_works(
     language: str | None = None,
     author: int | None = None,
     featured: bool | None = None,
+    q: str | None = Query(None, max_length=200, description="Search titles and author names"),
     session: AsyncSession = Depends(get_session),
 ) -> PageEnvelope[WorkOut]:
     items, total = await catalog_service.list_works(
         session, page=page, limit=limit,
         subject_id=subject, library_id=library,
-        language=language, author_id=author, featured=featured,
+        language=language, author_id=author, featured=featured, q=q,
     )
     return PageEnvelope(page=page, limit=limit, total=total, items=items)
 

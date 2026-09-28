@@ -8,11 +8,12 @@ cache, or moving search to a different engine) without router changes.
 
 from __future__ import annotations
 
-from sqlalchemy import Select, func, select, text
+from sqlalchemy import Select, and_, case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
 from app.models import Author, Book, Language, Library, Subject, Work
+from app.services.arabic import normalize
 from app.schemas.catalog import (
     AuthorOut,
     BookOut,
@@ -23,6 +24,27 @@ from app.schemas.catalog import (
     WorkDetailOut,
     WorkOut,
 )
+
+
+def _query_words(q: str | None) -> list[str]:
+    """The query's words in the same folded form as title_norm/name_norm (diacritics,
+    alef/hamza forms, taa marbuta...), so "الكافى" finds "الكافي" and "أصول" finds "اصول"."""
+    return normalize(q or "").split()[:10]
+
+
+def _matches_title_or_author(words: list[str]):
+    """Every word must appear somewhere in the work's title, one of its published
+    volumes' titles, or its author's name -- so "الكافي الكليني" finds al-Kafi by
+    al-Kulayni, and one word alone matches either."""
+    conditions = []
+    for w in words:
+        conditions.append(or_(
+            Work.title_norm.contains(w, autoescape=True),
+            Work.author_id.in_(select(Author.id).where(Author.name_norm.contains(w, autoescape=True))),
+            Work.id.in_(select(Book.work_id).where(
+                Book.is_published.is_(True), Book.title_norm.contains(w, autoescape=True))),
+        ))
+    return conditions
 
 
 def _subjects_out(work: Work | None) -> list[SubjectOut]:
@@ -92,10 +114,13 @@ async def list_works(
     language: str | None = None,
     author_id: int | None = None,
     featured: bool | None = None,
+    q: str | None = None,
 ) -> tuple[list[WorkOut], int]:
     """Paginated, filterable list of works. Each row aggregates its published volumes'
     count and total size — a work with zero published volumes is excluded, since it has
-    nothing a client could download."""
+    nothing a client could download. `q` searches titles and author names; results then
+    come best match first (the exact title, a title starting with the query, every word
+    in the title, then the rest), alphabetically within each."""
     published = Book.is_published.is_(True)
 
     # Aggregate first, in its own subquery, then join Work back onto the aggregated
@@ -130,6 +155,9 @@ async def list_works(
         query = query.where(Work.author_id == author_id)
     if featured:
         query = query.where(Work.is_featured.is_(True))
+    words = _query_words(q)
+    if words:
+        query = query.where(*_matches_title_or_author(words))
 
     total = await session.scalar(select(func.count()).select_from(query.subquery()))
 
@@ -138,6 +166,16 @@ async def list_works(
     order = (
         (Work.featured_sort_order, Work.title_norm) if featured else (Work.title_norm,)
     )
+    if words:
+        phrase = " ".join(words)
+        rank = case(
+            (Work.title_norm == phrase, 0),
+            (Work.title_norm.startswith(phrase, autoescape=True), 1),
+            (Work.title_norm.contains(phrase, autoescape=True), 2),
+            (and_(*[Work.title_norm.contains(w, autoescape=True) for w in words]), 3),
+            else_=4,  # found through a volume's title or the author's name
+        )
+        order = (rank, func.length(Work.title_norm), Work.title_norm)
     rows = (
         await session.execute(
             query.order_by(*order).offset((page - 1) * limit).limit(limit)
@@ -253,8 +291,19 @@ async def get_books_by_ids(session: AsyncSession, book_ids: list[int]) -> dict[i
     }
 
 
-async def list_authors(session: AsyncSession) -> list[AuthorOut]:
-    rows = (await session.execute(select(Author).order_by(Author.name_norm))).scalars().all()
+async def list_authors(session: AsyncSession, q: str | None = None) -> list[AuthorOut]:
+    """All authors by name; with `q`, only those whose name holds every word of it."""
+    query = select(Author)
+    words = _query_words(q)
+    for w in words:
+        query = query.where(Author.name_norm.contains(w, autoescape=True))
+    if words:
+        phrase = " ".join(words)
+        query = query.order_by(case((Author.name_norm.startswith(phrase, autoescape=True), 0), else_=1),
+                               Author.name_norm)
+    else:
+        query = query.order_by(Author.name_norm)
+    rows = (await session.execute(query)).scalars().all()
     return [AuthorOut(id=str(a.id), name=a.name, deathLabel=a.death_label) for a in rows]
 
 
