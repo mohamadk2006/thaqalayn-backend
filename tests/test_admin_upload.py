@@ -143,3 +143,10 @@ async def test_admin_pages_render_the_new_forms(admin):
     work_id = redirect_target(await upload(admin, book_json(volume=1))).split("/admin/works/")[1].split("?")[0]
     work_page = (await admin.get(f"/admin/works/{work_id}")).text
     assert 'name="work_id"' in work_page and 'name="volume"' in work_page and 'value="2"' in work_page
+
+
+async def test_work_page_shows_its_work_id(admin):
+    target = redirect_target(await upload(admin, book_json(volume=1)))
+    work_id = target.split("/admin/works/")[1].split("?")[0]
+    page = await admin.get(f"/admin/works/{work_id}")
+    assert f"رقم العمل: <strong>{work_id}</strong>" in page.text

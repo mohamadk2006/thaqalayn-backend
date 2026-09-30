@@ -585,6 +585,7 @@ async def work_detail(
     banner = _msg(ok, True) if ok else (_msg(err, False) if err else "")
     body = (
         f"{banner}<h1>{escape(work.title)}</h1>"
+        f"<p>رقم العمل: <strong>{work_id}</strong></p>"
         "<table><tr><th>المجلد</th><th>العنوان</th><th>الحالة</th><th>الصفحات</th><th></th></tr>"
         f"{rows_html}</table>"
         "<h2>إضافة مجلد جديد من ملف JSON</h2>"
