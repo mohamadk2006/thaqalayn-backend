@@ -180,7 +180,7 @@ def _locate(o: int, chain, ocr, text) -> tuple[int, bool]:
 
 
 def make_plan(doc: Path, pdf: Path, progress=None) -> dict:
-    paras = conv.read_doc(doc, body_only=True)
+    paras = conv.read_any(doc, body_only=True)
     units = conv.body_units(paras)
     text = [u[3] for u in units]
     pages = pdf_lines(pdf, progress)

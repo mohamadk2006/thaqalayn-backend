@@ -753,6 +753,22 @@ class TestPagePlan:
         out = conv.apply_page_plan(paras, plan)
         assert [p.text if p else None for p in out] == [None, "كلام الكتاب", None, "الأول هنا الآن"]
 
+    def test_a_docx_takes_its_pages_from_the_plan_not_from_its_own_breaks(self, tmp_path):
+        from workbench.conversion import converter
+        conv = converter()
+        d = docx.Document()
+        d.add_paragraph("الحمد لله ربّ العالمين والصلاة على نبيّه")
+        d.add_page_break()  # Word's own break, not the print's: ignored
+        d.add_paragraph("ثمّ قال الإمام كلمته الأخيرة")
+        d.save(tmp_path / "a.docx")
+        body = conv.read_any(tmp_path / "a.docx", body_only=True)
+        assert [p.text for p in body if p] == ["الحمد لله ربّ العالمين والصلاة على نبيّه", "ثمّ قال الإمام كلمته الأخيرة"]
+        plan = {"pages": [{"para": 0, "chunk": 0, "words": "الحمد لله رب العالمين"},
+                          {"para": 0, "chunk": 3, "words": "العالمين والصلاه علي نبيه"}]}
+        out = conv.read_any(tmp_path / "a.docx", plan)
+        assert [p.text if p else None for p in out] == [
+            "الحمد لله ربّ", None, "العالمين والصلاة على نبيّه", "ثمّ قال الإمام كلمته الأخيرة"]
+
     def test_a_plan_of_another_file_is_refused(self):
         import pytest
         from workbench.conversion import converter

@@ -117,7 +117,7 @@ def convert(folder: Path, meta: dict, keep: dict | None = None) -> tuple[dict, d
         "anchors": len(anchors),
         "recovered": [{"page": n, "title": t, "how": how} for n, t, how in recovered],
     }
-    report.update(source_report(conv, folder / meta["sourceFile"], content))
+    report.update(source_report(conv, folder / meta["sourceFile"], content, bool(page_plan)))
     if page_plan:
         report["pagesFrom"] = "printed-pdf"
     return content, report, issues_of(content) + report["sourceIssues"]
@@ -133,7 +133,7 @@ NO_PAGINATION_LETTERS = 6000
 MIN_TEXT_COVERAGE = 0.995
 
 
-def source_report(conv, source: Path, content: dict) -> dict:
+def source_report(conv, source: Path, content: dict, page_plan: bool = False) -> dict:
     """What the Word file itself says about the conversion -- where the pages came from,
     whether any of its text was left out -- with issues for what needs the employee.
     Kept in the report, since saving an edited book re-checks the book, not the file."""
@@ -142,7 +142,7 @@ def source_report(conv, source: Path, content: dict) -> dict:
     if conv.is_docx(source):
         layout = conv.docx_layout(source)
         out["pagesFrom"] = layout["pagesFrom"]
-        if layout["unlaidOut"] > MAX_UNLAID_OUT:
+        if layout["unlaidOut"] > MAX_UNLAID_OUT and not page_plan:
             issues.append({
                 "severity": "error", "code": "word-layout-incomplete",
                 "detail": f"صفحات هذا الملف مأخوذة من تخطيط Word المحفوظ فيه، لكن Word لم يُخطّط سوى "
@@ -153,7 +153,7 @@ def source_report(conv, source: Path, content: dict) -> dict:
             })
     pages = content.get("pages") or []
     letters = sum(len(b.get("text") or "") for pg in pages for b in pg.get("blocks") or [])
-    if out["pagesFrom"] == "page-breaks" and pages and letters / len(pages) > NO_PAGINATION_LETTERS:
+    if out["pagesFrom"] == "page-breaks" and not page_plan and pages and letters / len(pages) > NO_PAGINATION_LETTERS:
         issues.append({
             "severity": "error", "code": "no-page-information",
             "detail": f"هذا الملف لا يحمل معلومات عن صفحات الكتاب: لا فواصل صفحات فيه ولا تخطيط Word "

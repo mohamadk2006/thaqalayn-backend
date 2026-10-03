@@ -190,6 +190,7 @@ def unit_token(chunk: str) -> str:
     folds them, marks and punctuation gone (empty for a chunk with no letters)."""
     import unicodedata
 
+    chunk = re.sub("\ue000-?\\d+\ue001|\ue003", "", chunk)  # a footnote mark is no word
     text = _MARKS_RE.sub("", unicodedata.normalize("NFKC", chunk)).translate(_FOLD_TABLE)
     return "".join(_TOKEN_RE.findall(text))
 
@@ -665,7 +666,7 @@ _OWN_MARK_RE = re.compile(r"\(?\ue002\)?")
 _MC_FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
 
 
-def read_docx(path: Path) -> list[Para | None]:
+def read_docx(path: Path, page_plan: dict | None = None, body_only: bool = False) -> list[Para | None]:
     """Same output as read_doc for a .docx: paragraphs in order (style names kept), `None`
     at each page boundary.
 
@@ -685,7 +686,11 @@ def read_docx(path: Path) -> list[Para | None]:
 
     Tables are read in place, in document order. A row of several cells is a verse -- the
     non-empty cells joined with " * " -- and a row with one cell is plain text. Skipping
-    tables would silently drop the poems of a diwan (89% of one real book's text)."""
+    tables would silently drop the poems of a diwan (89% of one real book's text).
+
+    With a page plan (see apply_page_plan) the printed PDF's pages replace all of that: the
+    file's own page marks are ignored and the notes are placed on the planned pages.
+    body_only returns the body paragraphs alone, notes still marks, to make a plan."""
     try:
         import docx
         from docx.oxml.ns import qn
@@ -715,6 +720,7 @@ def read_docx(path: Path) -> list[Para | None]:
         return char_style_names[style_id]
     marks = sum(1 for _ in body.iter(W_MARK))
     by_marks = marks > 0 and manual * FLOWING_TEXT_RATIO < marks
+    deferred = page_plan is not None or body_only  # pages and notes are placed afterwards
 
     def walk(el):
         """(kind, value) for what el shows, in reading order."""
@@ -761,6 +767,8 @@ def read_docx(path: Path) -> list[Para | None]:
 
     def number_notes(text: str) -> str:
         nonlocal note_count
+        if deferred:
+            return text
 
         def one(m):
             nonlocal note_count
@@ -777,6 +785,8 @@ def read_docx(path: Path) -> list[Para | None]:
     def end_page() -> None:
         """Close the page: its footnotes at the bottom, then the page boundary."""
         nonlocal note_count, physical_page, parity_needed
+        if deferred:
+            return
         result.extend(Para(n, "footnote text") for n in pending_notes)
         pending_notes.clear()
         if restart_each_page:
@@ -808,7 +818,7 @@ def read_docx(path: Path) -> list[Para | None]:
         for kind, value in walk(p_el):
             if kind == "text":
                 segments[-1] += value
-            elif (kind == "mark") == by_marks and kind in ("mark", "page"):
+            elif not deferred and (kind == "mark") == by_marks and kind in ("mark", "page"):
                 segments.append("")
         has_picture = bool(p_el.findall(".//" + qn("w:drawing")) or p_el.findall(".//" + qn("w:pict")))
         for k, seg in enumerate(segments):
@@ -849,7 +859,7 @@ def read_docx(path: Path) -> list[Para | None]:
                     for kind, value in walk(p):
                         if kind == "text":
                             parts.append(value)
-                        elif (kind == "mark") == by_marks and kind in ("mark", "page"):
+                        elif not deferred and (kind == "mark") == by_marks and kind in ("mark", "page"):
                             new_page = True
                     parts.append(" ")
                 text = re.sub(r"[ \u00a0\u2028]+", " ", "".join(parts)).strip()
@@ -875,8 +885,48 @@ def read_docx(path: Path) -> list[Para | None]:
 
     for child in body.iterchildren():
         block(child)
+    if body_only:
+        return _finish([x for x in result if x is not None])
+    if page_plan:
+        return _finish(_attach_docx_notes(apply_page_plan(_finish(result), page_plan), notes, restart_each_page))
     result.extend(Para(n, "footnote text") for n in pending_notes)
     return _finish(result)
+
+
+def _attach_docx_notes(result: list, notes: dict[str, str], restart_each_page: bool) -> list:
+    """The notes of each page at its bottom, numbered "(n)" -- from 1 on each page when Word
+    was set to -- for a body whose pages come from a plan."""
+    out: list = []
+    pending: list[str] = []
+    count = 0
+
+    def number(text: str) -> str:
+        def one(m):
+            nonlocal count
+            if m.group(2) not in notes:
+                return m.group(1) + m.group(3)
+            count += 1
+            body, marked = _OWN_MARK_RE.subn(f"({count})", notes[m.group(2)], count=1)
+            pending.append(body if marked else f"({count}) {body}")
+            return f"({count})"
+        return _NOTE_RE.sub(one, text)
+
+    def close_page() -> None:
+        nonlocal count
+        out.extend(Para(n, "footnote text") for n in pending)
+        pending.clear()
+        if restart_each_page:
+            count = 0
+
+    for item in result:
+        if item is None:
+            close_page()
+            out.append(None)
+        else:
+            item.text = number(item.text)
+            out.append(item)
+    close_page()
+    return out
 
 
 _W_T_RE = re.compile(r"<w:t(?: [^>]*)?>([^<]*)</w:t>")
@@ -1081,12 +1131,10 @@ def is_docx(path: Path) -> bool:
     return path.suffix.lower() == ".docx"
 
 
-def read_any(path: Path, page_plan: dict | None = None) -> list[Para | None]:
+def read_any(path: Path, page_plan: dict | None = None, body_only: bool = False) -> list[Para | None]:
     if is_docx(path):
-        if page_plan:
-            raise DocError("pages from a printed PDF are supported for .doc files only")
-        return read_docx(path)
-    return read_doc(path, page_plan)
+        return read_docx(path, page_plan, body_only)
+    return read_doc(path, page_plan, body_only)
 
 
 # ── Recover printed page numbers + headings from the book's own table of contents ──
