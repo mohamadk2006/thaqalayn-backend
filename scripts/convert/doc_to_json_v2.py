@@ -281,6 +281,11 @@ def _story_text(wd: bytes, pieces, length: int) -> str:
     return "".join(out)
 
 
+# Word's built-in style numbers (sti) of the styles the converter recognises by name.
+_BUILT_IN_STYLES = {**{n: f"heading {n}" for n in range(1, 10)}, **{18 + n: f"TOC {n}" for n in range(1, 10)},
+                    62: "Title"}
+
+
 def _style_names(wd: bytes, tbl: bytes) -> list[str]:
     fc, lcb = struct.unpack_from("<II", wd, 0x00A2)
     if not lcb:
@@ -298,7 +303,11 @@ def _style_names(wd: bytes, tbl: bytes) -> list[str]:
             continue
         std = data[pos:pos + cb_std]
         cch = struct.unpack_from("<H", std, cb_base)[0]
-        names.append(std[cb_base + 2:cb_base + 2 + cch * 2].decode("utf-16le", "replace"))
+        # A built-in style is stored under the language of the Word that made the file
+        # ("عنوان 1", "جدول محتويات 1"); its built-in number says which it is.
+        sti = struct.unpack_from("<H", std, 0)[0] & 0x0FFF
+        names.append(_BUILT_IN_STYLES.get(sti)
+                     or std[cb_base + 2:cb_base + 2 + cch * 2].decode("utf-16le", "replace"))
         pos += cb_std + (cb_std & 1)
     return names
 
