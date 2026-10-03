@@ -686,6 +686,37 @@ class TestWordLayout:
         assert sum(len(pg) for pg in out[9:13]) == len(toc)
 
 
+class TestDocFootnotes:
+    """.doc footnotes are a story of their own after the text; their reading is checked on
+    real books, and the placing of the notes on the page here."""
+
+    def test_notes_go_to_the_bottom_of_the_page_that_cites_them(self):
+        from workbench.conversion import converter
+        conv = converter()
+        mark = "\ue003"
+        own = "\ue002"
+        page = [conv.Para(f"نصّ أول{mark} ونصّ{mark}", "Normal"), None,
+                conv.Para(f"ثمّ ({mark}) وبعد){mark}", "Normal")]
+        out = conv._attach_doc_notes(page, [f"{own} المصدر الأول", f"{own} الثاني", "الثالث", "رابع"], True)
+        assert [(p.text, p.style) if p else None for p in out] == [
+            ("نصّ أول(1) ونصّ(2)", "Normal"),
+            ("(1) المصدر الأول", "footnote text"),
+            ("(2) الثاني", "footnote text"),
+            None,
+            ("ثمّ (1) وبعد)(2)", "Normal"),
+            ("(1) الثالث", "footnote text"),
+            ("(2) رابع", "footnote text"),
+        ]
+
+    def test_numbers_run_on_when_notes_do_not_restart_each_page(self):
+        from workbench.conversion import converter
+        conv = converter()
+        mark = "\ue003"
+        out = conv._attach_doc_notes([conv.Para(f"أ{mark}", "Normal"), None, conv.Para(f"ب{mark}", "Normal")],
+                                     ["الأولى", "الثانية"], False)
+        assert [p.text for p in out if p] == ["أ(1)", "(1) الأولى", "ب(2)", "(2) الثانية"]
+
+
 class TestFileType:
     def test_a_docx_named_doc_is_read_as_a_docx(self, tmp_path):
         from workbench.conversion import converter

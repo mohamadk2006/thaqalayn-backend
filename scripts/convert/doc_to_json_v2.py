@@ -390,6 +390,82 @@ def _table_paras(part: str, style: str, cell_styles: list[str]) -> list[Para]:
     return out
 
 
+_DOC_NOTE = "\ue003"  # a .doc footnote reference's place in the text until its number is known
+_DOC_NOTE_RE = re.compile(r"\(\ue003\)|\ue003")
+
+
+def _doc_footnotes(wd: bytes, tbl: bytes, story: str, ccp_text: int) -> tuple[list[int], list[str]]:
+    """(CPs of the footnote references in the main text, each footnote's text). The notes
+    are a story of their own after the main text: PlcffndRef says where each is cited,
+    PlcffndTxt where each one's text starts in that story."""
+    fc_ref, lcb_ref, fc_txt, lcb_txt = struct.unpack_from("<IIII", wd, 0x00AA)
+    if not lcb_ref or not lcb_txt:
+        return [], []
+    n = min((lcb_ref - 4) // 6, lcb_txt // 4 - 2)
+    if n <= 0:
+        return [], []
+    refs = struct.unpack_from("<%dI" % n, tbl, fc_ref)
+    starts = struct.unpack_from("<%dI" % (n + 1), tbl, fc_txt)
+    texts = []
+    for i in range(n):
+        chunk = story[ccp_text + starts[i]:ccp_text + starts[i + 1]]
+        # the note's own number is its first character; paragraph ends inside it are spaces
+        chunk = chunk.replace("\x02", _OWN_MARK, 1).replace("\r", " ")
+        texts.append(re.sub(r"[ \u00a0]+", " ", _clean_text(chunk)).strip())
+    return list(refs), texts
+
+
+def _footnotes_restart_each_page_doc(wd: bytes, tbl: bytes) -> bool:
+    """DOP: how the document numbers its footnotes (2 = restarting on each page)."""
+    fc, lcb = struct.unpack_from("<II", wd, 0x0192)
+    if lcb < 4:
+        return False
+    return struct.unpack_from("<H", tbl, fc + 2)[0] & 3 == 2
+
+
+def _attach_doc_notes(result: list, texts: list[str], restart_each_page: bool) -> list:
+    """Each cited note goes at the bottom of the page that cites it, numbered "(n)" -- from 1
+    on each page when Word was set to -- the mark in the text standing as "(n)" too."""
+    out: list = []
+    pending: list[str] = []
+    cited = 0  # references met so far, in text order: the next one is texts[cited]
+    count = 0
+
+    def number(text: str) -> str:
+        nonlocal cited, count
+
+        def one(m):
+            nonlocal cited, count
+            if cited >= len(texts):
+                return ""
+            body = texts[cited]
+            cited += 1
+            count += 1
+            body, marked = _OWN_MARK_RE.subn(f"({count})", body, count=1)
+            pending.append(body if marked else f"({count}) {body}")
+            return f"({count})"
+        return _DOC_NOTE_RE.sub(one, text)
+
+    def close_page() -> None:
+        nonlocal count
+        out.extend(Para(n, "footnote text") for n in pending)
+        pending.clear()
+        if restart_each_page:
+            count = 0
+
+    for item in result:
+        if item is None:
+            close_page()
+            out.append(None)
+        elif _DOC_NOTE in item.text:
+            item.text = number(item.text)
+            out.append(item)
+        else:
+            out.append(item)
+    close_page()
+    return out
+
+
 def read_doc(path: Path) -> list[Para | None]:
     """Paragraphs of the main story in order, with `None` marking each manual page break."""
     try:
@@ -404,9 +480,9 @@ def read_doc(path: Path) -> list[Para | None]:
     flags = struct.unpack_from("<H", wd, 0x0A)[0]
     tbl = ole.openstream("1Table" if flags & 0x0200 else "0Table").read()
 
-    ccp_text = struct.unpack_from("<I", wd, 0x4C)[0]
+    ccp_text, ccp_ftn = struct.unpack_from("<II", wd, 0x4C)
     pieces = _pieces(wd, tbl)
-    raw = _story_text(wd, pieces, ccp_text)
+    raw = _story_text(wd, pieces, ccp_text + ccp_ftn)  # the main text, then the footnotes' story
     # A mark of a section that goes on on the same page still ends its paragraph.
     inline = [cp for cp in _inline_section_marks(wd, tbl) if cp < len(raw) and raw[cp] == "\x0c"]
     if inline:
@@ -447,6 +523,15 @@ def read_doc(path: Path) -> list[Para | None]:
                     chars[cp] = _HONORIFIC_MARK[ch]
         raw = "".join(chars)
 
+    note_cps, note_texts = _doc_footnotes(wd, tbl, raw, ccp_text)
+    if note_cps:
+        chars = list(raw)
+        for cp in note_cps:
+            if cp < ccp_text and chars[cp] == "\x02":
+                chars[cp] = _DOC_NOTE
+        raw = "".join(chars)
+    raw = raw[:ccp_text]
+
     result: list[Para | None] = []
     start = 0
     for m in re.finditer("\r", raw):
@@ -475,6 +560,8 @@ def read_doc(path: Path) -> list[Para | None]:
     tail = _clean_text(raw[start:]).strip()
     if tail:
         result.append(Para(tail, ""))
+    if note_texts:
+        result = _attach_doc_notes(result, note_texts, _footnotes_restart_each_page_doc(wd, tbl))
     return _finish(result)
 
 
