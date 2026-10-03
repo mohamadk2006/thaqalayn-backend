@@ -172,6 +172,76 @@ class Para:
     heading: bool = False
 
 
+# ── pages from a printed PDF ────────────────────────────────────────────────────
+# A page plan (made by pdf_pages.py from the book's printed PDF) says where each printed
+# page begins in the book's text, so the pages are the print's whatever Word's layout is.
+
+_MARKS_RE = re.compile("[\u064b-\u065f\u0670\u06d6-\u06ed\u0640\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+_FOLD_TABLE = {ord(a): b for a, b in {
+    "أ": "ا", "إ": "ا", "آ": "ا", "ٱ": "ا", "ى": "ي", "ة": "ه", "ک": "ك", "ی": "ي", "ھ": "ه", "ۀ": "ه",
+    "گ": "ك", "پ": "ب", "چ": "ج", "ژ": "ز",
+    **{a: str(i) for i, a in enumerate("٠١٢٣٤٥٦٧٨٩")}, **{a: str(i) for i, a in enumerate("۰۱۲۳۴۵۶۷۸۹")},
+}.items()}
+_TOKEN_RE = re.compile("[\u0621-\u064a0-9]+")
+
+
+def unit_token(chunk: str) -> str:
+    """A word of the text as the page plan compares it: letters folded the way search
+    folds them, marks and punctuation gone (empty for a chunk with no letters)."""
+    import unicodedata
+
+    text = _MARKS_RE.sub("", unicodedata.normalize("NFKC", chunk)).translate(_FOLD_TABLE)
+    return "".join(_TOKEN_RE.findall(text))
+
+
+def body_units(paras: list[Para]) -> list[tuple[int, int, int, str]]:
+    """(paragraph, chunk, character offset, token) for every word of the body text that has
+    letters; chunk counts the paragraph's space-separated pieces, letters or not."""
+    out = []
+    for i, p in enumerate(paras):
+        for c, m in enumerate(re.finditer(r"\S+", p.text)):
+            token = unit_token(m.group(0))
+            if token:
+                out.append((i, c, m.start(), token))
+    return out
+
+
+def apply_page_plan(result: list[Para | None], plan: dict) -> list[Para | None]:
+    """The body paragraphs with a page boundary (None) at every start the plan gives, a
+    paragraph cut in two where a printed page begins inside it; the file's own breaks go."""
+    from dataclasses import replace
+
+    paras = [x for x in result if x is not None]
+    units = body_units(paras)
+    breaks: collections.Counter = collections.Counter()
+    for page in plan["pages"][1:]:
+        i, c = page["para"], page["chunk"]
+        words = page["words"].split()
+        here = [u[3] for u in units if (u[0], u[1]) >= (i, c)][:len(words)]
+        if i >= len(paras) or here[:3] != words[:3]:
+            raise DocError("the page plan does not match this file (regenerate it with pdf_pages.py)")
+        breaks[(i, c)] += 1
+    out: list[Para | None] = []
+    for i, p in enumerate(paras):
+        cuts = sorted(c for (pi, c) in breaks if pi == i)
+        if not cuts:
+            out.append(p)
+            continue
+        starts = [m.start() for m in re.finditer(r"\S+", p.text)]
+        prev = 0
+        for c in cuts:
+            at = starts[c]
+            part = p.text[prev:at].strip()
+            if part:
+                out.append(replace(p, text=part))
+            out.extend([None] * breaks[(i, c)])
+            prev = at
+        rest = p.text[prev:].strip()
+        if rest:
+            out.append(replace(p, text=rest))
+    return out
+
+
 # ── .doc binary parsing ───────────────────────────────────────────────────────
 
 
@@ -466,8 +536,10 @@ def _attach_doc_notes(result: list, texts: list[str], restart_each_page: bool) -
     return out
 
 
-def read_doc(path: Path) -> list[Para | None]:
-    """Paragraphs of the main story in order, with `None` marking each manual page break."""
+def read_doc(path: Path, page_plan: dict | None = None, body_only: bool = False) -> list[Para | None]:
+    """Paragraphs of the main story in order, with `None` marking each manual page break --
+    or each printed page's start when a page plan (see apply_page_plan) is given. body_only
+    returns the body paragraphs alone, before the footnotes are placed (to make a plan)."""
     try:
         import olefile
     except ImportError as exc:
@@ -560,6 +632,10 @@ def read_doc(path: Path) -> list[Para | None]:
     tail = _clean_text(raw[start:]).strip()
     if tail:
         result.append(Para(tail, ""))
+    if body_only:
+        return _finish([x for x in result if x is not None])
+    if page_plan:
+        result = apply_page_plan(_finish(result), page_plan)
     if note_texts:
         result = _attach_doc_notes(result, note_texts, _footnotes_restart_each_page_doc(wd, tbl))
     return _finish(result)
@@ -996,8 +1072,12 @@ def is_docx(path: Path) -> bool:
     return path.suffix.lower() == ".docx"
 
 
-def read_any(path: Path) -> list[Para | None]:
-    return read_docx(path) if is_docx(path) else read_doc(path)
+def read_any(path: Path, page_plan: dict | None = None) -> list[Para | None]:
+    if is_docx(path):
+        if page_plan:
+            raise DocError("pages from a printed PDF are supported for .doc files only")
+        return read_docx(path)
+    return read_doc(path, page_plan)
 
 
 # ── Recover printed page numbers + headings from the book's own table of contents ──
@@ -1507,7 +1587,7 @@ def _verse_lines(p: Para) -> list[str]:
     return [" ".join(lines)] if lines else []
 
 
-def build_abx(pages, title, author, front_pages, labels, heading_re) -> str:
+def build_abx(pages, title, author, front_pages, labels, heading_re, numbered_front=True) -> str:
     lines = [
         "checksum-not-applicable",
         f"< اسم الكتاب > {_strip_angles(title).strip()} < / اسم الكتاب >",
@@ -1515,7 +1595,10 @@ def build_abx(pages, title, author, front_pages, labels, heading_re) -> str:
         "< الكتاب >",
     ]
     for k, paras in enumerate(pages, start=1):
-        label = f"تعريف الكتاب {k}" if k <= front_pages else str(labels[k - 1])
+        # With the print's own numbers the first page of the text can be numbered like the
+        # last front page ("تعريف الكتاب 6" and 6), and equal numbers are one page.
+        front = f"تعريف الكتاب {k}" if numbered_front else "تعريف الكتاب"
+        label = front if k <= front_pages else str(labels[k - 1])
         lines.append(f"< صفحة > {label} < / صفحة >")
         in_footnotes = False
         for p in paras:
@@ -1591,9 +1674,13 @@ def _split_toc_pages(pages: list[list[Para]]) -> list[list[Para]]:
 
 
 def convert_doc(path, title, author, front_pages, first_printed, heading_re, book_id="900001",
-                use_toc=True, extra_metadata=None, blank_pages=()):
-    items = read_any(path)
-    pages = _split_toc_pages(_split_pages(items))
+                use_toc=True, extra_metadata=None, blank_pages=(), page_plan=None):
+    items = read_any(path, page_plan)
+    if page_plan:  # the print's own pages: nothing to infer from the contents or the file's layout
+        pages = _split_pages(items)
+        use_toc, blank_pages = False, ()
+    else:
+        pages = _split_toc_pages(_split_pages(items))
     # A blank page the source file cannot show (Word pushes a break paragraph onto a fresh
     # page when the page before it is full, leaving nothing in the file) -- stated by the
     # caller, given as its final page number. Held as a picture-style paragraph so it is a
@@ -1614,9 +1701,12 @@ def convert_doc(path, title, author, front_pages, first_printed, heading_re, boo
             anchors = [(shift(seq), num) for seq, num in anchors]
             pages = [pg for k, pg in enumerate(pages, 1) if k not in drop]
         labels = page_labels(len(pages), anchors)
+    elif page_plan:
+        labels = [pg.get("label") or first_printed + (k - front_pages - 1)
+                  for k, pg in enumerate(page_plan["pages"][:len(pages)], 1)]
     else:
         labels = [first_printed + (k - front_pages - 1) for k in range(1, len(pages) + 1)]
-    abx = build_abx(pages, title, author, front_pages, labels, heading_re)
+    abx = build_abx(pages, title, author, front_pages, labels, heading_re, numbered_front=not page_plan)
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / f"{book_id}.abx"
         src.write_text(abx, encoding="utf-8")

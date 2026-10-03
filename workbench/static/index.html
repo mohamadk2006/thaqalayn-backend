@@ -156,6 +156,10 @@
       <div><input type="file" name="pdf" accept=".pdf,application/pdf">
         <div class="hint">أفضل مقارنة: افتح ملف Word في برنامج Word واحفظه PDF (File ← Save As ← PDF) — تطابق صفحاته Word تماماً.
           يمكن أيضاً رفع PDF الكتاب المطبوع. بدون PDF تُعرض صفحات Word بعد تحويلها تلقائياً (قد تختلف قليلاً عن Word).</div></div>
+      <label>ملف pages.json <span class="hint">(اختياري)</span></label>
+      <div><input type="file" name="pages" accept=".json,application/json">
+        <div class="hint">صفحات الكتاب المطبوع بدقة: يُنشأ من ملف Word وPDF الكتاب بالأداة <code>scripts/convert/pdf_pages.py</code>
+          (لملفات .doc فقط). عند رفعه تؤخذ الصفحات وأرقامها من المطبوع لا من Word.</div></div>
       <span></span>
       <div><button class="primary" type="submit">رفع وتحويل</button>
         <span class="hint">يُقرأ العنوان والمؤلف والناشر من readme.txt إن وُجد، ويمكن تعديلها بعد التحويل.</span></div>
@@ -374,7 +378,7 @@ $("showPublished").addEventListener("change", showList);
 $("uploadForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = new FormData(e.target);
-  for (const k of ["readme", "pdf"]) if (!form.get(k) || !form.get(k).name) form.delete(k);
+  for (const k of ["readme", "pdf", "pages"]) if (!form.get(k) || !form.get(k).name) form.delete(k);
   busy("جاري رفع الملف وتحويله… قد يستغرق دقيقة للكتب الكبيرة");
   try {
     const meta = await api("POST", "/api/drafts", form, true);

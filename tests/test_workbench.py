@@ -717,6 +717,67 @@ class TestDocFootnotes:
         assert [p.text for p in out if p] == ["أ(1)", "(1) الأولى", "ب(2)", "(2) الثانية"]
 
 
+class TestPagePlan:
+    """Pages from the book's printed PDF: where each printed page begins in the text."""
+
+    def paras(self, *texts):
+        from workbench.conversion import converter
+        return [converter().Para(t, "Normal") for t in texts]
+
+    def test_a_token_is_the_word_as_search_folds_it(self):
+        from workbench.conversion import converter
+        conv = converter()
+        assert conv.unit_token("الأُولى،") == "الاولي"
+        assert conv.unit_token("(١٢)") == "12"
+        assert conv.unit_token("* * *") == ""
+
+    def test_pages_begin_where_the_plan_says_even_inside_a_paragraph(self):
+        from workbench.conversion import converter
+        conv = converter()
+        paras = self.paras("الحمد لله ربّ العالمين", "ثمّ قال الإمام كلمته الأخيرة في الناس")
+        plan = {"pages": [
+            {"para": 0, "chunk": 0, "words": "الحمد لله رب العالمين"},
+            {"para": 1, "chunk": 3, "words": "كلمته الاخيره في الناس"},
+        ]}
+        out = conv.apply_page_plan(paras, plan)
+        assert [p.text if p else None for p in out] == [
+            "الحمد لله ربّ العالمين", "ثمّ قال الإمام", None, "كلمته الأخيرة في الناس"]
+
+    def test_pages_with_nothing_of_their_own_are_kept(self):
+        from workbench.conversion import converter
+        conv = converter()
+        paras = self.paras("كلام الكتاب الأول هنا الآن")
+        plan = {"pages": [{"para": 0, "chunk": 0, "words": "كلام الكتاب الاول هنا"},
+                          {"para": 0, "chunk": 0, "words": "كلام الكتاب الاول هنا"},
+                          {"para": 0, "chunk": 2, "words": "الاول هنا الان"}]}
+        out = conv.apply_page_plan(paras, plan)
+        assert [p.text if p else None for p in out] == [None, "كلام الكتاب", None, "الأول هنا الآن"]
+
+    def test_a_plan_of_another_file_is_refused(self):
+        import pytest
+        from workbench.conversion import converter
+        conv = converter()
+        with pytest.raises(conv.DocError):
+            conv.apply_page_plan(self.paras("نصّ آخر تماماً هنا"),
+                                 {"pages": [{"para": 0, "chunk": 0, "words": "ا ب ج"},
+                                            {"para": 0, "chunk": 1, "words": "ا ب ج"}]})
+
+    def test_the_header_is_the_row_with_the_page_number_and_footnotes_are_left_out(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "convert"))
+        import pdf_pages
+        lines = [(0.02, 0.1, 0.8, "١٣ • المولى الغريب"), (0.06, 0.1, 0.8, "وانكشفت الملحمة عنهم"),
+                 (0.30, 0.5, 0.4, "طربت وما هاج"), (0.30, 0.1, 0.3, "ولا لي مقام"),
+                 (0.80, 0.1, 0.8, "(١) كشف الغمة: ٣١")]
+        header, body = pdf_pages.split_page(lines)
+        assert pdf_pages.printed_number(header) == 13
+        assert body == ["وانكشفت الملحمة عنهم", "طربت وما هاج ولا لي مقام"]
+        # a chapter's first page has no header: its first row is text
+        header, body = pdf_pages.split_page([(0.05, 0.1, 0.8, "الباب الأول")])
+        assert header == "" and body == ["الباب الأول"]
+
+
 class TestFileType:
     def test_a_docx_named_doc_is_read_as_a_docx(self, tmp_path):
         from workbench.conversion import converter

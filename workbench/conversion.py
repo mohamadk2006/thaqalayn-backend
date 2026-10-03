@@ -66,6 +66,10 @@ def clean_options(raw: dict | None) -> dict:
     return opts
 
 
+# Made by scripts/convert/pdf_pages.py from the book's printed PDF; uploaded beside the Word file.
+PAGE_PLAN = "pages.json"
+
+
 def convert(folder: Path, meta: dict, keep: dict | None = None) -> tuple[dict, dict, list[dict]]:
     """Convert the draft's source with meta["options"]. `keep` is the previous book (if
     any): its title, author and metadata survive a re-conversion, since those are the
@@ -86,10 +90,14 @@ def convert(folder: Path, meta: dict, keep: dict | None = None) -> tuple[dict, d
     else:
         heading_re = conv.HEADING_STYLE_RE
 
+    plan_file = folder / PAGE_PLAN
+    page_plan = json.loads(plan_file.read_text(encoding="utf-8")) if plan_file.exists() else None
+    if page_plan:  # the print's pages: where the front matter ends is the plan's to say
+        opts["frontPages"] = page_plan.get("frontPages", opts["frontPages"])
     content, _items = conv.convert_doc(
         folder / meta["sourceFile"], title, author or "", opts["frontPages"], opts["firstPrinted"],
         heading_re, "900001", use_toc=opts["useToc"], extra_metadata=extra,
-        blank_pages=opts["blankPages"],
+        blank_pages=opts["blankPages"], page_plan=page_plan,
     )
     anchors = content.pop("_anchors")
     recovered = content.pop("_recovered")
@@ -105,11 +113,13 @@ def convert(folder: Path, meta: dict, keep: dict | None = None) -> tuple[dict, d
         "printedFirst": main_pages[0]["pageNumber"] if main_pages else None,
         "printedLast": main_pages[-1]["pageNumber"] if main_pages else None,
         "tocEntries": len(content["toc"]),
-        "pageNumbersFrom": "toc" if anchors else "sequential",
+        "pageNumbersFrom": "printed-pdf" if page_plan else "toc" if anchors else "sequential",
         "anchors": len(anchors),
         "recovered": [{"page": n, "title": t, "how": how} for n, t, how in recovered],
     }
     report.update(source_report(conv, folder / meta["sourceFile"], content))
+    if page_plan:
+        report["pagesFrom"] = "printed-pdf"
     return content, report, issues_of(content) + report["sourceIssues"]
 
 

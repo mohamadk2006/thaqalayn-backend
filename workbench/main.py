@@ -167,6 +167,22 @@ def me(user: str = Depends(current_user)) -> dict:
     return {"user": user, "renderer": conversion.renderer_available()}
 
 
+async def _read_page_plan(upload: UploadFile | None) -> bytes | None:
+    """pages.json from scripts/convert/pdf_pages.py: where the printed PDF's pages begin."""
+    if upload is None or not upload.filename:
+        return None
+    data = await upload.read()
+    try:
+        plan = json.loads(data)
+        ok = plan["version"] == 1 and all("para" in pg and "chunk" in pg and "words" in pg
+                                          for pg in plan["pages"]) and plan["pages"]
+    except (ValueError, KeyError, TypeError):
+        ok = False
+    if not ok:
+        raise HTTPException(400, "ملف الصفحات (pages.json) غير صالح: أنشئه بالأداة pdf_pages.py")
+    return data
+
+
 @app.get("/api/drafts")
 def list_drafts(_: str = Depends(current_user)) -> list[dict]:
     return drafts.list_all(root())
@@ -178,6 +194,7 @@ async def create_draft(
     file: UploadFile = File(...),
     readme: UploadFile | None = File(None),
     pdf: UploadFile | None = File(None),
+    pages: UploadFile | None = File(None),
     user: str = Depends(current_user),
 ) -> dict:
     name = Path(file.filename or "").name
@@ -187,8 +204,11 @@ async def create_draft(
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "الملف أكبر من المسموح (150 ميغابايت)")
     readme_bytes = await readme.read() if readme is not None and readme.filename else None
+    plan = await _read_page_plan(pages)
     meta = drafts.create(root(), source_name=name, source_bytes=data, created_by=user,
                          readme_bytes=readme_bytes)
+    if plan is not None:
+        (drafts.draft_dir(root(), meta["id"]) / conversion.PAGE_PLAN).write_bytes(plan)
     meta = await asyncio.to_thread(_run_conversion, meta["id"], user, None)
     if pdf is not None and pdf.filename:
         try:
