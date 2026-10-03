@@ -99,6 +99,25 @@ _HONORIFIC_MARK = {ch: chr(0xE100 + i) for i, ch in enumerate(HONORIFICS)}
 _HONORIFIC_TEXT = {mark: HONORIFICS[ch] for ch, mark in _HONORIFIC_MARK.items()}
 _HONORIFIC_RE = re.compile("[" + "".join(_HONORIFIC_MARK.values()) + "]")
 
+# Some series type the honorific as a code between question marks (Arabic "؟"), which a
+# font of theirs draws as the calligraphic symbol: "الحسين؟ع؟". Only these exact codes are
+# spelt out; any other "؟...؟" is real text, and codes whose meaning is a guess (؟س؟ ؟ق؟
+# ؟صل؟) stay as they are.
+HONORIFIC_CODES = {
+    "ع": "عليه السلام",
+    "عهما": "عليهما السلام",
+    "عهم": "عليهم السلام",
+    "عها": "عليها السلام",
+    "ص": "صلى الله عليه وآله",
+    "رح": "رحمه الله",
+    "ره": "رحمه الله",
+    "رض": "رضي الله عنه",
+    "رضو": "رضوان الله عليه",
+    "رضهم": "رضوان الله عليهم",
+    "عج": "عجل الله فرجه الشريف",
+}
+_HONORIFIC_CODE_RE = re.compile("\u061f(" + "|".join(sorted(HONORIFIC_CODES, key=len, reverse=True)) + ")\u061f")
+
 
 def is_honorific_style(style: str) -> bool:
     return "alaem" in style.lower()
@@ -109,7 +128,19 @@ def _honorific_marks(text: str) -> str:
     return "".join(_HONORIFIC_MARK.get(ch, ch) for ch in text)
 
 
+def _spell_honorific_codes(text: str) -> str:
+    def one(m):
+        before = text[m.start() - 1] if m.start() else ""
+        after = text[m.end()] if m.end() < len(text) else ""
+        lead = " " if before and not before.isspace() and before not in "(«[\ufd3f" else ""
+        trail = " " if after and (after.isalnum() or after in "(«\ufd3f") else ""
+        return lead + HONORIFIC_CODES[m.group(1)] + trail
+    return _HONORIFIC_CODE_RE.sub(one, text)
+
+
 def _spell_honorifics(text: str) -> str:
+    text = _spell_honorific_codes(text)
+
     def one(m):
         phrase = _HONORIFIC_TEXT[m.group(0)]
         if phrase in ("\ufd3f", "\ufd3e"):
@@ -715,7 +746,7 @@ def text_coverage(path: Path, content: dict) -> tuple[int, int]:
     -- shows up as a difference instead of silently disappearing."""
     import zipfile
 
-    if path.suffix.lower() == ".docx":
+    if is_docx(path):
         z = zipfile.ZipFile(path)
         xml = _DROPPED_XML_RE.sub("", z.read("word/document.xml").decode("utf8", "replace"))
         source = _letters("".join(_W_T_RE.findall(xml.split("<w:body>", 1)[-1])))
@@ -866,8 +897,20 @@ class _DocxNumbering:
         return re.sub(r"%(\d)", render, text).strip()
 
 
+def is_docx(path: Path) -> bool:
+    """By the file's own first bytes, not its name: a volume of one real series is a .docx
+    saved as "x.doc"."""
+    with open(path, "rb") as f:
+        head = f.read(4)
+    if head == b"PK\x03\x04":
+        return True
+    if head == b"\xd0\xcf\x11\xe0":
+        return False
+    return path.suffix.lower() == ".docx"
+
+
 def read_any(path: Path) -> list[Para | None]:
-    return read_docx(path) if path.suffix.lower() == ".docx" else read_doc(path)
+    return read_docx(path) if is_docx(path) else read_doc(path)
 
 
 # ── Recover printed page numbers + headings from the book's own table of contents ──

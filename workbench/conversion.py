@@ -129,7 +129,7 @@ def source_report(conv, source: Path, content: dict) -> dict:
     Kept in the report, since saving an edited book re-checks the book, not the file."""
     issues: list[dict] = []
     out: dict = {"pagesFrom": "page-breaks"}
-    if source.suffix.lower() == ".docx":
+    if conv.is_docx(source):
         layout = conv.docx_layout(source)
         out["pagesFrom"] = layout["pagesFrom"]
         if layout["unlaidOut"] > MAX_UNLAID_OUT:
@@ -296,7 +296,7 @@ def render_pdf(folder: Path, source_file: str, timeout: int = 600) -> int:
         tmp_dir = Path(tmp)
         profile = tmp_dir / "profile"
         source = folder / source_file
-        if source.suffix.lower() == ".doc":
+        if not converter().is_docx(source):
             _soffice(["--convert-to", "docx", "--outdir", str(tmp_dir), str(source)], profile, timeout)
             source = tmp_dir / (source.stem + ".docx")
             if not source.exists():

@@ -686,6 +686,18 @@ class TestWordLayout:
         assert sum(len(pg) for pg in out[9:13]) == len(toc)
 
 
+class TestFileType:
+    def test_a_docx_named_doc_is_read_as_a_docx(self, tmp_path):
+        from workbench.conversion import converter
+        d = docx.Document()
+        d.add_paragraph("نصّ الكتاب")
+        d.save(tmp_path / "volume.doc")
+        conv = converter()
+        assert conv.is_docx(tmp_path / "volume.doc")
+        assert [p.text for p in conv.read_any(tmp_path / "volume.doc") if p] == ["نصّ الكتاب"]
+        assert conv.docx_layout(tmp_path / "volume.doc")["pagesFrom"] == "page-breaks"
+
+
 class TestHonorifics:
     """rafed.net books set honorifics as digits in a symbol font, through a character style
     (rfdAlaem); read as text they were "أمير المؤمنين 7"."""
@@ -708,6 +720,16 @@ class TestHonorifics:
         texts = [x.text for x in converter().read_docx(tmp_path / "a.docx") if x]
         assert texts == ["قال أمير المؤمنين عليه السلام وقال رسول الله صلى الله عليه وآله: "
                          "﴿إنّا أعطيناك الكوثر﴾ وروى الشيخ المفيد 7 أيضاً"]
+
+    def test_codes_between_question_marks_are_spelt_out(self, tmp_path):
+        from workbench.conversion import converter
+        d = docx.Document()
+        d.add_paragraph("قال الإمام الحسين\u061fع\u061f لمسلم بن عقيل\u061fعهما\u061f، ثمّ ذكر الشهيد\u061fرح\u061f"
+                        " وقال\u061fفقال\u061f ثمّ \u061fع\u061fوآله")
+        d.save(tmp_path / "a.docx")
+        [p] = converter().read_docx(tmp_path / "a.docx")
+        assert p.text == ("قال الإمام الحسين عليه السلام لمسلم بن عقيل عليهما السلام، ثمّ ذكر الشهيد رحمه الله"
+                          " وقال\u061fفقال\u061f ثمّ عليه السلام وآله")
 
     def test_text_is_one_unicode_form(self, tmp_path):
         import unicodedata
