@@ -43,27 +43,28 @@ def source(title: str, author: str, repeats: int) -> str:
 
 @pytest.fixture
 async def client(tmp_path: Path):
-    search_service._order_cache.clear()
+    search_service._order_cache = None
     books_root = tmp_path / "books"
     async with get_sessionmaker()() as session:
         for book_id, title, author, year, repeats in BOOKS:
             (tmp_path / f"{book_id}.abx").write_text(source(title, author, repeats), encoding="utf-8")
             assert await import_books.import_one(
                 session, tmp_path / f"{book_id}.abx", "test", books_root, False) == "ok"
-            await session.execute(text("UPDATE authors SET death_year_hijri = :y, death_label = :l "
-                                       "WHERE name_norm = :n"),
-                                  {"y": year, "l": "معاصر" if year is None else f"{year} هـ",
-                                   "n": normalize(author)})
+            label = "معاصر" if year is None else f"{year} هـ"
+            await session.execute(
+                text("UPDATE authors SET death_year_hijri = :y, death_label = :l WHERE name_norm = :n"),
+                {"y": year, "l": label, "n": normalize(author)})
         await session.commit()
 
-    from app.config import Settings, get_settings
+    from app.config import get_settings
 
     app = create_app()
-    app.dependency_overrides[get_settings] = lambda: get_settings().model_copy(update={"books_root": books_root})
+    app.dependency_overrides[get_settings] = (
+        lambda: get_settings().model_copy(update={"books_root": books_root}))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
 
-    search_service._order_cache.clear()
+    search_service._order_cache = None
     async with get_sessionmaker()() as session:
         for book_id, title, author, *_ in BOOKS:
             await session.execute(text("DELETE FROM books WHERE id = :i"), {"i": book_id})
@@ -76,39 +77,22 @@ async def hits(client, **params):
     r = await client.get("/api/search", params={"q": PHRASE, "limit": 50, **params})
     assert r.status_code == 200, r.text
     body = r.json()
-    return [(h["workTitle"].split()[0], h["pageSequence"]) for h in body["items"]], body["total"]
+    found = [(h["workTitle"].split()[0], h["pageSequence"]) for h in body["items"]]
+    return found, body["total"]
 
 
-async def test_oldest_author_first_then_work_and_page(client):
-    found, total = await hits(client, sort="oldest")
-    # 200, 400, then the author with no death year last; pages in book order
-    assert found == [("ألف", 1), ("ألف", 2), ("باء", 1), ("باء", 2), ("جيم", 1), ("جيم", 2)]
+async def test_oldest_author_first_then_work_volume_and_page(client):
+    found, total = await hits(client)
+    # death years 200, 400, then the author with none last; pages in book order, whatever
+    # the number of occurrences (the last book has the most)
+    expected = [("ألف", 1), ("ألف", 2), ("باء", 1), ("باء", 2), ("جيم", 1), ("جيم", 2)]
+    assert found == expected
     assert total == 6
 
 
-async def test_by_work_is_alphabetical_by_title(client):
-    found, _ = await hits(client, sort="work")
-    assert [t for t, _ in found] == ["ألف", "ألف", "باء", "باء", "جيم", "جيم"]
-
-
-async def test_default_order_is_oldest_first(client):
-    default, _ = await hits(client)
-    assert default == (await hits(client, sort="oldest"))[0]
-    assert default[0] == ("ألف", 1)
-
-
-async def test_relevance_is_by_occurrences(client):
-    found, _ = await hits(client, sort="relevance")
-    assert found[0] == ("جيم", 2)  # five occurrences on one page
-
-
-async def test_paging_through_an_ordered_search(client):
-    first, _ = await hits(client, sort="oldest", limit=4)
-    r = await client.get("/api/search", params={"q": PHRASE, "limit": 4, "page": 2, "sort": "oldest"})
+async def test_paging_keeps_the_order(client):
+    first, _ = await hits(client, limit=4)
+    r = await client.get("/api/search", params={"q": PHRASE, "limit": 4, "page": 2})
     second = [(h["workTitle"].split()[0], h["pageSequence"]) for h in r.json()["items"]]
-    assert first + second == [("ألف", 1), ("ألف", 2), ("باء", 1), ("باء", 2), ("جيم", 1), ("جيم", 2)]
-
-
-async def test_an_unknown_sort_is_refused(client):
-    r = await client.get("/api/search", params={"q": PHRASE, "sort": "newest"})
-    assert r.status_code == 422
+    expected = [("ألف", 1), ("ألف", 2), ("باء", 1), ("باء", 2), ("جيم", 1), ("جيم", 2)]
+    assert first + second == expected

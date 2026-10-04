@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,17 +27,12 @@ async def search(
         None, description="One or more author names (use when the ID isn't known)"
     ),
     work: list[int] | None = Query(None, description="One or more work IDs"),
-    sort: Literal["oldest", "work", "relevance"] = Query(
-        "oldest",
-        description="oldest (default): author's death year (hijri) ascending, then work title, "
-                    "volume and page; authors with no death year last. work: work title, then "
-                    "volume and page. relevance: most occurrences first."),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> PageEnvelope[SearchHit]:
     items, total = await search_service.search(
         session, query=q, page=page, limit=limit, books_root=settings.books_root,
         subject_ids=subject, library_ids=library, languages=language,
-        author_ids=author, author_names=authorName, work_ids=work, sort=sort,
+        author_ids=author, author_names=authorName, work_ids=work,
     )
     return PageEnvelope(page=page, limit=limit, total=total, items=items)
