@@ -5,6 +5,7 @@ database; only LibreOffice (the original-page images) is absent here, which the
 workbench must report rather than fail on."""
 
 import io
+import json
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -289,6 +290,63 @@ class TestReplacePublished:
     async def test_an_unknown_book_is_refused(self, employee, admin):
         _, r, meta = await self.publish(employee, admin, TITLE, replace=987654321)
         assert "err=" in r.headers["location"] and meta["status"] == "submitted"
+
+
+class TestPlanFromUploadedPdf:
+    """Upload a Word file with its printed PDF: the server makes the page plan itself."""
+
+    @staticmethod
+    def fake_plan(monkeypatch, fail=False):
+        def make(folder, source_file):
+            if fail:
+                raise RuntimeError("no OCR here")
+            conv = wb.conversion.converter()
+            units = conv.body_units(conv.read_any(folder / source_file, body_only=True))
+            starts = [0, len(units) // 2]
+            pages = []
+            for k, u in enumerate(starts):
+                para, chunk, _, _ = units[u]
+                pages.append({"pdfPage": k + 1, "para": para, "chunk": chunk,
+                              "words": " ".join(x[3] for x in units[u:u + 6]), "label": str(k + 1), "sure": k == 0})
+            (folder / wb.conversion.PAGE_PLAN).write_text(
+                json.dumps({"version": 1, "frontPages": 0, "pages": pages}), encoding="utf-8")
+            return {"pages": 2, "exact": 1, "unsure": [2], "toc": 0}
+        monkeypatch.setattr(wb.conversion, "make_page_plan", make)
+        monkeypatch.setattr(wb.conversion, "use_pdf", lambda folder, data: 2)
+        monkeypatch.setattr(wb.conversion, "extract_original_words", lambda folder, pages: None)
+
+    async def test_the_plan_is_made_and_the_book_converted_with_it(self, employee, monkeypatch):
+        self.fake_plan(monkeypatch)
+        r = await employee.post("/api/drafts", files={"file": ("كتاب.docx", make_docx()),
+                                                        "pdf": ("print.pdf", b"%PDF-1.4")})
+        assert r.status_code == 200, r.text
+        meta = (await employee.get(f"/api/drafts/{r.json()['id']}")).json()
+        assert meta["plan"]["status"] == "done" and (meta["plan"]["exact"], meta["plan"]["pages"]) == (1, 2)
+        assert meta["report"]["pagesFrom"] == "printed-pdf" and meta["report"]["pages"] == 2
+
+    async def test_a_failed_plan_keeps_the_word_conversion_and_can_be_retried(self, employee, monkeypatch):
+        self.fake_plan(monkeypatch, fail=True)
+        r = await employee.post("/api/drafts", files={"file": ("كتاب.docx", make_docx()),
+                                                        "pdf": ("print.pdf", b"%PDF-1.4")})
+        meta = (await employee.get(f"/api/drafts/{r.json()['id']}")).json()
+        assert meta["plan"]["status"] == "failed" and "no OCR here" in meta["plan"]["message"]
+        assert meta["report"]["pages"] == 3 and meta["report"]["pagesFrom"] != "printed-pdf"
+        assert meta["status"] == "editing"  # still editable
+        self.fake_plan(monkeypatch)
+        again = await employee.post(f"/api/drafts/{meta['id']}/plan")
+        assert again.status_code == 200
+        done = (await employee.get(f"/api/drafts/{meta['id']}")).json()
+        assert done["plan"]["status"] == "done" and done["report"]["pages"] == 2
+
+    async def test_a_plan_job_locks_editing_until_it_ends(self, employee):
+        meta = (await upload(employee)).json()
+        from workbench.main import _plan_state
+        drafts.update(wb.root(), meta["id"], plan=_plan_state("running"))
+        book = (await employee.get(f"/api/drafts/{meta['id']}/book")).json()
+        assert (await employee.put(f"/api/drafts/{meta['id']}/book", json=book)).status_code == 409
+        # a job the server lost (restart) does not lock the draft for ever
+        drafts.update(wb.root(), meta["id"], plan={"status": "running", "startedAt": "2020-01-01T00:00:00+00:00"})
+        assert (await employee.put(f"/api/drafts/{meta['id']}/book", json=book)).status_code == 200
 
 
 def test_draft_ids_cannot_escape_the_folder(tmp_path):

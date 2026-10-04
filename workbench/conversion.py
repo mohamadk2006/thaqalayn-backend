@@ -70,6 +70,24 @@ def clean_options(raw: dict | None) -> dict:
 PAGE_PLAN = "pages.json"
 
 
+def make_page_plan(folder: Path, source_file: str) -> dict:
+    """pages.json for the draft from the uploaded printed PDF (original.pdf): reads its
+    pages (text layer, or Tesseract for a scan), matches them to the Word file's text and
+    writes the plan beside it. Returns what the employee should know about it."""
+    converter()  # loaded first: the plan tool shares its module
+    scripts = str(ROOT / "scripts" / "convert")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import pdf_pages
+
+    plan = pdf_pages.make_plan(folder / source_file, folder / "original.pdf")
+    (folder / PAGE_PLAN).write_text(json.dumps(plan, ensure_ascii=False), encoding="utf-8")
+    pages = plan["pages"]
+    return {"pages": len(pages), "exact": sum(1 for pg in pages if pg["sure"]),
+            "unsure": [pg["pdfPage"] for pg in pages if not pg["sure"]][:200],
+            "toc": len(plan.get("toc", []))}
+
+
 def convert(folder: Path, meta: dict, keep: dict | None = None) -> tuple[dict, dict, list[dict]]:
     """Convert the draft's source with meta["options"]. `keep` is the previous book (if
     any): its title, author and metadata survive a re-conversion, since those are the

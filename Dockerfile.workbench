@@ -8,13 +8,14 @@
 FROM python:3.13-slim
 
 # LibreOffice Writer (headless) renders .doc/.docx to PDF; poppler cuts page images from
-# it. Arabic fonts so the rendered pages shape and break lines close to the original:
+# it. Tesseract (Arabic) reads a scanned printed PDF, to take the book's pages from it
+# (scripts/convert/pdf_pages.py). Arabic fonts so the rendered pages shape and break lines close to the original:
 # Word books here are mostly set in Traditional/Simplified Arabic or Lotus, which aren't
 # redistributable -- Amiri, Noto Naskh and the Arabeyes fonts are the closest free
 # substitutes (Debian 13 has no KACST package).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      libreoffice-writer-nogui poppler-utils \
+      libreoffice-writer-nogui poppler-utils tesseract-ocr tesseract-ocr-ara \
       fonts-noto-core fonts-hosny-amiri fonts-arabeyes fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/*
 COPY workbench/fonts.conf /etc/fonts/local.conf

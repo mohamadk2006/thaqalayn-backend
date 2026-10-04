@@ -152,11 +152,12 @@
       <input type="file" name="file" accept=".doc,.docx" required>
       <label>ملف readme.txt <span class="hint">(اختياري)</span></label>
       <input type="file" name="readme" accept=".txt">
-      <label>ملف PDF للمقارنة <span class="hint">(اختياري، موصى به)</span></label>
+      <label>ملف PDF للكتاب المطبوع <span class="hint">(اختياري، موصى به)</span></label>
       <div><input type="file" name="pdf" accept=".pdf,application/pdf">
-        <div class="hint">أفضل مقارنة: افتح ملف Word في برنامج Word واحفظه PDF (File ← Save As ← PDF) — تطابق صفحاته Word تماماً.
-          يمكن أيضاً رفع PDF الكتاب المطبوع. بدون PDF تُعرض صفحات Word بعد تحويلها تلقائياً (قد تختلف قليلاً عن Word).</div></div>
-      <label>ملف pages.json <span class="hint">(اختياري)</span></label>
+        <div class="hint">ارفع PDF الكتاب المطبوع: يقرؤه الخادم ويأخذ منه صفحات الكتاب وأرقامها وفهرسه تلقائياً،
+          ويعرضه بجانب الكتاب للمقارنة (يستغرق بضع دقائق بعد الرفع، ولا تحتاج إلى أي ملف آخر).
+          أو PDF محفوظ من Word نفسه للمقارنة فقط. بدون PDF تُعرض صفحات Word بعد تحويلها تلقائياً (قد تختلف عن المطبوع).</div></div>
+      <label>ملف pages.json <span class="hint">(اختياري، متقدم)</span></label>
       <div><input type="file" name="pages" accept=".json,application/json">
         <div class="hint">صفحات الكتاب المطبوع بدقة: يُنشأ من ملف Word وPDF الكتاب بالأداة <code>scripts/convert/pdf_pages.py</code>
           (لملفات .doc فقط). عند رفعه تؤخذ الصفحات وأرقامها من المطبوع لا من Word.</div></div>
@@ -398,7 +399,7 @@ async function openDraft(id) {
     book = draft.status === "failed" ? null : await api("GET", `/api/drafts/${id}/book`);
   } catch (e) { idle(); alert(e.message); location.hash = "#/"; return; }
   idle();
-  readOnly = !EDITABLE.has(draft.status);
+  readOnly = !EDITABLE.has(draft.status) || planBusy();
   if (book) normalizeBook(book);
   currentPage = 0;
   origOffset = Number(safeStorage.get("wb_offset_" + id) || 0);
@@ -414,6 +415,7 @@ async function openDraft(id) {
   }
   renderEditor();
   pollRender();
+  pollPlan();
 }
 
 function normalizeBook(b) {
@@ -466,6 +468,7 @@ function renderReport() {
     ${r.tocEntries !== undefined ? `<span>${r.tocEntries} عنوان في الفهرس</span>` : ""}
     ${r.pageNumbersFrom ? `<span class="hint">${r.pageNumbersFrom === "toc" ? "أرقام الصفحات من فهرس الكتاب" : "أرقام الصفحات متسلسلة (لم يُستخدم فهرس)"}</span>` : ""}
     ${r.pagesFrom === "word-layout" ? `<span class="hint" title="الملف بلا فواصل صفحات؛ الصفحات كما رتّبها Word عند آخر حفظ للملف">الصفحات من تخطيط Word المحفوظ</span>` : ""}
+    ${planText()}
     <span>${errors ? `<span class="err">${errors} خطأ</span>` : `<span style="color:var(--ok)">لا أخطاء</span>`}${warnings ? ` · <span class="warnc">${warnings} تنبيه</span>` : ""}</span>
     <a onclick="showIssues()">التفاصيل</a>
     <span class="hint">${renderText}</span>
@@ -523,6 +526,42 @@ function pdfBreakChecks() {
   return out.slice(0, 40);
 }
 $("issuesClose").onclick = () => $("issuesDialog").close();
+
+// ── pages from the printed PDF (the server reads the PDF and matches it to the Word text) ──
+
+const planBusy = () => ["running", "converting"].includes((draft.plan || {}).status);
+
+function planText() {
+  const pl = draft.plan || {};
+  if (planBusy()) return `<span class="hint">جاري اشتقاق صفحات الكتاب المطبوع من ملف PDF… (قد يستغرق بضع دقائق، والتعديل متوقف حتى ينتهي)</span>`;
+  if (pl.status === "done") {
+    const unsure = (pl.unsure || []);
+    return `<span class="hint" title="الصفحات وأرقامها من الكتاب المطبوع">الصفحات من الكتاب المطبوع: ${pl.exact} من ${pl.pages} مطابقة تماماً</span>` +
+      (unsure.length ? ` <a onclick="alert('راجع هذه الصفحات (بحسب ترقيم PDF): ' + ${JSON.stringify(unsure.join("، "))})">${unsure.length} صفحة للمراجعة</a>` : "");
+  }
+  if (pl.status === "failed") return `<span class="err" title="${escapeHtml(pl.message || "")}">تعذّر اشتقاق الصفحات من PDF</span> <a onclick="runPlan()">إعادة المحاولة</a>`;
+  if ((draft.render || {}).source === "pdf" && !readOnly && (draft.report || {}).pagesFrom !== "printed-pdf")
+    return `<a onclick="runPlan()">اشتقاق الصفحات من PDF المطبوع</a>`;
+  return "";
+}
+
+async function runPlan() {
+  if (dirty && !confirm("سيُعاد تحويل الكتاب وتُفقد تعديلات الصفحات غير المحفوظة. متابعة؟")) return;
+  try { draft = await api("POST", `/api/drafts/${draft.id}/plan`); readOnly = true; renderEditor(); pollPlan(); } catch (e) { alert(e.message); }
+}
+
+let planTimer = null;
+function pollPlan() {
+  clearInterval(planTimer);
+  if (!planBusy()) return;
+  planTimer = setInterval(async () => {
+    try {
+      const fresh = await api("GET", "/api/drafts/" + draft.id);
+      draft.plan = fresh.plan;
+      if (!planBusy()) { clearInterval(planTimer); await openDraft(draft.id); }
+    } catch {}
+  }, 4000);
+}
 
 function pollRender() {
   clearInterval(pollTimer);

@@ -4,6 +4,8 @@ print's own pages.
     uv run --with pymupdf --with pyobjc-framework-Vision --with olefile \\
         python scripts/convert/pdf_pages.py book.doc printed.pdf -o pages.json
 
+(on the server, which has no macOS OCR, the workbench makes the plan itself with Tesseract)
+
 Word's layout rarely matches a typesetter's PDF (another font, other margins), and a .doc
 does not even record Word's. The PDF does: it is the book as printed. Each PDF page's text
 is read (its text layer, or macOS's Arabic OCR for a scan), matched word by word against
@@ -39,6 +41,7 @@ FOOTNOTES_BELOW = 0.62  # a footnote can start only below this
 ROW_GAP = 0.012  # lines this close in height are one row (the two halves of a verse)
 NGRAM = 4
 WORDS_PER_START = 6
+MIN_TEXT_PAGE_WORDS = 100  # words of body text that make a page part of the text, not front matter
 
 _FOOTNOTE_START = re.compile(r"^\W{0,2}[\d٠-٩]+\s*[\)\-–ـ]|^\(\s*[\d٠-٩]")
 _NUMBERED_ENDS = re.compile(r"^\W*[\d٠-٩]{1,4}(?!\d)|(?<!\d)[\d٠-٩]{1,4}\W*$")
@@ -53,12 +56,19 @@ class PlanError(Exception):
 # ── reading the PDF ─────────────────────────────────────────────────────────────
 
 def _ocr(png: bytes) -> list[tuple[float, float, float, str]]:
+    """Lines of a page image: macOS's Arabic OCR where there is one (the better reader),
+    otherwise Tesseract (what the server has)."""
     try:
-        import Vision
-        from Foundation import NSData
-    except ImportError as exc:
-        raise PlanError("this PDF has no text layer and OCR needs macOS: "
-                        "uv run --with pyobjc-framework-Vision ...") from exc
+        import Vision  # noqa: F401
+    except ImportError:
+        return _ocr_tesseract(png)
+    return _ocr_vision(png)
+
+
+def _ocr_vision(png: bytes) -> list[tuple[float, float, float, str]]:
+    import Vision
+    from Foundation import NSData
+
     data = NSData.dataWithBytes_length_(png, len(png))
     request = Vision.VNRecognizeTextRequest.alloc().init()
     request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
@@ -73,6 +83,45 @@ def _ocr(png: bytes) -> list[tuple[float, float, float, str]]:
         box = o.boundingBox()
         lines.append((1 - (box.origin.y + box.size.height), box.origin.x, box.size.width,
                       o.topCandidates_(1)[0].string()))
+    return sorted(lines)
+
+
+def _ocr_tesseract(png: bytes) -> list[tuple[float, float, float, str]]:
+    """The same lines from Tesseract (apt: tesseract-ocr, tesseract-ocr-ara): its words,
+    grouped by the line it found them on, each line's words read right to left."""
+    import csv
+    import io
+    import shutil
+    import subprocess
+    import tempfile
+
+    if shutil.which("tesseract") is None:
+        raise PlanError("this PDF has no text layer, and no OCR is installed here "
+                        "(macOS, or tesseract-ocr with tesseract-ocr-ara)")
+    with tempfile.NamedTemporaryFile(suffix=".png") as image:
+        image.write(png)
+        image.flush()
+        done = subprocess.run(["tesseract", image.name, "-", "-l", "ara", "--psm", "4", "tsv"],
+                              capture_output=True, text=True, timeout=300)
+    if done.returncode != 0:
+        raise PlanError(f"OCR failed: {done.stderr.strip()[:200]}")
+    rows = list(csv.DictReader(io.StringIO(done.stdout), delimiter="\t", quoting=csv.QUOTE_NONE))
+    page = next((r for r in rows if r["level"] == "1"), None)
+    if page is None:
+        return []
+    width, height = int(page["width"]), int(page["height"])
+    by_line: dict[tuple, list] = {}
+    for r in rows:
+        if r["level"] == "5" and r["text"].strip():
+            by_line.setdefault((r["block_num"], r["par_num"], r["line_num"]), []).append(r)
+    lines = []
+    for words in by_line.values():
+        words.sort(key=lambda r: -int(r["left"]))
+        left = min(int(r["left"]) for r in words)
+        right = max(int(r["left"]) + int(r["width"]) for r in words)
+        top = min(int(r["top"]) for r in words)
+        lines.append((top / height, left / width, (right - left) / width,
+                      " ".join(r["text"] for r in words)))
     return sorted(lines)
 
 
@@ -291,6 +340,14 @@ def make_plan(doc: Path, pdf: Path, progress=None) -> dict:
     offsets = collections.Counter(n - k for k, n in enumerate(numbers) if n is not None)
     offset = offsets.most_common(1)[0][0] if offsets else 0
     front = next((k for k, n in enumerate(numbers) if n is not None and n - k == offset), 0)
+    # A page whose number was not read (or never printed) but holds a page of text before
+    # the first numbered one is the text, not a cover or a title page.
+    sizes = []
+    for k, first in enumerate(first_word):
+        later = next((f for f in first_word[k + 1:] if f is not None), len(ocr))
+        sizes.append(0 if first is None else later - first)
+    while front > 0 and sizes[front - 1] >= MIN_TEXT_PAGE_WORDS:
+        front -= 1
 
     plan_pages = []
     for k, w in enumerate(pos):

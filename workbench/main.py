@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import secrets
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 
@@ -80,9 +81,28 @@ def _meta_or_404(draft_id: str) -> dict:
         raise HTTPException(404, "لا توجد مسودة بهذا الرقم") from None
 
 
+PLAN_STALE_AFTER = timedelta(minutes=30)  # a job the server lost (a restart) must not lock the draft
+
+
+def _plan_running(meta: dict) -> bool:
+    plan = meta.get("plan") or {}
+    if plan.get("status") not in ("running", "converting"):
+        return False
+    try:
+        return datetime.now(timezone.utc) - datetime.fromisoformat(plan["startedAt"]) < PLAN_STALE_AFTER
+    except (KeyError, ValueError):
+        return False
+
+
+def _plan_state(status: str, **more) -> dict:
+    return {"status": status, "message": None, "startedAt": datetime.now(timezone.utc).isoformat(), **more}
+
+
 def _editable_or_409(meta: dict) -> None:
     if meta["status"] not in drafts.EDITABLE:
         raise HTTPException(409, "المسودة مُرسلة للمراجعة أو منشورة، ولا يمكن تعديلها الآن")
+    if _plan_running(meta):
+        raise HTTPException(409, "جاري اشتقاق صفحات الكتاب من ملف PDF؛ انتظر حتى ينتهي")
 
 
 def _run_conversion(draft_id: str, user: str, keep: dict | None) -> dict:
@@ -100,6 +120,29 @@ def _run_conversion(draft_id: str, user: str, keep: dict | None) -> dict:
         error=None, report=report, issues=issues, title=content["title"], author=content["author"],
         updatedBy=user, updatedAt=drafts.now(),
     )
+
+
+def _plan_job(draft_id: str, user: str) -> None:
+    """The printed PDF's pages: made into a page plan, then the book is converted again with
+    it. The employee cannot edit meanwhile (a conversion replaces the pages)."""
+    folder = drafts.draft_dir(root(), draft_id)
+    meta = drafts.load(root(), draft_id)
+    drafts.update(root(), draft_id, plan=_plan_state("running"))
+    try:
+        summary = conversion.make_page_plan(folder, meta["sourceFile"])
+    except Exception as exc:  # noqa: BLE001 -- the Word-layout conversion stays as it was
+        log.exception("page plan of %s failed", draft_id)
+        (folder / conversion.PAGE_PLAN).unlink(missing_ok=True)
+        drafts.update(root(), draft_id, plan={"status": "failed", "message": str(exc)[:300]})
+        return
+    drafts.update(root(), draft_id, plan=_plan_state("converting", **summary))
+    keep = drafts.load_book(root(), draft_id)
+    result = _run_conversion(draft_id, user, keep)
+    if result.get("status") == "failed":
+        (folder / conversion.PAGE_PLAN).unlink(missing_ok=True)
+        drafts.update(root(), draft_id, plan={"status": "failed", "message": result.get("error"), **summary})
+        return
+    drafts.update(root(), draft_id, plan={"status": "done", "message": None, **summary})
 
 
 def _render(draft_id: str) -> None:
@@ -212,7 +255,11 @@ async def create_draft(
     meta = await asyncio.to_thread(_run_conversion, meta["id"], user, None)
     if pdf is not None and pdf.filename:
         try:
-            return await _accept_pdf(meta["id"], pdf, background)
+            accepted = await _accept_pdf(meta["id"], pdf, background)
+            if plan is None:  # no pages.json given: the server makes the plan from the PDF
+                accepted = drafts.update(root(), meta["id"], plan=_plan_state("running"))
+                background.add_task(_plan_job, meta["id"], user)
+            return accepted
         except HTTPException:
             pass  # a bad PDF doesn't lose the upload: fall back to rendering the Word file
     background.add_task(_render, meta["id"])
@@ -271,6 +318,20 @@ def rerender(draft_id: str, background: BackgroundTasks, _: str = Depends(curren
     background.add_task(_render, draft_id)
     return drafts.update(root(), draft_id, render={"status": "pending", "pages": 0, "error": None,
                                                     "source": "word", "pdfName": None})
+
+
+@app.post("/api/drafts/{draft_id}/plan")
+def make_plan_from_pdf(draft_id: str, background: BackgroundTasks, user: str = Depends(current_user)) -> dict:
+    """Take the book's pages from the uploaded printed PDF (the draft's original)."""
+    meta = _meta_or_404(draft_id)
+    if meta["status"] not in drafts.EDITABLE:
+        raise HTTPException(409, "المسودة مُرسلة للمراجعة أو منشورة، ولا يمكن تعديلها الآن")
+    if _plan_running(meta):
+        return meta
+    if (meta.get("render") or {}).get("source") != "pdf":
+        raise HTTPException(409, "ارفع ملف PDF للكتاب المطبوع أولاً")
+    background.add_task(_plan_job, draft_id, user)
+    return drafts.update(root(), draft_id, plan=_plan_state("running"))
 
 
 @app.post("/api/drafts/{draft_id}/pdf")

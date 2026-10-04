@@ -19,6 +19,7 @@ dependencies = [
     # Reads .docx uploads for the /admin panel's Word-document import path.
     "python-docx>=1.1",
     "olefile>=0.47",
+    "pymupdf>=1.28.2",
 ]
 
 [dependency-groups]
