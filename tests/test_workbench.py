@@ -840,6 +840,38 @@ class TestPagePlan:
         assert [p.text if p else None for p in out] == [
             "الحمد لله ربّ", None, "العالمين والصلاة على نبيّه", "ثمّ قال الإمام كلمته الأخيرة"]
 
+    def test_the_printed_contents_list_makes_headings_on_its_pages(self):
+        from workbench.conversion import converter
+        conv = converter()
+        P = conv.Para
+        pages = [[P("مقدمة الكتاب وكلام قبل الفصول", "Normal")],
+                 [P("النظرية الأولى: وهي أن الدفن كان في الشام وقد ذكرها كثير من العلماء في كتبهم", "Normal"),
+                  P("1/ كيف ماتت العقيلة", "Normal"), P("وقال آخرون غير ذلك", "Normal")],
+                 [P("زوجات الإمام الحسن عليه السلام", "Normal")]]
+        plan = {"pages": [{"label": "10"}, {"label": "11"}, {"label": "12"}],
+                "toc": [{"title": "النظرية الأولى:", "page": 11},
+                        {"title": "1/ كيف ماتت العقيلة", "page": 10},        # a page off: found on 11
+                        {"title": "زوجات الإمام الحسن (عة)", "page": 12},     # tail read wrongly
+                        {"title": "عنوان غير موجود أبدا", "page": 11}]}
+        missing = conv.mark_contents_headings(pages, plan)
+        assert [e["title"] for e in missing] == ["عنوان غير موجود أبدا"]
+        assert [(p.text[:20], p.heading) for p in pages[1]] == [
+            ("النظرية الأولى:", True), ("وهي أن الدفن كان في ", False), ("1/ كيف ماتت العقيلة", True),
+            ("وقال آخرون غير ذلك", False)]
+        assert pages[2][0].heading
+
+    def test_contents_rows_pair_a_title_with_its_number(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "convert"))
+        import pdf_pages
+        lines = [(0.05, 0.7, 0.15, "فهرس المحتويات"),
+                 (0.12, 0.57, 0.26, "١٢/ العودة إلى مدينة رسول الله"), (0.12, 0.16, 0.03, "٤١"),
+                 (0.15, 0.62, 0.24, "أسماء بعض الجواري في كربلاء.."), (0.15, 0.14, 0.05, "١٦٨٠٠")]
+        assert pdf_pages._contents_rows(lines, 218) == [
+            ("١٢/ العودة إلى مدينة رسول الله".translate(pdf_pages._ARABIC_DIGITS), 41),
+            ("أسماء بعض الجواري في كربلاء", 168)]
+
     def test_a_plan_of_another_file_is_refused(self):
         import pytest
         from workbench.conversion import converter

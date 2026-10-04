@@ -1730,12 +1730,83 @@ def _split_toc_pages(pages: list[list[Para]]) -> list[list[Para]]:
     return out
 
 
+_NUMBERING_PREFIX = re.compile(r"^[\d\s/و\-–:.،]+(?=\D)")
+
+
+def _title_tokens(text: str) -> list[str]:
+    """A title's words for comparing, without its list number ("1/", "4 و5 /")."""
+    text = _NUMBERING_PREFIX.sub("", text.strip())
+    return [t for t in (unit_token(c) for c in text.split()) if t]
+
+
+def _heading_at_start(p: Para, wanted: list[str], enough: int) -> int | None:
+    """Where the title ends in the paragraph (a character offset) if the paragraph starts
+    with it: a heading on a line of its own, or one run into its text."""
+    chunks = []
+    for m in re.finditer(r"\S+", p.text):
+        if not chunks and re.fullmatch(r"[\d/و\-–:.،()]+", m.group(0)):
+            continue  # its list number ("3/")
+        token = unit_token(m.group(0))
+        if token:
+            chunks.append((token, m.end()))
+    head = chunks[:len(wanted)]
+    if len(head) >= len(wanted) and sum(a == b for (a, _), b in zip(head, wanted)) >= enough:
+        return head[-1][1]
+    # A heading on a line of its own may differ in its tail (OCR of a symbol-font honorific:
+    # "(عة)" for "عليه السلام"): its first three words are enough.
+    first = min(3, len(wanted))
+    if len(chunks) <= len(wanted) + 4 and len(chunks) >= first and \
+            all(a == b for (a, _), b in zip(chunks[:first], wanted[:first])):
+        return chunks[-1][1]
+    return None
+
+
+def mark_contents_headings(pages: list[list[Para]], plan: dict) -> list[dict]:
+    """Make a heading of the paragraph each entry of the printed contents list names, on
+    the printed page the list gives (or the page either side: a typesetter's list is not
+    always exact). A title run into the start of a paragraph is cut off it as a heading of
+    its own. Returns the entries whose title was not found."""
+    page_of = {str(pg.get("label")): k for k, pg in enumerate(plan["pages"][:len(pages)]) if pg.get("label")}
+    unmatched = []
+    for entry in plan.get("toc", []):
+        wanted = _title_tokens(entry["title"])
+        if not wanted:
+            continue
+        enough = max(1, len(wanted) * 7 // 10)  # 70% of its words
+        done = False
+        for label in (entry["page"], entry["page"] - 1, entry["page"] + 1):
+            k = page_of.get(str(label))
+            for n, p in enumerate(pages[k] if k is not None else []):
+                if p.heading or is_footnote_style(p.style) or not p.text.strip():
+                    continue
+                end = _heading_at_start(p, wanted, enough)
+                if end is None:
+                    continue
+                rest = p.text[end:].strip()
+                if len(_title_tokens(p.text)) > len(wanted) + 4 and rest:
+                    from dataclasses import replace
+                    pages[k][n:n + 1] = [replace(p, text=p.text[:end].strip(), heading=True),
+                                         replace(p, text=rest)]
+                else:
+                    p.heading = True
+                done = True
+                break
+            if done:
+                break
+        if not done:
+            unmatched.append(entry)
+    return unmatched
+
+
 def convert_doc(path, title, author, front_pages, first_printed, heading_re, book_id="900001",
                 use_toc=True, extra_metadata=None, blank_pages=(), page_plan=None):
     items = read_any(path, page_plan)
+    toc_unmatched: list[dict] = []
     if page_plan:  # the print's own pages: nothing to infer from the contents or the file's layout
         pages = _split_pages(items)
         use_toc, blank_pages = False, ()
+        if page_plan.get("toc"):
+            toc_unmatched = mark_contents_headings(pages, page_plan)
     else:
         pages = _split_toc_pages(_split_pages(items))
     # A blank page the source file cannot show (Word pushes a break paragraph onto a fresh
@@ -1785,6 +1856,7 @@ def convert_doc(path, title, author, front_pages, first_printed, heading_re, boo
     for entry in content["toc"]:
         entry["pageNumber"] = numbers[entry["pageId"]]
     content["metadata"].update({k: v for k, v in (extra_metadata or {}).items() if v})
+    content["_toc_unmatched"] = toc_unmatched
     content["_anchors"] = anchors
     content["_recovered"] = recovered
     return content, items

@@ -101,6 +101,7 @@ def convert(folder: Path, meta: dict, keep: dict | None = None) -> tuple[dict, d
     )
     anchors = content.pop("_anchors")
     recovered = content.pop("_recovered")
+    toc_unmatched = content.pop("_toc_unmatched", [])
     # Anything else the employee put in metadata (printer, trusted, ...) is kept too.
     for key, value in kept_meta.items():
         content["metadata"].setdefault(key, value)
@@ -120,6 +121,11 @@ def convert(folder: Path, meta: dict, keep: dict | None = None) -> tuple[dict, d
     report.update(source_report(conv, folder / meta["sourceFile"], content, bool(page_plan)))
     if page_plan:
         report["pagesFrom"] = "printed-pdf"
+        report["tocFromPdf"] = len((page_plan or {}).get("toc", []))
+        report["sourceIssues"] = report["sourceIssues"] + [
+            {"severity": "warning", "code": "toc-title-not-found",
+             "detail": f"عنوان من فهرس الكتاب المطبوع لم يُعثر عليه في الصفحة {e['page']}: «{e['title']}»"}
+            for e in toc_unmatched[:40]]
     return content, report, issues_of(content) + report["sourceIssues"]
 
 

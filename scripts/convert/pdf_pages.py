@@ -132,6 +132,76 @@ def printed_number(header: str) -> int | None:
     return int(found[0]) if found else None
 
 
+# ── the printed contents list ───────────────────────────────────────────────────
+
+_LEADERS = re.compile(r"[.…·]{6,}")
+_ONLY_NUMBER = re.compile(r"^\W*(\d{1,5})\W*$")
+CONTENTS_MIN_ROWS = 5
+CONTENTS_SHARE = 0.7  # of a page's rows must be a title with its page number
+
+
+def _contents_rows(lines, page_count: int) -> list[tuple[str, int]]:
+    """(title, page) for each row of a page of the contents list: a title cell at the right
+    and a number cell at the left on the same row. Dot leaders read as zeros after a number
+    ("١٦٨٠٠" for 168), so a number past the book's last page loses its trailing 00."""
+    rows: list[list] = []
+    for top, left, _, text in sorted(lines):
+        if rows and abs(rows[-1][0] - top) < ROW_GAP / 2:
+            rows[-1][1].append((left, text))
+        else:
+            rows.append([top, [(left, text)]])
+    found = []
+    for _, cells in rows:
+        cells.sort()
+        number, title = None, []
+        for left, text in cells:
+            text = text.translate(_ARABIC_DIGITS)
+            m = _ONLY_NUMBER.match(text)
+            if m and number is None and left < 0.4:
+                number = int(m.group(1))
+            else:
+                title.append((left, text))
+        if number is None or not title:
+            continue
+        while number > page_count and number % 100 == 0 or number > 10 * page_count:
+            number //= 100 if number % 100 == 0 else 10
+        text = " ".join(t for _, t in sorted(title, key=lambda c: -c[0]))
+        text = re.sub(r"[.…·]{2,}|^[\s.:\-–]+|[\s.]+$", " ", text).strip()
+        text = re.sub(r"[\s.:]+[0٠]{1,2}$", "", text)  # a dot leader read as a zero
+        if len(text) > 2 and 0 < number <= page_count:
+            found.append((text, number))
+    return found
+
+
+def contents_entries(pdf: Path, lines_by_page, page_count: int, progress=None) -> list[dict]:
+    """The book's own contents list, read from the PDF's pages that are one: most of their
+    rows are a title with a page number. Read by OCR, which keeps each row's two cells
+    together where a text layer mixes their order."""
+    candidates = [k for k, lines in enumerate(lines_by_page)
+                  if sum(1 for *_, t in lines if _LEADERS.search(t)) >= CONTENTS_MIN_ROWS
+                  or sum(1 for *_, t in lines if _ONLY_NUMBER.match(t.translate(_ARABIC_DIGITS))) >= CONTENTS_MIN_ROWS]
+    if not candidates:
+        return []
+    import pymupdf
+    doc = pymupdf.open(str(pdf))
+    entries: list[dict] = []
+    for k in candidates:
+        try:
+            ocr_lines = _ocr(doc[k].get_pixmap(dpi=200).tobytes("png"))
+        except PlanError:
+            ocr_lines = lines_by_page[k]
+        rows = _contents_rows(ocr_lines, page_count)
+        body_rows = sum(1 for *_, t in ocr_lines if t.strip())
+        if len(rows) >= CONTENTS_MIN_ROWS and len(rows) >= CONTENTS_SHARE * (body_rows / 2):
+            entries += [{"title": t, "page": n, "pdfPage": k + 1} for t, n in rows]
+    # The list is in page order: a number far past the next ones, ending in 0, is a number
+    # with a dot leader read as a zero ("90" for 9).
+    for e, following in zip(entries, entries[1:]):
+        if e["page"] % 10 == 0 and e["page"] > following["page"] + 20:
+            e["page"] //= 10
+    return entries
+
+
 # ── matching ────────────────────────────────────────────────────────────────────
 
 def _chain(ocr: list[str], text: list[str]) -> list[tuple[int, int]]:
@@ -231,8 +301,12 @@ def make_plan(doc: Path, pdf: Path, progress=None) -> dict:
             "label": str(k + offset) if k >= front else None,
             "sure": sure[k],
         })
-    return {"version": 1, "source": doc.name, "pdf": pdf.name, "frontPages": front,
+    plan = {"version": 1, "source": doc.name, "pdf": pdf.name, "frontPages": front,
             "pages": plan_pages}
+    toc = contents_entries(pdf, pages, len(pages))
+    if toc:
+        plan["toc"] = toc
+    return plan
 
 
 def main() -> int:
@@ -255,6 +329,7 @@ def main() -> int:
     unsure = [p["pdfPage"] for p in pages if not p["sure"]]
     print(f"{len(pages)} printed pages -> {args.output}; front matter {plan['frontPages']} pages; "
           f"{len(pages) - len(unsure)} matched exactly")
+    print(f"contents list read from the PDF: {len(plan.get('toc', []))} entries")
     if unsure:
         print("check these PDF pages against the converted book:", ", ".join(map(str, unsure)))
     return 0
