@@ -91,8 +91,14 @@ async def test_by_work_is_alphabetical_by_title(client):
     assert [t for t, _ in found] == ["ألف", "ألف", "باء", "باء", "جيم", "جيم"]
 
 
-async def test_default_order_is_still_by_occurrences(client):
-    found, _ = await hits(client)
+async def test_default_order_is_oldest_first(client):
+    default, _ = await hits(client)
+    assert default == (await hits(client, sort="oldest"))[0]
+    assert default[0] == ("ألف", 1)
+
+
+async def test_relevance_is_by_occurrences(client):
+    found, _ = await hits(client, sort="relevance")
     assert found[0] == ("جيم", 2)  # five occurrences on one page
 
 

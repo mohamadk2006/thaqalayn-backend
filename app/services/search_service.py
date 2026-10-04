@@ -172,7 +172,7 @@ async def search(
     author_ids: list[int] | None = None,
     author_names: list[str] | None = None,
     work_ids: list[int] | None = None,
-    sort: str = "relevance",
+    sort: str = "oldest",
 ) -> tuple[list[SearchHit], int]:
     normalized_query = normalize(query)
     if not normalized_query:
@@ -328,23 +328,28 @@ _BOOK_ORDER_SQL = {
               "THEN a.death_year_hijri ELSE 99999 END), w.title_norm, w.id, b.volume NULLS FIRST, b.id",
 }
 _ORDER_TTL_SECONDS = 60
-_order_cache: dict[str, tuple[float, list[int]]] = {}
+# sort -> (when, the published books' (count, newest id) it was made for, book ids in order)
+_order_cache: dict[str, tuple[float, tuple, list[int]]] = {}
 _FIRST_BATCH = 300
 _MAX_BATCH = 4000
 
 
 async def _book_order(session: AsyncSession, sort: str) -> list[int]:
+    """Published book ids in the sort's order. Kept for a minute (edits of a title or a
+    death year show by then), and made again at once when a book is added or unpublished."""
     import time
 
+    signature = tuple((await session.execute(text(
+        "SELECT count(*), coalesce(max(id), 0) FROM books WHERE is_published"))).one())
     cached = _order_cache.get(sort)
-    if cached and time.monotonic() - cached[0] < _ORDER_TTL_SECONDS:
-        return cached[1]
+    if cached and cached[1] == signature and time.monotonic() - cached[0] < _ORDER_TTL_SECONDS:
+        return cached[2]
     rows = await session.execute(text(
         "SELECT b.id FROM books b JOIN works w ON w.id = b.work_id "
         "LEFT JOIN authors a ON a.id = b.author_id WHERE b.is_published "
         f"ORDER BY {_BOOK_ORDER_SQL[sort]}"))
     ids = [r[0] for r in rows]
-    _order_cache[sort] = (time.monotonic(), ids)
+    _order_cache[sort] = (time.monotonic(), signature, ids)
     return ids
 
 

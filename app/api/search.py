@@ -29,11 +29,11 @@ async def search(
         None, description="One or more author names (use when the ID isn't known)"
     ),
     work: list[int] | None = Query(None, description="One or more work IDs"),
-    sort: Literal["relevance", "work", "oldest"] = Query(
-        "relevance",
-        description="relevance: most occurrences first (default). work: by work title, then "
-                    "volume and page. oldest: author's death year (hijri) ascending, then as "
-                    "work; authors with no death year last."),
+    sort: Literal["oldest", "work", "relevance"] = Query(
+        "oldest",
+        description="oldest (default): author's death year (hijri) ascending, then work title, "
+                    "volume and page; authors with no death year last. work: work title, then "
+                    "volume and page. relevance: most occurrences first."),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> PageEnvelope[SearchHit]:
