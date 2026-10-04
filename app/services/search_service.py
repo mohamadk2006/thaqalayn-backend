@@ -26,6 +26,7 @@ import json
 from pathlib import Path
 
 from sqlalchemy import bindparam, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.catalog import LibraryOut, SubjectOut
@@ -212,14 +213,23 @@ async def search(
     wanted = page * limit
 
     # 1. Most phrases match few enough pages to find them all through the index and sort
-    #    them here: exact order, exact total. gin_fuzzy_search_limit thins the index scan
-    #    only when it returns over 100,000 rows for words that are each common but rarely
-    #    adjacent ("العلم نور": 112,650 pages hold both words, 1,459 hold the phrase), where
-    #    rechecking them all took over 11 seconds.
-    await session.execute(text("SET LOCAL gin_fuzzy_search_limit = 100000"))
-    found = (await session.execute(
-        statement(f"SELECT p.id, p.book_id, p.sequence {match_from} LIMIT {_MATCH_LIMIT + 1}"),
-        params)).all()
+    #    them here: exact order, exact total. Words that are each common but rarely
+    #    adjacent ("العلم نور": 112,650 pages hold both, 534 hold the phrase) make the index
+    #    scan recheck every page that holds both words: 8 seconds the first time, 0.2 after.
+    #    A search that takes over 15 seconds is made again with gin_fuzzy_search_limit, which
+    #    thins that scan at random and so finds only some of the pages (206 of the 534).
+    match_sql = statement(
+        f"SELECT p.id, p.book_id, p.sequence {match_from} LIMIT {_MATCH_LIMIT + 1}")
+    try:
+        async with session.begin_nested():
+            await session.execute(text("SET LOCAL statement_timeout = '15000'"))
+            await session.execute(text("SET LOCAL gin_fuzzy_search_limit = 0"))
+            found = (await session.execute(match_sql, params)).all()
+    except DBAPIError as exc:
+        if "statement timeout" not in str(exc):
+            raise
+        await session.execute(text("SET LOCAL gin_fuzzy_search_limit = 100000"))
+        found = (await session.execute(match_sql, params)).all()
     if len(found) <= _MATCH_LIMIT:
         found.sort(key=lambda r: (rank.get(r.book_id, len(rank)), r.sequence))
         chosen = [r.id for r in found[(page - 1) * limit:wanted]]
@@ -324,10 +334,15 @@ def _build_hits(rows, normalized_query: str, books_root: Path) -> list[SearchHit
 
 # Hijri years above this are placeholders (one author has 99999), not death years.
 _LAST_PLAUSIBLE_DEATH_YEAR = 1500
+# A death known only as a century ("قرن 3", "ق 12": 316 authors) is stored as the century's
+# number, so its year is not that number: it is the middle of the century (250, 1150).
 # An author with no death year ('معاصر', contemporary, or none recorded) comes last.
 _BOOK_ORDER_SQL = (
-    f"(CASE WHEN a.death_year_hijri BETWEEN 1 AND {_LAST_PLAUSIBLE_DEATH_YEAR} "
-    "THEN a.death_year_hijri ELSE 99999 END), w.title_norm, w.id, b.volume NULLS FIRST, b.id"
+    "(CASE "
+    "WHEN a.death_label ~ '^(قرن|ق)[[:space:]]*[0-9]+' "
+    "THEN substring(a.death_label from '[0-9]+')::int * 100 - 50 "
+    f"WHEN a.death_year_hijri BETWEEN 1 AND {_LAST_PLAUSIBLE_DEATH_YEAR} THEN a.death_year_hijri "
+    "ELSE 99999 END), w.title_norm, w.id, b.volume NULLS FIRST, b.id"
 )
 _ORDER_TTL_SECONDS = 60
 # (when, the published books' (count, newest id) it was made for, book ids in order)

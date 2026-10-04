@@ -24,8 +24,12 @@ BOOKS = [
     (8885101, "باء كتاب ترتيب النتائج", "مؤلف ترتيب الأول", 400, 1),
     (8885102, "ألف كتاب ترتيب النتائج", "مؤلف ترتيب الثاني", 200, 3),
     (8885103, "جيم كتاب ترتيب النتائج", "مؤلف ترتيب الثالث", None, 5),
+    # known only as "the 3rd century", stored as the number 3: it is about the year 250
+    (8885104, "دال كتاب ترتيب النتائج", "مؤلف ترتيب الرابع", 3, 2),
 ]
 PHRASE = "عبارة الترتيب الفريدة"
+# death years 200, then the 3rd century (250), 400, and the author with none last
+EXPECTED = [("ألف", 1), ("ألف", 2), ("دال", 1), ("دال", 2), ("باء", 1), ("باء", 2), ("جيم", 1), ("جيم", 2)]
 
 
 def source(title: str, author: str, repeats: int) -> str:
@@ -50,7 +54,7 @@ async def client(tmp_path: Path):
             (tmp_path / f"{book_id}.abx").write_text(source(title, author, repeats), encoding="utf-8")
             assert await import_books.import_one(
                 session, tmp_path / f"{book_id}.abx", "test", books_root, False) == "ok"
-            label = "معاصر" if year is None else f"{year} هـ"
+            label = "معاصر" if year is None else "قرن 3" if book_id == 8885104 else f"{year} هـ"
             await session.execute(
                 text("UPDATE authors SET death_year_hijri = :y, death_label = :l WHERE name_norm = :n"),
                 {"y": year, "l": label, "n": normalize(author)})
@@ -85,17 +89,15 @@ async def test_oldest_author_first_then_work_volume_and_page(client):
     found, total = await hits(client)
     # death years 200, 400, then the author with none last; pages in book order, whatever
     # the number of occurrences (the last book has the most)
-    expected = [("ألف", 1), ("ألف", 2), ("باء", 1), ("باء", 2), ("جيم", 1), ("جيم", 2)]
-    assert found == expected
-    assert total == 6
+    assert found == EXPECTED
+    assert total == 8
 
 
 async def test_paging_keeps_the_order(client):
     first, _ = await hits(client, limit=4)
     r = await client.get("/api/search", params={"q": PHRASE, "limit": 4, "page": 2})
     second = [(h["workTitle"].split()[0], h["pageSequence"]) for h in r.json()["items"]]
-    expected = [("ألف", 1), ("ألف", 2), ("باء", 1), ("باء", 2), ("جيم", 1), ("جيم", 2)]
-    assert first + second == expected
+    assert first + second == EXPECTED
 
 
 async def test_a_common_phrase_is_found_in_the_same_order(client, monkeypatch):
@@ -103,7 +105,6 @@ async def test_a_common_phrase_is_found_in_the_same_order(client, monkeypatch):
     monkeypatch.setattr(search_service, "_MATCH_LIMIT", 2)
     monkeypatch.setattr(search_service, "_FIRST_BATCH", 1)
     found, _ = await hits(client)
-    expected = [("ألف", 1), ("ألف", 2), ("باء", 1), ("باء", 2), ("جيم", 1), ("جيم", 2)]
-    assert found == expected
+    assert found == EXPECTED
     r = await client.get("/api/search", params={"q": PHRASE, "limit": 2, "page": 2})
-    assert [(h["workTitle"].split()[0], h["pageSequence"]) for h in r.json()["items"]] == expected[2:4]
+    assert [(h["workTitle"].split()[0], h["pageSequence"]) for h in r.json()["items"]] == EXPECTED[2:4]
