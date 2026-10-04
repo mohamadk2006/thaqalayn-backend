@@ -54,7 +54,7 @@ async def client(tmp_path: Path):
             (tmp_path / f"{book_id}.abx").write_text(source(title, author, repeats), encoding="utf-8")
             assert await import_books.import_one(
                 session, tmp_path / f"{book_id}.abx", "test", books_root, False) == "ok"
-            label = "معاصر" if year is None else "قرن ٣" if book_id == 8885104 else f"{year} هـ"
+            label = "معاصر" if year is None else "أوائل قرن ٣" if book_id == 8885104 else f"{year} هـ"
             await session.execute(
                 text("UPDATE authors SET death_year_hijri = :y, death_label = :l WHERE name_norm = :n"),
                 {"y": year, "l": label, "n": normalize(author)})
