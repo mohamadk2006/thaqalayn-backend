@@ -95,9 +95,10 @@ def _load_page_text(books_root: Path, book_id: int, sequence: int, cache: dict) 
 
 # A phrase on up to this many pages is found, sorted and counted exactly; on more, it is a
 # common word and the total shown is this number. Finding them costs about a millisecond
-# each when the pages are not in memory (10,000 took 5-7 seconds for "الصلاة"), while the
+# each when the pages are not in memory (10,000 took 5-7 seconds for "الصلاة", 2,000 up to
+# 4), while the
 # page of the ordered results itself takes a fraction of a second.
-_MATCH_LIMIT = 2000
+_MATCH_LIMIT = 1000
 
 # The select over the pages chosen, kept in the order c.rn, c.sequence.
 _FINAL_SELECT = """    SELECT
@@ -251,6 +252,8 @@ async def search(
         wanted_order = {r.id: (r.book_id, r.sequence) for r in found}
         ordered = [by_id[wanted_order[i]] for i in chosen if wanted_order[i] in by_id]
         return _build_hits(ordered, normalized_query, books_root), len(found)
+
+    await session.execute(text("SET LOCAL statement_timeout = '30000'"))  # phase 1 set 15s
 
     # 2. A phrase on more pages than that is a common word: its first matches in the order
     #    are found by taking the books a batch at a time until the page is full, where
