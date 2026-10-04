@@ -94,8 +94,10 @@ def _load_page_text(books_root: Path, book_id: int, sequence: int, cache: dict) 
 
 
 # A phrase on up to this many pages is found, sorted and counted exactly; on more, it is a
-# common word and the total shown is this number.
-_MATCH_LIMIT = 10000
+# common word and the total shown is this number. Finding them costs about a millisecond
+# each when the pages are not in memory (10,000 took 5-7 seconds for "الصلاة"), while the
+# page of the ordered results itself takes a fraction of a second.
+_MATCH_LIMIT = 2000
 
 # The select over the pages chosen, kept in the order c.rn, c.sequence.
 _FINAL_SELECT = """    SELECT
