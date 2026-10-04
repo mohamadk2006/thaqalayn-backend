@@ -128,7 +128,7 @@ _CANDIDATES_CTE = f"""
 _SEARCH_SQL_TAIL = f"""
         LIMIT {_CANDIDATE_CAP}
     )
-    SELECT
+""" + """    SELECT
         b.id AS book_id, b.work_id, w.title AS work_title, b.title, b.volume,
         a.name AS author,
         -- A work can belong to more than one of the 39 subjects (see WorkSubject) --
@@ -155,6 +155,9 @@ _SEARCH_SQL_TAIL = f"""
     LEFT JOIN sections sec ON sec.id = c.section_id
 """
 
+# The same select over an already-chosen set of pages, kept in the order c.rn, c.sequence.
+_FINAL_SELECT = _SEARCH_SQL_TAIL.split(")\n", 1)[1]
+
 
 async def search(
     session: AsyncSession,
@@ -169,6 +172,7 @@ async def search(
     author_ids: list[int] | None = None,
     author_names: list[str] | None = None,
     work_ids: list[int] | None = None,
+    sort: str = "relevance",
 ) -> tuple[list[SearchHit], int]:
     normalized_query = normalize(query)
     if not normalized_query:
@@ -217,6 +221,12 @@ async def search(
         params["work_ids"] = work_ids
         expanding.append("work_ids")
 
+    if sort != "relevance":
+        return await _search_ordered(
+            session, normalized_query=normalized_query, sort=sort, page=page, limit=limit,
+            books_root=books_root, conditions=conditions, params=params, expanding=expanding,
+        )
+
     sql = _CANDIDATES_CTE
     if conditions:
         sql += " AND " + " AND ".join(conditions)
@@ -251,7 +261,10 @@ async def search(
     if not rows:
         return [], 0
 
-    total = rows[0].total_count
+    return _build_hits(rows, normalized_query, books_root), rows[0].total_count
+
+
+def _build_hits(rows, normalized_query: str, books_root: Path) -> list[SearchHit]:
     hits = []
     page_text_cache: dict[int, dict | None] = {}
     for row in rows:
@@ -294,4 +307,95 @@ async def search(
                 score=float(row.score),
             )
         )
-    return hits, total
+    return hits
+
+
+# ── ordered by work, or oldest author first ─────────────────────────────────────
+#
+# Ranking by score needs every match; ordering by the book does not: take the books in
+# order, a batch at a time, and stop as soon as the page is full. A common word fills it
+# from the first batch (the whole library's "الله" sorted by death year timed out at 90s
+# as one query); a rare phrase just goes through every batch, each a GIN lookup.
+
+SORTS = ("relevance", "work", "oldest")
+
+# Hijri years above this are placeholders (one author has 99999), not death years.
+_LAST_PLAUSIBLE_DEATH_YEAR = 1500
+_BOOK_ORDER_SQL = {
+    "work": "w.title_norm, w.id, b.volume NULLS FIRST, b.id",
+    # An author with no death year ('معاصر', contemporary, or none recorded) comes last.
+    "oldest": f"(CASE WHEN a.death_year_hijri BETWEEN 1 AND {_LAST_PLAUSIBLE_DEATH_YEAR} "
+              "THEN a.death_year_hijri ELSE 99999 END), w.title_norm, w.id, b.volume NULLS FIRST, b.id",
+}
+_ORDER_TTL_SECONDS = 60
+_order_cache: dict[str, tuple[float, list[int]]] = {}
+_FIRST_BATCH = 300
+_MAX_BATCH = 4000
+
+
+async def _book_order(session: AsyncSession, sort: str) -> list[int]:
+    import time
+
+    cached = _order_cache.get(sort)
+    if cached and time.monotonic() - cached[0] < _ORDER_TTL_SECONDS:
+        return cached[1]
+    rows = await session.execute(text(
+        "SELECT b.id FROM books b JOIN works w ON w.id = b.work_id "
+        "LEFT JOIN authors a ON a.id = b.author_id WHERE b.is_published "
+        f"ORDER BY {_BOOK_ORDER_SQL[sort]}"))
+    ids = [r[0] for r in rows]
+    _order_cache[sort] = (time.monotonic(), ids)
+    return ids
+
+
+async def _search_ordered(session, *, normalized_query, sort, page, limit, books_root,
+                          conditions, params, expanding):
+    extra = (" AND " + " AND ".join(conditions)) if conditions else ""
+    from_where = f"""
+        FROM pages p
+        JOIN books b ON b.id = p.book_id AND b.is_published
+        JOIN works w ON w.id = b.work_id
+        LEFT JOIN authors a ON a.id = b.author_id,
+        phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query) q
+        WHERE p.search_tsv @@ q{extra}"""
+    batch_sql = f"""
+        WITH candidates AS (
+            SELECT p.id, p.book_id, p.sequence, p.page_number, p.section_id, u.rn,
+                   ts_rank_cd(p.search_tsv, q) AS score
+            FROM unnest(CAST(:ids AS bigint[])) WITH ORDINALITY AS u(book_id, rn)
+            JOIN pages p ON p.book_id = u.book_id
+            JOIN books b ON b.id = p.book_id AND b.is_published
+            JOIN works w ON w.id = b.work_id
+            LEFT JOIN authors a ON a.id = b.author_id,
+            phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query) q
+            WHERE p.search_tsv @@ q{extra}
+            ORDER BY u.rn, p.sequence
+            LIMIT :take
+        )
+        {_FINAL_SELECT}
+        ORDER BY c.rn, c.sequence"""
+    total_sql = f"SELECT count(*) FROM (SELECT 1 {from_where} LIMIT {_CANDIDATE_CAP}) counted"
+
+    def statement(sql: str):
+        stmt = text(sql)
+        if expanding:
+            stmt = stmt.bindparams(*(bindparam(name, expanding=True) for name in expanding))
+        return stmt
+
+    # Every match counts: gin_fuzzy_search_limit would thin the index scan at random.
+    await session.execute(text("SET LOCAL statement_timeout = '30000'"))
+    order = await _book_order(session, sort)
+    wanted = (page - 1) * limit + limit
+    rows: list = []
+    start, size = 0, _FIRST_BATCH
+    while start < len(order) and len(rows) < wanted:
+        got = await session.execute(statement(batch_sql), {
+            **params, "ids": order[start:start + size], "take": wanted - len(rows)})
+        rows.extend(got.all())
+        start += size
+        size = min(size * 2, _MAX_BATCH)
+    rows = rows[(page - 1) * limit:wanted]
+    if not rows:
+        return [], 0
+    total = (await session.execute(statement(total_sql), params)).scalar_one()
+    return _build_hits(rows, normalized_query, books_root), max(total, len(rows))
