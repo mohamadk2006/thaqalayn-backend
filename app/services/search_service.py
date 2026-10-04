@@ -92,9 +92,9 @@ def _load_page_text(books_root: Path, book_id: int, sequence: int, cache: dict) 
     return None
 
 
-# The total shown is counted up to this many matches: counting every match of a very common
-# phrase would read most of the library's pages.
-_CANDIDATE_CAP = 5000
+# A phrase on up to this many pages is found, sorted and counted exactly; on more, it is a
+# common word and the total shown is this number.
+_MATCH_LIMIT = 10000
 
 # The select over the pages chosen, kept in the order c.rn, c.sequence.
 _FINAL_SELECT = """    SELECT
@@ -191,6 +191,59 @@ async def search(
         expanding.append("work_ids")
 
     extra = (" AND " + " AND ".join(conditions)) if conditions else ""
+    match_from = f"""
+        FROM pages p
+        JOIN books b ON b.id = p.book_id AND b.is_published
+        JOIN works w ON w.id = b.work_id
+        LEFT JOIN authors a ON a.id = b.author_id,
+        phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query) q
+        WHERE p.search_tsv @@ q{extra}"""
+
+    def statement(sql: str):
+        stmt = text(sql)
+        if expanding:
+            stmt = stmt.bindparams(*(bindparam(name, expanding=True) for name in expanding))
+        return stmt
+
+    # A query that is merely slow gets this long rather than failing.
+    await session.execute(text("SET LOCAL statement_timeout = '30000'"))
+    order = await _book_order(session)
+    rank = {book_id: n for n, book_id in enumerate(order)}
+    wanted = page * limit
+
+    # 1. Most phrases match few enough pages to find them all through the index and sort
+    #    them here: exact order, exact total. gin_fuzzy_search_limit thins the index scan
+    #    only when it returns over 100,000 rows for words that are each common but rarely
+    #    adjacent ("العلم نور": 112,650 pages hold both words, 1,459 hold the phrase), where
+    #    rechecking them all took over 11 seconds.
+    await session.execute(text("SET LOCAL gin_fuzzy_search_limit = 100000"))
+    found = (await session.execute(
+        statement(f"SELECT p.id, p.book_id, p.sequence {match_from} LIMIT {_MATCH_LIMIT + 1}"),
+        params)).all()
+    if len(found) <= _MATCH_LIMIT:
+        found.sort(key=lambda r: (rank.get(r.book_id, len(rank)), r.sequence))
+        chosen = [r.id for r in found[(page - 1) * limit:wanted]]
+        if not chosen:
+            return [], 0
+        rows = (await session.execute(text(f"""
+            WITH candidates AS (
+                SELECT p.id, p.book_id, p.sequence, p.page_number, p.section_id, 0 AS rn,
+                       ts_rank_cd(p.search_tsv, q) AS score
+                FROM pages p, phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query) q
+                WHERE p.id = ANY(:ids)
+            )
+            {_FINAL_SELECT}"""), {"normalized_query": normalized_query, "ids": chosen})).all()
+        by_id = {}  # the select does not keep the order chosen
+        for row in rows:
+            by_id[(row.book_id, row.sequence)] = row
+        wanted_order = {r.id: (r.book_id, r.sequence) for r in found}
+        ordered = [by_id[wanted_order[i]] for i in chosen if wanted_order[i] in by_id]
+        return _build_hits(ordered, normalized_query, books_root), len(found)
+
+    # 2. A phrase on more pages than that is a common word: its first matches in the order
+    #    are found by taking the books a batch at a time until the page is full, where
+    #    sorting all of them timed out at 90 seconds. The total is then the count so far.
+    await session.execute(text("SET LOCAL gin_fuzzy_search_limit = 0"))
     batch_sql = f"""
         WITH candidates AS (
             SELECT p.id, p.book_id, p.sequence, p.page_number, p.section_id, u.rn,
@@ -207,29 +260,6 @@ async def search(
         )
         {_FINAL_SELECT}
         ORDER BY c.rn, c.sequence"""
-    total_sql = f"""
-        SELECT count(*) FROM (
-            SELECT 1
-            FROM pages p
-            JOIN books b ON b.id = p.book_id AND b.is_published
-            JOIN works w ON w.id = b.work_id
-            LEFT JOIN authors a ON a.id = b.author_id,
-            phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query) q
-            WHERE p.search_tsv @@ q{extra}
-            LIMIT {_CANDIDATE_CAP}
-        ) counted"""
-
-    def statement(sql: str):
-        stmt = text(sql)
-        if expanding:
-            stmt = stmt.bindparams(*(bindparam(name, expanding=True) for name in expanding))
-        return stmt
-
-    # Every match must be seen (no gin_fuzzy_search_limit, which thins the scan at random);
-    # a query that is merely slow gets this long rather than failing.
-    await session.execute(text("SET LOCAL statement_timeout = '30000'"))
-    order = await _book_order(session)
-    wanted = page * limit
     rows: list = []
     start, size = 0, _FIRST_BATCH
     while start < len(order) and len(rows) < wanted:
@@ -241,8 +271,7 @@ async def search(
     rows = rows[(page - 1) * limit:wanted]
     if not rows:
         return [], 0
-    total = (await session.execute(statement(total_sql), params)).scalar_one()
-    return _build_hits(rows, normalized_query, books_root), max(total, len(rows))
+    return _build_hits(rows, normalized_query, books_root), max(_MATCH_LIMIT, len(rows))
 
 
 def _build_hits(rows, normalized_query: str, books_root: Path) -> list[SearchHit]:

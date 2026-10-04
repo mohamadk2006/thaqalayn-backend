@@ -96,3 +96,14 @@ async def test_paging_keeps_the_order(client):
     second = [(h["workTitle"].split()[0], h["pageSequence"]) for h in r.json()["items"]]
     expected = [("ألف", 1), ("ألف", 2), ("باء", 1), ("باء", 2), ("جيم", 1), ("جيم", 2)]
     assert first + second == expected
+
+
+async def test_a_common_phrase_is_found_in_the_same_order(client, monkeypatch):
+    # more matches than _MATCH_LIMIT: the books are taken a batch at a time instead
+    monkeypatch.setattr(search_service, "_MATCH_LIMIT", 2)
+    monkeypatch.setattr(search_service, "_FIRST_BATCH", 1)
+    found, _ = await hits(client)
+    expected = [("ألف", 1), ("ألف", 2), ("باء", 1), ("باء", 2), ("جيم", 1), ("جيم", 2)]
+    assert found == expected
+    r = await client.get("/api/search", params={"q": PHRASE, "limit": 2, "page": 2})
+    assert [(h["workTitle"].split()[0], h["pageSequence"]) for h in r.json()["items"]] == expected[2:4]
