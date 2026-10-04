@@ -282,7 +282,7 @@ async def search(
             **params, "ids": order[start:start + size], "take": wanted - len(rows)})
         rows.extend(got.all())
         start += size
-        size = min(size * 2, _MAX_BATCH)
+        size = min(size * 3, _MAX_BATCH)
     rows = rows[(page - 1) * limit:wanted]
     if not rows:
         return [], 0
@@ -355,7 +355,9 @@ _BOOK_ORDER_SQL = (
 _ORDER_TTL_SECONDS = 60
 # (when, the published books' (count, newest id) it was made for, book ids in order)
 _order_cache: tuple[float, tuple, list[int]] | None = None
-_FIRST_BATCH = 300
+# Small and growing: a phrase this common fills the page from the first book or two, and
+# one batch of 300 books took over 30 seconds on a cold cache for "بسم الله الرحمن الرحيم".
+_FIRST_BATCH = 4
 _MAX_BATCH = 4000
 
 
