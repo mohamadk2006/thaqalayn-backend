@@ -337,10 +337,12 @@ _LAST_PLAUSIBLE_DEATH_YEAR = 1500
 # A death known only as a century ("قرن 3", "ق 12": 316 authors) is stored as the century's
 # number, so its year is not that number: it is the middle of the century (250, 1150).
 # An author with no death year ('معاصر', contemporary, or none recorded) comes last.
+# The label with Arabic-Indic digits ("قرن ١") as 0-9.
+_LABEL = "translate(a.death_label, '٠١٢٣٤٥٦٧٨٩', '0123456789')"
 _BOOK_ORDER_SQL = (
     "(CASE "
-    "WHEN a.death_label ~ '^(قرن|ق)[[:space:]]*[0-9]+' "
-    "THEN substring(a.death_label from '[0-9]+')::int * 100 - 50 "
+    f"WHEN {_LABEL} ~ '^(قرن|ق)[[:space:]]*[0-9]+' "
+    f"THEN substring({_LABEL} from '[0-9]+')::int * 100 - 50 "
     f"WHEN a.death_year_hijri BETWEEN 1 AND {_LAST_PLAUSIBLE_DEATH_YEAR} THEN a.death_year_hijri "
     "ELSE 99999 END), w.title_norm, w.id, b.volume NULLS FIRST, b.id"
 )
