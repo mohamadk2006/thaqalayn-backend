@@ -15,6 +15,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.db import get_sessionmaker
+from app.services.arabic import normalize
 from app.main import create_app
 from app.services import drafts
 from workbench import main as wb
@@ -65,7 +66,7 @@ async def admin(workbench_root, tmp_path, monkeypatch):
                            auth=(base.admin_username, base.admin_password)) as c:
         yield c
     async with get_sessionmaker()() as s:
-        for t in (TITLE, "عنوان صحيح بعد التصحيح"):
+        for t in (TITLE, normalize(TITLE), "عنوان صحيح بعد التصحيح"):
             await s.execute(text("DELETE FROM books WHERE title_norm = :t"), {"t": t})
             await s.execute(text("DELETE FROM works WHERE title_norm = :t"), {"t": t})
         await s.execute(text("DELETE FROM authors WHERE name = :a"), {"a": AUTHOR})
@@ -218,6 +219,76 @@ class TestSubmitReviewPublish:
         await employee.post(f"/api/drafts/{meta['id']}/submit", data={})
         r = await employee.post(f"/api/drafts/{meta['id']}/withdraw")
         assert r.json()["status"] == "editing"
+
+
+class TestReplacePublished:
+    """A corrected draft replaces a published book: same id, the old file kept, undoable."""
+
+    async def publish(self, employee, admin, title, extra_paragraph=None, replace=None, confirm=False):
+        data = make_docx()
+        if extra_paragraph:
+            d = docx.Document(io.BytesIO(data))
+            d.add_page_break()
+            d.add_paragraph(extra_paragraph)
+            buf = io.BytesIO()
+            d.save(buf)
+            data = buf.getvalue()
+        draft_id = (await upload(employee, data=data)).json()["id"]
+        book = (await employee.get(f"/api/drafts/{draft_id}/book")).json()
+        book.update(title=title, author=AUTHOR)
+        await employee.put(f"/api/drafts/{draft_id}/book", json=book)
+        await employee.post(f"/api/drafts/{draft_id}/submit", data={"note": ""})
+        form = {}
+        if replace:
+            form = {"replace_book_id": str(replace), **({"confirm": "1"} if confirm else {})}
+        r = await admin.post(f"/admin/drafts/{draft_id}/publish", data=form)
+        meta = (await employee.get(f"/api/drafts/{draft_id}")).json()
+        return draft_id, r, meta
+
+    async def pages_of(self, book_id):
+        async with get_sessionmaker()() as s:
+            return await s.scalar(text("SELECT page_count FROM books WHERE id = :i"), {"i": book_id})
+
+    async def test_replace_keeps_the_id_saves_the_old_file_and_can_be_undone(self, employee, admin, tmp_path):
+        _, r, first = await self.publish(employee, admin, TITLE)
+        assert r.status_code == 303
+        book_id = first["publishedBookId"]
+        assert await self.pages_of(book_id) == 3
+
+        draft_id, r, meta = await self.publish(employee, admin, TITLE, extra_paragraph="صفحة مضافة", replace=book_id)
+        assert "err=" not in r.headers["location"], unquote(r.headers["location"])
+        assert meta["status"] == "published" and meta["publishedBookId"] == book_id
+        assert await self.pages_of(book_id) == 4
+        assert (tmp_path / "books" / "_replaced" / meta["replacedBackup"]).exists()
+        assert (meta["replacedOldPages"], meta["replacedNewPages"]) == (3, 4)
+        assert "تراجع" in (await admin.get(f"/admin/drafts/{draft_id}")).text
+
+        r = await admin.post(f"/admin/drafts/{draft_id}/undo-replace")
+        assert "err=" not in r.headers["location"], unquote(r.headers["location"])
+        assert await self.pages_of(book_id) == 3
+        assert (await employee.get(f"/api/drafts/{draft_id}")).json()["status"] == "submitted"
+
+    async def test_a_different_title_needs_confirmation_and_keeps_the_published_one(self, employee, admin):
+        _, _, first = await self.publish(employee, admin, TITLE)
+        book_id = first["publishedBookId"]
+        draft_id, r, meta = await self.publish(employee, admin, "عنوان صحيح بعد التصحيح", replace=book_id)
+        assert "err=" in r.headers["location"] and meta["status"] == "submitted"
+        assert "العنوان" in unquote(r.headers["location"])
+        # the comparison page says so, and offers the confirmation
+        page = (await admin.get(f"/admin/drafts/{draft_id}", params={"replace": book_id})).text
+        assert "⚠" in page and 'name="confirm"' in page
+
+        r = await admin.post(f"/admin/drafts/{draft_id}/publish",
+                             data={"replace_book_id": str(book_id), "confirm": "1"})
+        assert "err=" not in r.headers["location"], unquote(r.headers["location"])
+        async with get_sessionmaker()() as s:
+            work_title = await s.scalar(text(
+                "SELECT w.title FROM books b JOIN works w ON w.id = b.work_id WHERE b.id = :i"), {"i": book_id})
+        assert work_title == TITLE  # the book keeps its own title
+
+    async def test_an_unknown_book_is_refused(self, employee, admin):
+        _, r, meta = await self.publish(employee, admin, TITLE, replace=987654321)
+        assert "err=" in r.headers["location"] and meta["status"] == "submitted"
 
 
 def test_draft_ids_cannot_escape_the_folder(tmp_path):

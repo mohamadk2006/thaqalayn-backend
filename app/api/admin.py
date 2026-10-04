@@ -13,8 +13,11 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 import secrets
+import shutil
 import sys
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 
@@ -1233,6 +1236,7 @@ async def new_book_json(
 async def _import_book_json(
     session: AsyncSession, content, *, book_id: str = "", volume: str = "", work_id: str = "",
     subject: list[str] | None = None, library: list[int] | None = None, source: str,
+    replace_book_id: str = "", confirm_mismatch: bool = False, report: dict | None = None,
 ) -> tuple[int | None, int | None, str | None]:
     """Validate and import a v2 book JSON -- the JSON upload form and the conversion
     review list (/admin/drafts) both publish through here. Returns (book id, work id,
@@ -1249,6 +1253,44 @@ async def _import_book_json(
         return None, None, "حقل metadata غير صالح"
 
     forced_work: int | None = None
+    replacing: int | None = None
+    if replace_book_id.strip().isdigit():
+        # Replacing a published book with a corrected version: the same id, so the work, the
+        # volume and everything the apps saved against it stay; the old file is kept aside.
+        replacing = int(replace_book_id)
+        old = (await session.execute(text("""
+            SELECT b.id, b.volume, b.work_id, b.page_count, w.title, a.name AS author, a.death_label
+            FROM books b JOIN works w ON w.id = b.work_id LEFT JOIN authors a ON a.id = w.author_id
+            WHERE b.id = :id"""), {"id": replacing})).first()
+        if old is None:
+            return None, None, f"الكتاب #{replacing} غير موجود"
+        new_volume = int(volume) if volume.strip().isdigit() else (
+            int(metadata["volume"]) if str(metadata.get("volume", "")).isdigit() else None)
+        differences = []
+        if normalize(content.get("title", "")) != normalize(old.title):
+            differences.append(f"العنوان («{content.get('title', '')}» بدل «{old.title}»)")
+        if normalize(content.get("author", "")) != normalize(old.author or ""):
+            differences.append(f"المؤلف («{content.get('author', '')}» بدل «{old.author or ''}»)")
+        if new_volume != old.volume:
+            differences.append(f"المجلد ({new_volume or '—'} بدل {old.volume or '—'})")
+        if differences and not confirm_mismatch:
+            return None, None, ("يختلف عن الكتاب #%d في: %s -- أكّد الاستبدال إن كان مقصوداً"
+                                % (replacing, "، ".join(differences)))
+        # The book keeps its own identity whatever the draft says.
+        forced_work = old.work_id
+        content["title"] = old.title
+        content["author"] = old.author or ""
+        if old.death_label:
+            metadata["authorDeath"] = old.death_label
+        else:
+            metadata.pop("authorDeath", None)
+        if old.volume:
+            metadata["volume"] = str(old.volume)
+        else:
+            metadata.pop("volume", None)
+        volume, work_id = "", ""
+        if report is not None:
+            report["oldPages"] = old.page_count
     if work_id.strip().isdigit():
         row = (await session.execute(
             text("""
@@ -1272,7 +1314,7 @@ async def _import_book_json(
     if volume.strip().isdigit():
         metadata["volume"] = str(int(volume))
 
-    resolved_id = int(book_id) if book_id.strip().isdigit() else await _next_manual_id(session)
+    resolved_id = replacing or (int(book_id) if book_id.strip().isdigit() else await _next_manual_id(session))
     content["bookId"] = str(resolved_id)
 
     importer = _importer()
@@ -1304,6 +1346,15 @@ async def _import_book_json(
         if clash:
             return None, None, f"المجلد {vol_int} موجود مسبقاً (كتاب #{clash.id})"
 
+    if replacing is not None and report is not None:
+        kept = settings.books_root / f"{replacing}.json"
+        if kept.exists():  # the only copy of the old pages once the import replaces them
+            aside = settings.books_root / REPLACED_DIR
+            aside.mkdir(parents=True, exist_ok=True)
+            name = f"{replacing}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.json"
+            shutil.copy2(kept, aside / name)
+            report["backup"] = name
+
     result = await importer._import_content(
         session, content, str(resolved_id), f"{resolved_id}.json", source,
         settings.books_root, True,
@@ -1311,6 +1362,8 @@ async def _import_book_json(
     if result != "ok":
         return None, None, f"فشل الاستيراد ({result}) -- راجع سجل الاستيراد لمعرفة السبب"
 
+    if report is not None:
+        report["newPages"] = len(content.get("pages") or [])
     new_work = forced_work or await session.scalar(
         text("SELECT work_id FROM books WHERE id = :id"), {"id": resolved_id}
     )
@@ -1361,6 +1414,11 @@ async def new_book_manual(
 # The workbench (workbench/, its own container) writes drafts to WORKBENCH_ROOT; this
 # panel reads the same folder. Publishing goes through _import_book_json, exactly like a
 # JSON upload, then marks the draft published so the workbench shows it read-only.
+
+
+# Where the old file of a replaced book is kept (inside books_root, below the *.json the
+# importer and reindexer look at).
+REPLACED_DIR = "_replaced"
 
 
 def _drafts_root() -> Path:
@@ -1420,7 +1478,7 @@ async def drafts_list(
 
 @router.get("/drafts/{draft_id}", response_class=HTMLResponse)
 async def draft_detail(
-    draft_id: str, ok: str | None = None, err: str | None = None,
+    draft_id: str, ok: str | None = None, err: str | None = None, replace: str | None = None,
     session: AsyncSession = Depends(get_session), _: None = Depends(_require_admin),
 ) -> HTMLResponse:
     settings = get_settings()
@@ -1443,6 +1501,36 @@ async def draft_detail(
         for i in issues) or "<li>لا أخطاء ولا تنبيهات.</li>"
     meta_rows = "".join(f"<tr><th>{escape(k)}</th><td>{escape(str(v))}</td></tr>" for k, v in md.items())
 
+    replace_id = (replace or "").strip()
+    if not replace_id:  # the employee's note may name it: "يستبدل #900011"
+        found = re.search(r"#\s*(\d+)", meta.get("submitNote") or "")
+        replace_id = found.group(1) if found else ""
+    replace_html = ""
+    if replace_id.isdigit():
+        old = (await session.execute(text("""
+            SELECT b.id, b.volume, b.page_count, w.title, a.name AS author
+            FROM books b JOIN works w ON w.id = b.work_id LEFT JOIN authors a ON a.id = w.author_id
+            WHERE b.id = :id"""), {"id": int(replace_id)})).first()
+        if old is None:
+            replace_html = f"<p>لا يوجد كتاب برقم {escape(replace_id)}.</p>"
+        else:
+            new_volume = md.get("volume") or "—"
+            def cell(a, b):
+                return f"<td>{escape(str(a))}</td><td>{escape(str(b))}</td><td>{'' if str(a) == str(b) else '⚠'}</td>"
+            differs = (normalize(book.get("title") or "") != normalize(old.title)
+                       or normalize(book.get("author") or "") != normalize(old.author or "")
+                       or str(new_volume) != str(old.volume or "—"))
+            replace_html = f"""<table><tr><th></th><th>المنشور #{old.id}</th><th>هذه النسخة</th><th></th></tr>
+              <tr><th>العنوان</th>{cell(old.title, book.get('title') or '')}</tr>
+              <tr><th>المؤلف</th>{cell(old.author or '—', book.get('author') or '—')}</tr>
+              <tr><th>المجلد</th>{cell(old.volume or '—', new_volume)}</tr>
+              <tr><th>الصفحات</th>{cell(old.page_count, report.get('pages', '—'))}</tr></table>
+            <p><small>تُحفظ نسخة الكتاب الحالي قبل الاستبدال ويمكن التراجع عنه. يبقى رقم الكتاب والعمل
+            والتصنيف كما هي.</small></p>
+            <form method="post" action="/admin/drafts/{escape(draft_id)}/publish">
+              <input type="hidden" name="replace_book_id" value="{old.id}">
+              {'<div class="row"><label><input type="checkbox" name="confirm" value="1"> أؤكد الاستبدال رغم الاختلاف المشار إليه (يبقى عنوان الكتاب ومؤلفه ومجلده المنشورة)</label></div>' if differs else ''}
+              <button type="submit">استبدال الكتاب #{old.id}</button></form>"""
     actions = ""
     if meta["status"] == "submitted":
         actions = f"""
@@ -1456,6 +1544,13 @@ async def draft_detail(
           <div class="row"><label>المكتبات (اختياري)</label><div class="checkbox-group">{library_options}</div></div>
           <button type="submit">نشر الكتاب</button>
         </form>
+        <h2>استبدال كتاب منشور بهذه النسخة المصححة</h2>
+        <form method="get" action="/admin/drafts/{escape(draft_id)}">
+          <div class="row"><label>رقم الكتاب المنشور الذي يُستبدل</label>
+            <input name="replace" type="number" min="1" value="{escape(replace_id)}" required></div>
+          <button type="submit" style="background:#555">مقارنة</button>
+        </form>
+        {replace_html}
         <h2>إعادة للموظف</h2>
         <form method="post" action="/admin/drafts/{escape(draft_id)}/return">
           <div class="row"><label>ما الذي يجب تصحيحه؟</label><textarea name="note" rows="3" required></textarea></div>
@@ -1463,6 +1558,13 @@ async def draft_detail(
         </form>"""
     elif meta["status"] == "published":
         actions = f'<p>نُشر ككتاب <a href="/admin/books/{meta["publishedBookId"]}">#{meta["publishedBookId"]}</a>.</p>'
+        if meta.get("replacedBackup"):
+            actions += f"""<p>استبدل نسخة سابقة ({meta.get('replacedOldPages', '—')} صفحة ← {meta.get('replacedNewPages', '—')}).
+            النسخة السابقة محفوظة.</p>
+            <form method="post" action="/admin/drafts/{escape(draft_id)}/undo-replace"
+                  onsubmit="return confirm('إعادة النسخة السابقة؟ تُستبدل الصفحات الحالية بها.')">
+              <button type="submit" style="background:#8a6d3b">تراجع: إعادة النسخة السابقة</button></form>"""
+
 
     body = f"""{banner}
     <p><a href="/admin/drafts">&rarr; قائمة المراجعة</a></p>
@@ -1503,6 +1605,8 @@ async def draft_publish(
     work_id: str = Form(""),
     subject: list[str] = Form([]),
     library: list[int] = Form([]),
+    replace_book_id: str = Form(""),
+    confirm: str = Form(""),
     session: AsyncSession = Depends(get_session),
     _: None = Depends(_require_admin),
     credentials: HTTPBasicCredentials = Depends(_security),
@@ -1514,17 +1618,48 @@ async def draft_publish(
     book = drafts.load_book(_drafts_root(), draft_id)
     if book is None:
         return RedirectResponse(f"{back}?err=لا يوجد ملف كتاب لهذه المسودة", status_code=303)
+    replaced: dict = {}
     new_book, new_work, error = await _import_book_json(
         session, book, volume=volume, work_id=work_id, subject=subject, library=library,
-        source="workbench",
+        source="workbench-replace" if replace_book_id.strip() else "workbench",
+        replace_book_id=replace_book_id, confirm_mismatch=bool(confirm), report=replaced,
     )
     if error:
         return RedirectResponse(f"{back}?err={error}", status_code=303)
+    extra = {}
+    if replace_book_id.strip():
+        extra = {"replacedBackup": replaced.get("backup"), "replacedOldPages": replaced.get("oldPages"),
+                 "replacedNewPages": replaced.get("newPages")}
     drafts.update(_drafts_root(), draft_id, status="published", publishedBookId=new_book,
-                  publishedAt=drafts.now(), publishedBy=credentials.username)
-    return RedirectResponse(
-        f"/admin/works/{new_work}?ok=تم نشر الكتاب رقم {new_book} من المحوّل", status_code=303
+                  publishedAt=drafts.now(), publishedBy=credentials.username, **extra)
+    done = (f"تم استبدال الكتاب #{new_book}: {replaced.get('oldPages', '—')} صفحة ← {replaced.get('newPages')} صفحة"
+            if replace_book_id.strip() else f"تم نشر الكتاب رقم {new_book} من المحوّل")
+    return RedirectResponse(f"/admin/works/{new_work}?ok={done}", status_code=303)
+
+
+@router.post("/drafts/{draft_id}/undo-replace")
+async def draft_undo_replace(
+    draft_id: str, session: AsyncSession = Depends(get_session),
+    _: None = Depends(_require_admin),
+) -> RedirectResponse:
+    """Put a replaced book's old pages back (from the file kept when it was replaced)."""
+    meta = _draft_or_404(draft_id)
+    back = f"/admin/drafts/{draft_id}"
+    if meta["status"] != "published" or not meta.get("replacedBackup"):
+        return RedirectResponse(f"{back}?err=لا توجد نسخة سابقة لهذا الكتاب", status_code=303)
+    aside = get_settings().books_root / REPLACED_DIR / Path(meta["replacedBackup"]).name
+    if not aside.exists():
+        return RedirectResponse(f"{back}?err=ملف النسخة السابقة غير موجود", status_code=303)
+    restored: dict = {}
+    book_id, work, error = await _import_book_json(
+        session, json.loads(aside.read_text(encoding="utf-8")), replace_book_id=str(meta["publishedBookId"]),
+        confirm_mismatch=True, source="workbench-undo", report=restored,
     )
+    if error:
+        return RedirectResponse(f"{back}?err={error}", status_code=303)
+    drafts.update(_drafts_root(), draft_id, status="submitted", replacedBackup=None,
+                  restoredAt=drafts.now())
+    return RedirectResponse(f"/admin/works/{work}?ok=أُعيدت النسخة السابقة للكتاب #{book_id}", status_code=303)
 
 
 @router.post("/drafts/{draft_id}/return")
