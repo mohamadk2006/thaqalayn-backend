@@ -26,7 +26,11 @@ async def search(
     authorName: list[str] | None = Query(
         None, description="One or more author names (use when the ID isn't known)"
     ),
-    work: list[int] | None = Query(None, description="One or more work IDs"),
+    work: list[int] | None = Query(
+        None,
+        description="Work IDs searched in addition to what the other filters select: "
+                    "(all the other filters together) OR work. With no other filter, only "
+                    "these works."),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> PageEnvelope[SearchHit]:

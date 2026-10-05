@@ -183,7 +183,7 @@ class TestPaginationAndFilters:
 
         response = await imported.get(
             "/api/search",
-            params={"q": "الامام الصادق", "work": work_id, "subject": "الطب"},
+            params={"q": "الامام الصادق", "subject": "الطب", "limit": 200},  # no work: it would be OR'd in
         )
         assert not any(h["bookId"] == BOOK_ID for h in response.json()["items"])
 
@@ -202,9 +202,18 @@ class TestPaginationAndFilters:
 
         response = await imported.get(
             "/api/search",
-            params={"q": "الامام الصادق", "work": work_id, "library": 999999999},
+            params={"q": "الامام الصادق", "library": 999999999, "limit": 200},
         )
         assert not any(h["bookId"] == BOOK_ID for h in response.json()["items"])
+
+    async def test_work_is_an_or_with_the_other_filters(self, imported: AsyncClient):
+        """work=ID adds that work to what the other filters select, for every client."""
+        work_id = await _work_id(imported)
+        response = await imported.get(
+            "/api/search",
+            params={"q": "الامام الصادق", "work": work_id, "subject": "الطب", "limit": 200},
+        )
+        assert any(h["bookId"] == BOOK_ID for h in response.json()["items"])
 
     async def test_filters_by_work(self, imported: AsyncClient):
         detail = (await imported.get(f"/api/books/{BOOK_ID}")).json()

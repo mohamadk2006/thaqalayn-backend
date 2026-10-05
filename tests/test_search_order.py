@@ -108,3 +108,31 @@ async def test_a_common_phrase_is_found_in_the_same_order(client, monkeypatch):
     assert found == EXPECTED
     r = await client.get("/api/search", params={"q": PHRASE, "limit": 2, "page": 2})
     assert [(h["workTitle"].split()[0], h["pageSequence"]) for h in r.json()["items"]] == EXPECTED[2:4]
+
+
+async def work_id(title):
+    async with get_sessionmaker()() as session:
+        return await session.scalar(text("SELECT id FROM works WHERE title_norm = :t"),
+                                    {"t": normalize(title)})
+
+
+async def test_work_adds_a_work_to_what_the_other_filters_select(client):
+    # author of the first book, plus the whole third work
+    third = await work_id(BOOKS[2][1])
+    found, total = await hits(client, authorName=BOOKS[0][2], work=third)
+    assert {t for t, _ in found} == {"باء", "جيم"} and total == 4
+    # without includeWork only the author's own book matches
+    only, _ = await hits(client, authorName=BOOKS[0][2])
+    assert {t for t, _ in only} == {"باء"}
+
+
+async def test_work_alone_searches_just_those_works(client):
+    second = await work_id(BOOKS[1][1])
+    found, _ = await hits(client, work=second)
+    assert {t for t, _ in found} == {"ألف"}
+
+
+async def test_work_does_not_widen_when_the_work_also_matches(client):
+    second = await work_id(BOOKS[1][1])
+    found, _ = await hits(client, authorName=BOOKS[1][2], work=second)
+    assert found == [("ألف", 1), ("ألف", 2)]

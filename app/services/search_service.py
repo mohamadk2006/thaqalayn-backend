@@ -190,10 +190,13 @@ async def search(
         params["author_names"] = [normalize(name) for name in author_names]
         expanding.append("author_names")
     if work_ids:
-        conditions.append("b.work_id IN :work_ids")
+        # The works named here are searched whatever the other filters say: "(author X AND
+        # subject Y) OR work Z", the way every client asks. With no other filter there is
+        # nothing to OR with: the search is just these works.
+        included = "b.work_id IN :work_ids"
+        conditions = [f"(({' AND '.join(conditions)}) OR {included})" if conditions else included]
         params["work_ids"] = work_ids
         expanding.append("work_ids")
-
     extra = (" AND " + " AND ".join(conditions)) if conditions else ""
     match_from = f"""
         FROM pages p
