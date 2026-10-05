@@ -189,14 +189,51 @@ async def search(
         conditions.append("a.name_norm IN :author_names")
         params["author_names"] = [normalize(name) for name in author_names]
         expanding.append("author_names")
+    # Each "side" is searched by itself: the filters together, and the works named (the
+    # works are added to what the filters select: "(author X AND subject Y) OR work Z").
+    # Searched as one (a AND b) OR c condition the planner gave up the per-batch index
+    # lookups, and common words took 3-45 seconds instead of half a second.
+    sides = [(conditions, expanding)] if conditions or not work_ids else []
     if work_ids:
-        # The works named here are searched whatever the other filters say: "(author X AND
-        # subject Y) OR work Z", the way every client asks. With no other filter there is
-        # nothing to OR with: the search is just these works.
-        included = "b.work_id IN :work_ids"
-        conditions = [f"(({' AND '.join(conditions)}) OR {included})" if conditions else included]
+        sides.append((["b.work_id IN :work_ids"], ["work_ids"]))
         params["work_ids"] = work_ids
-        expanding.append("work_ids")
+
+    # A query that is merely slow gets this long rather than failing.
+    await session.execute(text("SET LOCAL statement_timeout = '30000'"))
+    order = await _book_order(session)
+    rank = {book_id: n for n, book_id in enumerate(order)}
+    wanted = page * limit
+
+    keys: dict[int, tuple] = {}  # page id -> (rank of its book, sequence, book id), merged
+    complete = True
+    for side_conditions, side_expanding in sides:
+        found, side_complete = await _find_pages(
+            session, side_conditions, side_expanding, params, order, rank, wanted)
+        complete = complete and side_complete
+        for page_id, book_id, sequence in found:
+            keys[page_id] = (rank.get(book_id, len(rank)), sequence, book_id)
+    ranked = sorted(keys, key=lambda page_id: keys[page_id][:2])
+    chosen = ranked[(page - 1) * limit:wanted]
+    if not chosen:
+        return [], 0
+    rows = (await session.execute(text(f"""
+        WITH candidates AS (
+            SELECT p.id, p.book_id, p.sequence, p.page_number, p.section_id, 0 AS rn,
+                   ts_rank_cd(p.search_tsv, q) AS score
+            FROM pages p, phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query) q
+            WHERE p.id = ANY(:ids)
+        )
+        {_FINAL_SELECT}"""), {"normalized_query": normalized_query, "ids": chosen})).all()
+    by_page = {(row.book_id, row.sequence): row for row in rows}  # the select loses the order
+    ordered = [by_page[keys[i][2], keys[i][1]] for i in chosen if (keys[i][2], keys[i][1]) in by_page]
+    total = len(keys) if complete else max(_MATCH_LIMIT, len(keys))
+    return _build_hits(ordered, normalized_query, books_root), total
+
+
+async def _find_pages(session, conditions, expanding, params, order, rank, wanted):
+    """((page id, book id, sequence) of the pages that match under `conditions`, whether
+    that is all of them). Either every match, when there are few enough to find through the
+    index and sort here, or -- for a common word -- the first `wanted` in the books' order."""
     extra = (" AND " + " AND ".join(conditions)) if conditions else ""
     match_from = f"""
         FROM pages p
@@ -211,12 +248,6 @@ async def search(
         if expanding:
             stmt = stmt.bindparams(*(bindparam(name, expanding=True) for name in expanding))
         return stmt
-
-    # A query that is merely slow gets this long rather than failing.
-    await session.execute(text("SET LOCAL statement_timeout = '30000'"))
-    order = await _book_order(session)
-    rank = {book_id: n for n, book_id in enumerate(order)}
-    wanted = page * limit
 
     # 1. Most phrases match few enough pages to find them all through the index and sort
     #    them here: exact order, exact total. Words that are each common but rarely
@@ -236,60 +267,34 @@ async def search(
             raise
         await session.execute(text("SET LOCAL gin_fuzzy_search_limit = 100000"))
         found = (await session.execute(match_sql, params)).all()
+    await session.execute(text("SET LOCAL statement_timeout = '30000'"))  # the 15s was for this
     if len(found) <= _MATCH_LIMIT:
-        found.sort(key=lambda r: (rank.get(r.book_id, len(rank)), r.sequence))
-        chosen = [r.id for r in found[(page - 1) * limit:wanted]]
-        if not chosen:
-            return [], 0
-        rows = (await session.execute(text(f"""
-            WITH candidates AS (
-                SELECT p.id, p.book_id, p.sequence, p.page_number, p.section_id, 0 AS rn,
-                       ts_rank_cd(p.search_tsv, q) AS score
-                FROM pages p, phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query) q
-                WHERE p.id = ANY(:ids)
-            )
-            {_FINAL_SELECT}"""), {"normalized_query": normalized_query, "ids": chosen})).all()
-        by_id = {}  # the select does not keep the order chosen
-        for row in rows:
-            by_id[(row.book_id, row.sequence)] = row
-        wanted_order = {r.id: (r.book_id, r.sequence) for r in found}
-        ordered = [by_id[wanted_order[i]] for i in chosen if wanted_order[i] in by_id]
-        return _build_hits(ordered, normalized_query, books_root), len(found)
-
-    await session.execute(text("SET LOCAL statement_timeout = '30000'"))  # phase 1 set 15s
+        return [(r.id, r.book_id, r.sequence) for r in found], True
 
     # 2. A phrase on more pages than that is a common word: its first matches in the order
-    #    are found by taking the books a batch at a time until the page is full, where
-    #    sorting all of them timed out at 90 seconds. The total is then the count so far.
+    #    are found by taking the books a batch at a time until enough are found, where
+    #    sorting all of them timed out at 90 seconds.
     await session.execute(text("SET LOCAL gin_fuzzy_search_limit = 0"))
-    batch_sql = f"""
-        WITH candidates AS (
-            SELECT p.id, p.book_id, p.sequence, p.page_number, p.section_id, u.rn,
-                   ts_rank_cd(p.search_tsv, q) AS score
-            FROM unnest(CAST(:ids AS bigint[])) WITH ORDINALITY AS u(book_id, rn)
-            JOIN pages p ON p.book_id = u.book_id
-            JOIN books b ON b.id = p.book_id AND b.is_published
-            JOIN works w ON w.id = b.work_id
-            LEFT JOIN authors a ON a.id = b.author_id,
-            phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query) q
-            WHERE p.search_tsv @@ q{extra}
-            ORDER BY u.rn, p.sequence
-            LIMIT :take
-        )
-        {_FINAL_SELECT}
-        ORDER BY c.rn, c.sequence"""
+    batch_sql = statement(f"""
+        SELECT p.id, p.book_id, p.sequence
+        FROM unnest(CAST(:ids AS bigint[])) WITH ORDINALITY AS u(book_id, rn)
+        JOIN pages p ON p.book_id = u.book_id
+        JOIN books b ON b.id = p.book_id AND b.is_published
+        JOIN works w ON w.id = b.work_id
+        LEFT JOIN authors a ON a.id = b.author_id,
+        phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query) q
+        WHERE p.search_tsv @@ q{extra}
+        ORDER BY u.rn, p.sequence
+        LIMIT :take""")
     rows: list = []
     start, size = 0, _FIRST_BATCH
     while start < len(order) and len(rows) < wanted:
-        got = await session.execute(statement(batch_sql), {
+        got = await session.execute(batch_sql, {
             **params, "ids": order[start:start + size], "take": wanted - len(rows)})
         rows.extend(got.all())
         start += size
         size = min(size * 3, _MAX_BATCH)
-    rows = rows[(page - 1) * limit:wanted]
-    if not rows:
-        return [], 0
-    return _build_hits(rows, normalized_query, books_root), max(_MATCH_LIMIT, len(rows))
+    return [(r.id, r.book_id, r.sequence) for r in rows], False
 
 
 def _build_hits(rows, normalized_query: str, books_root: Path) -> list[SearchHit]:

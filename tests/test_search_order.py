@@ -136,3 +136,15 @@ async def test_work_does_not_widen_when_the_work_also_matches(client):
     second = await work_id(BOOKS[1][1])
     found, _ = await hits(client, authorName=BOOKS[1][2], work=second)
     assert found == [("ألف", 1), ("ألف", 2)]
+
+
+async def test_work_or_filters_on_a_common_phrase_merge_in_order(client, monkeypatch):
+    # both sides have more matches than _MATCH_LIMIT: each is found a batch of books at a time
+    monkeypatch.setattr(search_service, "_MATCH_LIMIT", 1)
+    monkeypatch.setattr(search_service, "_FIRST_BATCH", 1)
+    third = await work_id(BOOKS[2][1])
+    found, _ = await hits(client, authorName=BOOKS[0][2], work=third)
+    assert found == [("باء", 1), ("باء", 2), ("جيم", 1), ("جيم", 2)]
+    page2 = await client.get("/api/search", params={"q": PHRASE, "authorName": BOOKS[0][2],
+                                                   "work": third, "limit": 2, "page": 2})
+    assert [(h["workTitle"].split()[0], h["pageSequence"]) for h in page2.json()["items"]] == found[2:]
