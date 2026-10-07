@@ -314,7 +314,7 @@ def make_plan(doc: Path, pdf: Path, progress=None) -> dict:
         first_word.append(len(ocr) if words else None)
         ocr += words
     chain = _chain(ocr, text)
-    if len(chain) < 0.3 * min(len(ocr), len(text)) / NGRAM:
+    if len(chain) < 0.1 * min(len(ocr), len(text)) / NGRAM:
         raise PlanError("the PDF's text hardly matches the book's: is it the same book? "
                         f"({len(chain)} fixed points in {len(ocr)} PDF words and {len(text)} book words)")
 
