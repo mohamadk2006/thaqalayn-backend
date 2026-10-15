@@ -297,6 +297,7 @@ class TestPlanFromUploadedPdf:
 
     @staticmethod
     def fake_plan(monkeypatch, fail=False):
+        monkeypatch.setattr(wb.get_settings(), "plan_from_pdf", True)
         def make(folder, source_file):
             if fail:
                 raise RuntimeError("no OCR here")
@@ -1019,3 +1020,18 @@ def test_a_file_with_no_page_information_is_refused(tmp_path):
     c = conversion.converter()
     content, _ = c.convert_doc(path, "t", "a", 0, 1, c.HEADING_STYLE_RE)
     assert [i["code"] for i in conversion.source_report(c, path, content)["sourceIssues"]] == ["no-page-information"]
+
+
+class TestPlanFromPdfSwitchedOff:
+    async def test_the_derivation_is_off_by_default(self, employee, monkeypatch):
+        made = []
+        monkeypatch.setattr(wb.conversion, "make_page_plan", lambda *a: made.append(a))
+        monkeypatch.setattr(wb.conversion, "use_pdf", lambda folder, data: 2)
+        monkeypatch.setattr(wb.conversion, "extract_original_words", lambda folder, pages: None)
+        assert (await employee.get("/api/me")).json()["planFromPdf"] is False
+        r = await employee.post("/api/drafts", files={"file": ("كتاب.docx", make_docx()),
+                                                     "pdf": ("book.pdf", b"%PDF-1.4 x", "application/pdf")})
+        assert r.status_code == 200
+        assert not r.json().get("plan")
+        assert (await employee.post(f"/api/drafts/{r.json()['id']}/plan")).status_code == 409
+        assert made == []

@@ -154,7 +154,7 @@
       <input type="file" name="readme" accept=".txt">
       <label>ملف PDF للكتاب المطبوع <span class="hint">(اختياري، موصى به)</span></label>
       <div><input type="file" name="pdf" accept=".pdf,application/pdf">
-        <div class="hint">ارفع PDF الكتاب المطبوع: يقرؤه الخادم ويأخذ منه صفحات الكتاب وأرقامها وفهرسه تلقائياً،
+        <div class="hint" id="pdfHint">ارفع PDF الكتاب المطبوع: يقرؤه الخادم ويأخذ منه صفحات الكتاب وأرقامها وفهرسه تلقائياً،
           ويعرضه بجانب الكتاب للمقارنة (يستغرق بضع دقائق بعد الرفع، ولا تحتاج إلى أي ملف آخر).
           أو PDF محفوظ من Word نفسه للمقارنة فقط. بدون PDF تُعرض صفحات Word بعد تحويلها تلقائياً (قد تختلف عن المطبوع).</div></div>
       <label>ملف pages.json <span class="hint">(اختياري، متقدم)</span></label>
@@ -529,10 +529,12 @@ $("issuesClose").onclick = () => $("issuesDialog").close();
 
 // ── pages from the printed PDF (the server reads the PDF and matches it to the Word text) ──
 
+let planFromPdf = false;  // from /api/me: the server can switch the derivation off
 const planBusy = () => ["running", "converting"].includes((draft.plan || {}).status);
 
 function planText() {
   const pl = draft.plan || {};
+  if (!planFromPdf && !planBusy() && pl.status !== "done") return "";
   if (planBusy()) return `<span class="hint">جاري اشتقاق صفحات الكتاب المطبوع من ملف PDF… (قد يستغرق بضع دقائق، والتعديل متوقف حتى ينتهي)</span>`;
   if (pl.status === "done") {
     const unsure = (pl.unsure || []);
@@ -1142,7 +1144,7 @@ function buildExportObject() {
 
 // ── start ───────────────────────────────────────────────────────────────────
 
-api("GET", "/api/me").then(me => { $("userName").textContent = me.user; }).catch(() => {});
+api("GET", "/api/me").then(me => { $("userName").textContent = me.user; planFromPdf = !!me.planFromPdf; if (!planFromPdf) $("pdfHint").textContent = "يُعرض ملف PDF بجانب الكتاب للمقارنة فقط (اشتقاق الصفحات منه متوقف مؤقتاً). بدون PDF تُعرض صفحات Word."; }).catch(() => {});
 route();
 </script>
 </body>

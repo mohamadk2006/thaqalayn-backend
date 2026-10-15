@@ -43,6 +43,9 @@ class WorkbenchSettings(BaseSettings):
     workbench_root: Path = Path("data/workbench")
     # "name:password,name2:password2" -- the people allowed to use the workbench.
     workbench_users: str = ""
+    # Deriving the book's pages from an uploaded printed PDF is switched off for now; set
+    # PLAN_FROM_PDF=true to turn it back on. A given pages.json and the PDF comparison still work.
+    plan_from_pdf: bool = False
 
 
 @lru_cache
@@ -207,7 +210,8 @@ def health() -> dict:
 
 @app.get("/api/me")
 def me(user: str = Depends(current_user)) -> dict:
-    return {"user": user, "renderer": conversion.renderer_available()}
+    return {"user": user, "renderer": conversion.renderer_available(),
+            "planFromPdf": get_settings().plan_from_pdf}
 
 
 async def _read_page_plan(upload: UploadFile | None) -> bytes | None:
@@ -256,7 +260,7 @@ async def create_draft(
     if pdf is not None and pdf.filename:
         try:
             accepted = await _accept_pdf(meta["id"], pdf, background)
-            if plan is None:  # no pages.json given: the server makes the plan from the PDF
+            if plan is None and get_settings().plan_from_pdf:  # no pages.json given: the server makes the plan from the PDF
                 accepted = drafts.update(root(), meta["id"], plan=_plan_state("running"))
                 background.add_task(_plan_job, meta["id"], user)
             return accepted
@@ -323,6 +327,8 @@ def rerender(draft_id: str, background: BackgroundTasks, _: str = Depends(curren
 @app.post("/api/drafts/{draft_id}/plan")
 def make_plan_from_pdf(draft_id: str, background: BackgroundTasks, user: str = Depends(current_user)) -> dict:
     """Take the book's pages from the uploaded printed PDF (the draft's original)."""
+    if not get_settings().plan_from_pdf:
+        raise HTTPException(409, "اشتقاق الصفحات من PDF متوقف مؤقتاً")
     meta = _meta_or_404(draft_id)
     if meta["status"] not in drafts.EDITABLE:
         raise HTTPException(409, "المسودة مُرسلة للمراجعة أو منشورة، ولا يمكن تعديلها الآن")
