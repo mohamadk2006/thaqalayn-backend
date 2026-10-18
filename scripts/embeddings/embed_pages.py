@@ -5,7 +5,7 @@
     python embed_pages.py status                         # what the collection holds
 
 Reads GEMINI_API_KEY, QDRANT_URL and QDRANT_API_KEY from the environment (never from a file in the
-repo). A page is cut into chunks of about CHUNK_WORDS words (never across pages); a chunk's point id is
+repo). A page is cut into chunks of about CHUNK_WORDS words at sentence ends, with a repeated last sentence (never across pages); a chunk's point id is
 derived from (book, page sequence, chunk number), so a run can be repeated or resumed safely.
 """
 
@@ -26,10 +26,12 @@ MODEL = "gemini-embedding-2"
 DIMENSIONS = 768
 COLLECTION = os.environ.get("QDRANT_COLLECTION", "library_pilot")
 CHUNK_WORDS = 220
+OVERLAP_WORDS = 30  # the last sentence of a chunk is repeated at the start of the next
+HEADING_BREAK = 80  # a heading starts a new chunk once the current one has this many words
 MIN_WORDS = 6  # a chunk shorter than this (a page number, a lone line) is not worth a vector
 BATCH = 32
 # The free tier allows 100 embedding requests a minute (each text in a batch is one). 0 = no pacing (paid).
-PER_MINUTE = int(os.environ.get("EMBED_PER_MINUTE", "95"))
+PER_MINUTE = int(os.environ.get("EMBED_PER_MINUTE", "80"))
 GEMINI = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}"
 BOOKS_ROOT = Path(os.environ.get("BOOKS_ROOT", "/app/data/books"))
 _MARKS = re.compile("[ؐ-ًؚ-ٰٟۖ-ۭـ]")  # tashkeel, tatweel
@@ -40,28 +42,48 @@ def clean(text: str) -> str:
     return _SPACES.sub(" ", _MARKS.sub("", text)).strip()
 
 
-def page_chunks(page: dict, size: int = CHUNK_WORDS) -> list[str]:
-    """The page's headings and text, grouped paragraph by paragraph up to `size` words. A paragraph
-    longer than `size` is split by words. Footnotes are left out."""
-    blocks = [clean(b.get("text") or "") for b in page.get("blocks", []) if b.get("type") in ("heading", "text")]
+def _ends_sentence(word: str) -> bool:
+    return word.endswith((".", "؟", "!"))
+
+
+def page_chunks(page: dict, size: int = CHUNK_WORDS, overlap: int = OVERLAP_WORDS) -> list[str]:
+    """The page's headings and text as chunks of about `size` words, cut at the end of a sentence.
+    In many books a block is one printed line, not a paragraph, so block boundaries mean nothing:
+    the words are taken in order and a chunk ends at the last sentence end in its final part.
+    Each chunk repeats the last sentence of the one before (about `overlap` words), so a passage
+    cut at a boundary is whole in one of them. A heading starts a new chunk once there is enough
+    text before it. Footnotes are left out."""
     chunks: list[list[str]] = []
     current: list[str] = []
-    for block in (b for b in blocks if b):
-        words = block.split()
-        if len(words) > size:
-            if current:
-                chunks.append(current)
-                current = []
-            for i in range(0, len(words), size):
-                chunks.append(words[i:i + size])
+    fresh = 0  # words in `current` that are not the repeated overlap
+
+    def flush(cut: int) -> None:
+        nonlocal current, fresh
+        chunk, rest = current[:cut], current[cut:]
+        if fresh >= MIN_WORDS:
+            chunks.append(chunk)
+        tail = chunk[-overlap:]
+        starts = [i for i in range(1, len(tail)) if _ends_sentence(tail[i - 1])]
+        tail = tail[starts[-1]:] if starts and len(tail) - starts[-1] >= 5 else tail
+        current, fresh = tail + rest, len(rest)
+
+    for block in page.get("blocks", []):
+        if block.get("type") not in ("heading", "text"):
             continue
-        if len(current) + len(words) > size and current:
-            chunks.append(current)
-            current = []
+        words = clean(block.get("text") or "").split()
+        if not words:
+            continue
+        if block["type"] == "heading" and fresh >= HEADING_BREAK:
+            flush(len(current))
+            current, fresh = [], 0
         current += words
-    if current:
+        fresh += len(words)
+        while len(current) > size:
+            cut = next((i for i in range(size, int(size * 0.55), -1) if _ends_sentence(current[i - 1])), size)
+            flush(cut)
+    if fresh >= MIN_WORDS:
         chunks.append(current)
-    return [" ".join(c) for c in chunks if len(c) >= MIN_WORDS]
+    return [" ".join(c) for c in chunks]
 
 
 def book_points(book: dict) -> list[dict]:
@@ -113,7 +135,7 @@ class Gemini:
     def embed(self, texts: list[str]) -> list[list[float]]:
         body = {"requests": [{"model": f"models/{MODEL}", "content": {"parts": [{"text": t}]},
                               "outputDimensionality": DIMENSIONS} for t in texts]}
-        for attempt in range(8):
+        for attempt in range(40):
             self._pace(len(texts))
             status, headers, text = http("POST", f"{GEMINI}:batchEmbedContents", self.headers, body)
             if status == 200:
@@ -124,11 +146,12 @@ class Gemini:
             if status in (429, 500, 503):
                 told = re.search(r"retry in ([0-9.]+)s", text)
                 wait = float(headers.get("Retry-After") or (float(told.group(1)) + 1 if told else min(60, 2 ** attempt * 2)))
-                print(f"  gemini {status}: waiting {wait:.0f}s", file=sys.stderr, flush=True)
+                metric = re.search(r"Quota exceeded for metric: (\S+), limit: (\d+)", text)
+                print(f"  gemini {status}: waiting {wait:.0f}s {metric.group(1) + ' limit ' + metric.group(2) if metric else ''}", file=sys.stderr, flush=True)
                 time.sleep(wait)
                 continue
             raise RuntimeError(f"gemini {status}: {text[:300]}")
-        raise RuntimeError("gemini: still rate-limited after 8 tries")
+        raise RuntimeError("gemini: still rate-limited after 40 tries")
 
 
 class Qdrant:
