@@ -97,7 +97,26 @@ HONORIFICS = {
 }
 _HONORIFIC_MARK = {ch: chr(0xE100 + i) for i, ch in enumerate(HONORIFICS)}
 _HONORIFIC_TEXT = {mark: HONORIFICS[ch] for ch, mark in _HONORIFIC_MARK.items()}
-_HONORIFIC_RE = re.compile("[" + "".join(_HONORIFIC_MARK.values()) + "]")
+
+# Books typeset in the Mosawi font (al-Amili's "العلم والإيمان" series) draw the honorifics
+# from plain characters of that font, set directly on the run: "الإمام الرضا ×", "النبي محمد |",
+# "مريم ÷", "آل محمد ^", "الحسن والحسين ‘", "الإمام المنتظر #". Only runs in that font are read
+# this way; the same characters anywhere else stay as they are.
+FONT_HONORIFICS = {
+    "mosawi": {
+        "×": "عليه السلام",
+        "|": "صلى الله عليه وآله",
+        "÷": "عليها السلام",
+        "^": "عليهم السلام",
+        "‘": "عليهما السلام",
+        "#": "عجل الله فرجه الشريف",
+    },
+}
+_FONT_MARK = {font: {ch: chr(0xE140 + 16 * i + k) for k, ch in enumerate(chars)}
+              for i, (font, chars) in enumerate(FONT_HONORIFICS.items())}
+for _font, _marks in _FONT_MARK.items():
+    _HONORIFIC_TEXT.update({mark: FONT_HONORIFICS[_font][ch] for ch, mark in _marks.items()})
+_HONORIFIC_RE = re.compile("[" + "".join(_HONORIFIC_TEXT) + "]")
 
 # Some series type the honorific as a code between question marks (Arabic "؟"), which a
 # font of theirs draws as the calligraphic symbol: "الحسين؟ع؟". Only these exact codes are
@@ -121,6 +140,17 @@ _HONORIFIC_CODE_RE = re.compile("\u061f(" + "|".join(sorted(HONORIFIC_CODES, key
 
 def is_honorific_style(style: str) -> bool:
     return "alaem" in style.lower()
+
+
+_FONT_SLOTS = ("w:cs", "w:ascii", "w:hAnsi")
+
+
+def _font_slots(rpr, qn) -> dict[str, str]:
+    """The font names an rPr sets, by script slot."""
+    fonts = rpr.find(qn("w:rFonts")) if rpr is not None else None
+    if fonts is None:
+        return {}
+    return {slot: fonts.get(qn(slot)).strip().lower() for slot in _FONT_SLOTS if fonts.get(qn(slot))}
 
 
 def _honorific_marks(text: str) -> str:
@@ -718,6 +748,44 @@ def read_docx(path: Path, page_plan: dict | None = None, body_only: bool = False
                 style = None
             char_style_names[style_id] = style.name if style is not None else style_id
         return char_style_names[style_id]
+    style_slots: dict[tuple, dict[str, str]] = {}
+
+    def styled_slots(style_id: str | None, kind: int) -> dict[str, str]:
+        """The fonts a style gives, by slot, through the styles it is based on (kind 1:
+        paragraph, 2: character; no id: the default paragraph style)."""
+        key = (style_id, kind)
+        if key not in style_slots:
+            try:
+                style = document.styles.get_by_id(style_id, kind) if style_id else document.styles.default(kind)
+            except Exception:  # noqa: BLE001
+                style = None
+            slots: dict[str, str] = {}
+            for _ in range(10):
+                if style is None:
+                    break
+                slots = {**_font_slots(style.element.find(W_RPR), qn), **slots}
+                style = style.base_style
+            style_slots[key] = slots
+        return style_slots[key]
+
+    def run_font_marks(run, rpr) -> dict[str, str] | None:
+        """The honorific placeholders of a run whose font (its own, or its character or
+        paragraph style's, slot by slot) draws honorifics from plain characters. Any slot
+        counts: Word draws "×" with the Latin slot or, in a right-to-left run, the Arabic one."""
+        para = run.getparent()
+        while para is not None and para.tag != W_P:
+            para = para.getparent()
+        ppr = para.find(qn("w:pPr")) if para is not None else None
+        pstyle = ppr.find(qn("w:pStyle")) if ppr is not None else None
+        rstyle = rpr.find(qn("w:rStyle")) if rpr is not None else None
+        slots = {**styled_slots(pstyle.get(qn("w:val")) if pstyle is not None else None, 1),
+                 **(styled_slots(rstyle.get(qn("w:val")), 2) if rstyle is not None else {}),
+                 **_font_slots(rpr, qn)}
+        for name in slots.values():
+            if name in _FONT_MARK:
+                return _FONT_MARK[name]
+        return None
+
     marks = sum(1 for _ in body.iter(W_MARK))
     by_marks = marks > 0 and manual * FLOWING_TEXT_RATIO < marks
     deferred = page_plan is not None or body_only  # pages and notes are placed afterwards
@@ -736,6 +804,11 @@ def read_docx(path: Path, page_plan: dict | None = None, body_only: bool = False
                 if rstyle is not None and is_honorific_style(char_style(rstyle.get(qn("w:val")))):
                     for kind, value in walk(child):
                         yield (kind, _honorific_marks(value)) if kind == "text" else (kind, value)
+                    continue
+                font_marks = run_font_marks(child, rpr)
+                if font_marks:
+                    for kind, value in walk(child):
+                        yield (kind, "".join(font_marks.get(ch, ch) for ch in value)) if kind == "text" else (kind, value)
                     continue
             if tag == W_T:
                 yield "text", child.text or ""
@@ -1888,6 +1961,7 @@ def main() -> int:
     ap.add_argument("--heading-styles", help="comma-separated style names to treat as headings "
                     "(default: any style starting with Heading or Title)")
     ap.add_argument("--book-id", default="900001")
+    ap.add_argument("--page-plan", type=Path, help="the printed PDF's pages, from pdf_pages.py")
     ap.add_argument("--out", type=Path)
     ap.add_argument("--dump-styles", action="store_true", help="list paragraph styles and exit")
     ap.add_argument("--preview", type=int, default=0, help="print N pages of blocks")
@@ -1926,6 +2000,7 @@ def main() -> int:
             args.doc, title, author, args.front_pages, args.first_printed,
             heading_re, args.book_id, use_toc=not args.no_toc, extra_metadata=extra,
             blank_pages=[x for x in args.blank_page.split(",") if x.strip()],
+            page_plan=json.loads(args.page_plan.read_text(encoding="utf-8")) if args.page_plan else None,
         )
         anchors = content.pop("_anchors")
         recovered = content.pop("_recovered")

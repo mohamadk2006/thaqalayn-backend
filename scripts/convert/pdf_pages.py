@@ -37,13 +37,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import doc_to_json_v2 as conv  # noqa: E402
 
 HEADER_BELOW = 0.12  # share of the page height: the running header, if any, is above it
+HEADER_TOP = 0.13  # a header row without its number on it starts above this (a chapter's title lower)
 FOOTNOTES_BELOW = 0.62  # a footnote can start only below this
 ROW_GAP = 0.012  # lines this close in height are one row (the two halves of a verse)
 NGRAM = 4
 WORDS_PER_START = 6
 MIN_TEXT_PAGE_WORDS = 100  # words of body text that make a page part of the text, not front matter
+GOOD_MATCH = 0.4  # fixed points per word of a sound text layer (OCR of a clean print: ~0.8; a garbled layer: ~0.15)
 
-_FOOTNOTE_START = re.compile(r"^\W{0,2}[\d٠-٩]+\s*[\)\-–ـ]|^\(\s*[\d٠-٩]")
+_FOOTNOTE_START = re.compile(r"^\W{0,2}[\d٠-٩]+\s*[\)\-–ـ]|^\(\s*[\d٠-٩]|^[\d٠-٩]{1,2}\s+[\u0621-\u064a]")
 _NUMBERED_ENDS = re.compile(r"^\W*[\d٠-٩]{1,4}(?!\d)|(?<!\d)[\d٠-٩]{1,4}\W*$")
 _NUMBER = re.compile(r"[\d٠-٩]+")
 _ARABIC_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "0123456789" * 2)
@@ -55,13 +57,14 @@ class PlanError(Exception):
 
 # ── reading the PDF ─────────────────────────────────────────────────────────────
 
-def _ocr(png: bytes) -> list[tuple[float, float, float, str]]:
+def _ocr(png: bytes, words: bool = False) -> list[tuple[float, float, float, str]]:
     """Lines of a page image: macOS's Arabic OCR where there is one (the better reader),
-    otherwise Tesseract (what the server has)."""
+    otherwise Tesseract (what the server has). words=True makes Tesseract give each word
+    as its own cell, which a contents list needs (a row is a title, dots and a number)."""
     try:
         import Vision  # noqa: F401
     except ImportError:
-        return _ocr_tesseract(png)
+        return _ocr_tesseract(png, words)
     return _ocr_vision(png)
 
 
@@ -86,7 +89,7 @@ def _ocr_vision(png: bytes) -> list[tuple[float, float, float, str]]:
     return sorted(lines)
 
 
-def _ocr_tesseract(png: bytes) -> list[tuple[float, float, float, str]]:
+def _ocr_tesseract(png: bytes, words: bool = False) -> list[tuple[float, float, float, str]]:
     """The same lines from Tesseract (apt: tesseract-ocr, tesseract-ocr-ara): its words,
     grouped by the line it found them on, each line's words read right to left."""
     import csv
@@ -110,6 +113,9 @@ def _ocr_tesseract(png: bytes) -> list[tuple[float, float, float, str]]:
     if page is None:
         return []
     width, height = int(page["width"]), int(page["height"])
+    if words:
+        return sorted((int(r["top"]) / height, int(r["left"]) / width, int(r["width"]) / width, r["text"])
+                      for r in rows if r["level"] == "5" and r["text"].strip())
     by_line: dict[tuple, list] = {}
     for r in rows:
         if r["level"] == "5" and r["text"].strip():
@@ -125,9 +131,10 @@ def _ocr_tesseract(png: bytes) -> list[tuple[float, float, float, str]]:
     return sorted(lines)
 
 
-def pdf_lines(pdf: Path, progress=None) -> list[list[tuple[float, float, float, str]]]:
+def pdf_lines(pdf: Path, progress=None, ocr: bool = False) -> list[list[tuple[float, float, float, str]]]:
     """Per page: (top, left, width, text) for each line of text, top and left as shares of
-    the page."""
+    the page. ocr=True reads every page's picture instead of its text layer (a layer whose
+    font maps the letters wrongly: "اهلل" for "الله", letters apart, words out of order)."""
     try:
         import pymupdf
     except ImportError as exc:
@@ -137,7 +144,7 @@ def pdf_lines(pdf: Path, progress=None) -> list[list[tuple[float, float, float, 
     for i, page in enumerate(doc):
         w, h = page.rect.width, page.rect.height
         lines = []
-        for block in page.get_text("dict")["blocks"]:
+        for block in ([] if ocr else page.get_text("dict")["blocks"]):
             for line in block.get("lines", []):
                 text = "".join(span["text"] for span in line["spans"]).strip()
                 if text:
@@ -151,21 +158,46 @@ def pdf_lines(pdf: Path, progress=None) -> list[list[tuple[float, float, float, 
     return pages
 
 
-def split_page(lines) -> tuple[str, list[str]]:
-    """(the running header, the body's rows of text, right to left)."""
+def _rows(lines) -> list[tuple[float, str]]:
     rows: list[list] = []
     for top, left, _, text in lines:
         if rows and abs(rows[-1][0] - top) < ROW_GAP:
             rows[-1][1].append((left, text))
         else:
             rows.append([top, [(left, text)]])
+    return [(top, " ".join(t for _, t in sorted(cells, key=lambda c: -c[0]))) for top, cells in rows]
+
+
+def _header_key(text: str) -> str:
+    """A top row's letters alone (no number, mark or space), to recognise the same running
+    header on many pages however the OCR spaced or voweled it."""
+    return "".join(re.findall(r"[\u0621-\u064aa-zA-Z]", text))
+
+
+def running_headers(pages) -> set[str]:
+    """Top rows that recur on several pages (the book's title on one side, the chapter's on the
+    other): the running header even where no page number sits on the same row."""
+    count = collections.Counter(_header_key(rows[0][1]) for rows in map(_rows, pages)
+                                if rows and rows[0][0] < HEADER_TOP)
+    return {key for key, n in count.items() if key and n >= 2}
+
+
+def split_page(lines, running: set[str] = frozenset()) -> tuple[str, list[str]]:
+    """(the running header, the body's rows of text, right to left)."""
     header, body, in_footnotes = "", [], False
-    for k, (top, cells) in enumerate(rows):
-        text = " ".join(t for _, t in sorted(cells, key=lambda c: -c[0]))
+    rows = _rows(lines)
+    lone_number = lambda k: (k < len(rows) and rows[k][0] < HEADER_TOP + 0.03
+                             and _ONLY_NUMBER.match(rows[k][1].translate(_ARABIC_DIGITS)))
+    for k, (top, text) in enumerate(rows):
         # The running header is the first row, and has the page number at one end of it; a
-        # chapter's first page has none, and its first row is text.
-        if k == 0 and top < HEADER_BELOW and _NUMBERED_ENDS.search(text.strip()):
-            header = text
+        # chapter's first page has none, and its first row is text (set lower, as a title).
+        # A top row that recurs on other pages, or has a lone number just under it, is the
+        # header too, and that number its page number.
+        if not body and (
+                (k == 0 and top < HEADER_BELOW and _NUMBERED_ENDS.search(text.strip()))
+                or (k == 0 and top < HEADER_TOP and (_header_key(text) in running or lone_number(1)))
+                or (k == 1 and header and lone_number(1))):
+            header = f"{header} {text}"
             continue
         if top > FOOTNOTES_BELOW and _FOOTNOTE_START.match(text.strip()):
             in_footnotes = True
@@ -195,7 +227,7 @@ def _contents_rows(lines, page_count: int) -> list[tuple[str, int]]:
     ("١٦٨٠٠" for 168), so a number past the book's last page loses its trailing 00."""
     rows: list[list] = []
     for top, left, _, text in sorted(lines):
-        if rows and abs(rows[-1][0] - top) < ROW_GAP / 2:
+        if rows and abs(rows[-1][0] - top) < ROW_GAP:
             rows[-1][1].append((left, text))
         else:
             rows.append([top, [(left, text)]])
@@ -205,6 +237,8 @@ def _contents_rows(lines, page_count: int) -> list[tuple[str, int]]:
         number, title = None, []
         for left, text in cells:
             text = text.translate(_ARABIC_DIGITS)
+            if re.fullmatch(r"[.…·\-_\s:]+", text):
+                continue  # a dot leader
             m = _ONLY_NUMBER.match(text)
             if m and number is None and left < 0.4:
                 number = int(m.group(1))
@@ -236,12 +270,12 @@ def contents_entries(pdf: Path, lines_by_page, page_count: int, progress=None) -
     entries: list[dict] = []
     for k in candidates:
         try:
-            ocr_lines = _ocr(doc[k].get_pixmap(dpi=200).tobytes("png"))
+            ocr_lines = _ocr(doc[k].get_pixmap(dpi=200).tobytes("png"), words=True)
         except PlanError:
             ocr_lines = lines_by_page[k]
         rows = _contents_rows(ocr_lines, page_count)
-        body_rows = sum(1 for *_, t in ocr_lines if t.strip())
-        if len(rows) >= CONTENTS_MIN_ROWS and len(rows) >= CONTENTS_SHARE * (body_rows / 2):
+        text_rows = len({round(top / ROW_GAP) for top, *_ in ocr_lines})  # words or lines on one row
+        if len(rows) >= CONTENTS_MIN_ROWS and len(rows) >= CONTENTS_SHARE * text_rows:
             entries += [{"title": t, "page": n, "pdfPage": k + 1} for t, n in rows]
     # The list is in page order: a number far past the next ones, ending in 0, is a number
     # with a dot leader read as a zero ("90" for 9).
@@ -302,19 +336,32 @@ def make_plan(doc: Path, pdf: Path, progress=None) -> dict:
     paras = conv.read_any(doc, body_only=True)
     units = conv.body_units(paras)
     text = [u[3] for u in units]
-    pages = pdf_lines(pdf, progress)
 
-    ocr: list[str] = []
-    first_word: list[int | None] = []
-    numbers: list[int | None] = []
-    for lines in pages:
-        header, body = split_page(lines)
-        numbers.append(printed_number(header))
-        words = [t for row in body for t in (conv.unit_token(c) for c in row.split()) if t]
-        first_word.append(len(ocr) if words else None)
-        ocr += words
-    chain = _chain(ocr, text)
-    if len(chain) < 0.1 * min(len(ocr), len(text)) / NGRAM:
+    def read(pages):
+        running = running_headers(pages)
+        ocr: list[str] = []
+        first_word: list[int | None] = []
+        numbers: list[int | None] = []
+        for lines in pages:
+            header, body = split_page(lines, running)
+            numbers.append(printed_number(header))
+            words = [t for row in body for t in (conv.unit_token(c) for c in row.split()) if t]
+            first_word.append(len(ocr) if words else None)
+            ocr += words
+        return ocr, first_word, numbers, _chain(ocr, text)
+
+    def too_few(ocr, chain) -> bool:
+        return len(chain) < 0.1 * min(len(ocr), len(text)) / NGRAM
+
+    pages = pdf_lines(pdf, progress)
+    ocr, first_word, numbers, chain = read(pages)
+    # A text layer that hardly reads as the book (a font mapping its letters wrongly still
+    # matches here and there): read the page pictures instead, and keep the better reading.
+    if len(chain) < GOOD_MATCH * min(len(ocr), len(text)) and any(pages):
+        retry = read(pdf_lines(pdf, progress, ocr=True))
+        if len(retry[3]) > len(chain):
+            ocr, first_word, numbers, chain = retry
+    if too_few(ocr, chain):
         raise PlanError("the PDF's text hardly matches the book's: is it the same book? "
                         f"({len(chain)} fixed points in {len(ocr)} PDF words and {len(text)} book words)")
 
