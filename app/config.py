@@ -46,6 +46,17 @@ class Settings(BaseSettings):
     workbench_root: Path = Path("data/workbench")
     workbench_url: str = "https://convert.thaqalaynlibrary.com"
 
+    # The chatbot prototype (POST /api/chat): the question is embedded by the embedder
+    # container, searched in Qdrant, and answered by Gemini from the passages found.
+    # Off until GEMINI_API_KEY and QDRANT_API_KEY are set.
+    gemini_api_key: str = ""
+    gemini_chat_model: str = "gemini-3.5-flash-lite"
+    qdrant_url: str = "http://thaqalayn-qdrant:6333"
+    qdrant_api_key: str = ""
+    qdrant_collection: str = "library_bge_m3"
+    embedder_url: str = "http://thaqalayn-embedder:8080"
+    chat_passages: int = 8  # passages sent to Gemini with the question
+
     # Guards the /admin control panel (HTTP Basic). Required, no default -- an admin
     # panel with a guessable or absent credential is worse than no panel at all.
     admin_username: str

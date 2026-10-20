@@ -12,7 +12,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from app import __version__
-from app.api import admin, books, catalog_sync, health, metadata, search, toc_search, works
+from app.api import admin, books, catalog_sync, chat, health, metadata, search, toc_search, works
 from app.config import get_settings
 from app.db import dispose_engine
 
@@ -73,6 +73,7 @@ def create_app() -> FastAPI:
     app.include_router(metadata.router, prefix="/api")
     app.include_router(search.router, prefix="/api")
     app.include_router(toc_search.router, prefix="/api")
+    app.include_router(chat.router, prefix="/api")
     app.include_router(admin.router)
     return app
 

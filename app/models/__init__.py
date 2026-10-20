@@ -1,6 +1,7 @@
 """ORM models. Importing this package registers everything on Base.metadata, which is
 what Alembic's autogenerate diffs against."""
 
+from app.models.chat import ChatRequest
 from app.models.library import (
     Author,
     Book,
@@ -19,6 +20,7 @@ from app.models.library import (
 __all__ = [
     "Author",
     "Book",
+    "ChatRequest",
     "ImportLog",
     "Language",
     "Library",
