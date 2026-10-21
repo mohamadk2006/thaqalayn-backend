@@ -50,7 +50,10 @@ class Settings(BaseSettings):
     # container, searched in Qdrant, and answered by Gemini from the passages found.
     # Off until GEMINI_API_KEY and QDRANT_API_KEY are set.
     gemini_api_key: str = ""
-    gemini_chat_model: str = "gemini-3.5-flash-lite"
+    gemini_chat_model: str = "gemini-3.8-flash"
+    # Tried in order when the model above is busy (503), over quota (429) or too slow.
+    gemini_fallback_models: str = "gemini-3.6-flash,gemini-3.5-flash-lite"
+    gemini_attempt_timeout: float = 45.0  # seconds one model gets before the next is tried
     qdrant_url: str = "http://thaqalayn-qdrant:6333"
     qdrant_api_key: str = ""
     qdrant_collection: str = "library_bge_m3"

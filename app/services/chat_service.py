@@ -56,6 +56,8 @@ class ChatResult:
     finish_reason: str | None = None
     timings: dict = field(default_factory=dict)
     error: str | None = None
+    # Each Gemini model tried, in order: {"model", "status" (HTTP, 0 = no answer in time), "ms"}.
+    attempts: list = field(default_factory=list)
 
 
 def _post(url: str, body: dict, headers: dict, timeout: float) -> tuple[int, dict | str]:
@@ -70,6 +72,8 @@ def _post(url: str, body: dict, headers: dict, timeout: float) -> tuple[int, dic
             return r.status, json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode(errors="replace")
+    except (urllib.error.URLError, TimeoutError) as e:  # no answer in time, or unreachable
+        return 0, f"{type(e).__name__}: {e}"
 
 
 def build_contents(question: str, passages: list[dict]) -> str:
@@ -130,21 +134,34 @@ def _search(settings: Settings, vector: list[float]) -> list[dict]:
     return [{**hit["payload"], "score": round(hit["score"], 4)} for hit in body["result"]]
 
 
-def _gemini(settings: Settings, question: str, passages: list[dict]) -> tuple[int, dict | str]:
+# Gemini answers that another model may not share: the model is overloaded (503), over our
+# free-tier quota (429), failing (500), or did not answer in time (0).
+RETRY_STATUSES = (0, 429, 500, 503)
+
+
+def chat_models(settings: Settings) -> list[str]:
+    """The model to ask first, then the fallbacks in order (no repeats)."""
+    names = [settings.gemini_chat_model, *settings.gemini_fallback_models.split(",")]
+    return list(dict.fromkeys(n.strip() for n in names if n.strip()))
+
+
+def _gemini(
+    settings: Settings, model: str, question: str, passages: list[dict]
+) -> tuple[int, dict | str]:
     return _post(
-        GEMINI_URL.format(model=settings.gemini_chat_model),
+        GEMINI_URL.format(model=model),
         {
             "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
             "contents": [{"role": "user", "parts": [{"text": build_contents(question, passages)}]}],
             "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
         },
         {"x-goog-api-key": settings.gemini_api_key},
-        120,
+        settings.gemini_attempt_timeout,
     )
 
 
 def _answer(settings: Settings, question: str) -> ChatResult:
-    model = settings.gemini_chat_model
+    models = chat_models(settings)
     timings: dict[str, int] = {}
     t = time.monotonic()
     vector = _embed(settings, question)
@@ -154,14 +171,32 @@ def _answer(settings: Settings, question: str) -> ChatResult:
     passages = _search(settings, vector)
     timings["searchMs"] = round((time.monotonic() - t) * 1000)
     if not passages:
-        return ChatResult(None, [], "no_results", model, timings=timings)
+        return ChatResult(None, [], "no_results", models[0], timings=timings)
 
-    t = time.monotonic()
-    status, body = _gemini(settings, question, passages)
-    timings["llmMs"] = round((time.monotonic() - t) * 1000)
-    if status == 429:
+    # The first model that answers; a busy or failing one hands over to the next.
+    attempts: list[dict] = []
+    llm_start = time.monotonic()
+    status, body, model = 0, "", models[0]
+    for model in models:
+        t = time.monotonic()
+        status, body = _gemini(settings, model, question, passages)
+        attempts.append(
+            {"model": model, "status": status, "ms": round((time.monotonic() - t) * 1000)}
+        )
+        if status not in RETRY_STATUSES:
+            break
+    timings["llmMs"] = round((time.monotonic() - llm_start) * 1000)
+
+    if status in RETRY_STATUSES:  # every model was busy or failed
+        state = "rate_limited" if any(a["status"] in (429, 503) for a in attempts) else "error"
         return ChatResult(
-            None, passages, "rate_limited", model, timings=timings, error=str(body)[:500]
+            None,
+            passages,
+            state,
+            model,
+            timings=timings,
+            attempts=attempts,
+            error=f"gemini {status}: {str(body)[:500]}",
         )
     if status != 200 or not isinstance(body, dict):
         return ChatResult(
@@ -170,6 +205,7 @@ def _answer(settings: Settings, question: str) -> ChatResult:
             "error",
             model,
             timings=timings,
+            attempts=attempts,
             error=f"gemini {status}: {str(body)[:500]}",
         )
     answer, finish = read_answer(body)
@@ -181,6 +217,7 @@ def _answer(settings: Settings, question: str) -> ChatResult:
         usage=body.get("usageMetadata") or {},
         finish_reason=finish,
         timings=timings,
+        attempts=attempts,
         error=None if answer else f"no answer (finish reason {finish})",
     )
 
@@ -230,6 +267,7 @@ async def log_request(
         search_ms=result.timings.get("searchMs"),
         llm_ms=result.timings.get("llmMs"),
         total_ms=result.timings.get("totalMs"),
+        attempts=result.attempts or None,
         sources=[
             {k: p.get(k) for k in ("bookId", "sequence", "chunk", "page", "score")}
             for p in result.sources

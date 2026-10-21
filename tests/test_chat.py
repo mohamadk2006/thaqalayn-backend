@@ -153,3 +153,44 @@ def test_thought_parts_are_not_part_of_the_answer():
         ]
     }
     assert chat_service.read_answer(response) == ("الجواب", "STOP")
+
+
+async def test_a_busy_model_hands_over_to_the_next(app, logged, monkeypatch):
+    tried = []
+
+    def post(url, body, headers, timeout):
+        if url.endswith("/embed"):
+            return 200, {"vectors": [[0.0] * 1024], "ms": 5}
+        if "/points/search" in url:
+            return 200, {"result": [{"payload": PASSAGE, "score": 0.7}]}
+        model = url.split("/models/")[1].split(":")[0]
+        tried.append(model)
+        return (503, "high demand") if len(tried) == 1 else (200, GEMINI_OK)
+
+    monkeypatch.setattr(chat_service, "_post", post)
+    r = await _ask(app, "سؤال")
+    assert r.status_code == 200
+    assert tried == ["gemini-3.8-flash", "gemini-3.6-flash"]
+    assert r.json()["model"] == "gemini-3.6-flash"
+    attempts = logged[0]["result"].attempts
+    assert [(a["model"], a["status"]) for a in attempts] == [
+        ("gemini-3.8-flash", 503),
+        ("gemini-3.6-flash", 200),
+    ]
+
+
+async def test_all_models_busy_is_429_with_every_attempt_logged(app, logged, monkeypatch):
+    post, calls = fake_post(gemini_status=503, gemini_body="high demand")
+    monkeypatch.setattr(chat_service, "_post", post)
+    r = await _ask(app, "سؤال")
+    assert r.status_code == 429
+    assert [a["model"] for a in logged[0]["result"].attempts] == [
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+    ]
+
+
+def test_model_order_has_no_repeats():
+    s = Settings(gemini_chat_model="gemini-3.6-flash", gemini_fallback_models="gemini-3.6-flash, x")
+    assert chat_service.chat_models(s) == ["gemini-3.6-flash", "x"]

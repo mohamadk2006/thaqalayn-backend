@@ -51,6 +51,9 @@ class ChatRequest(Base):
     llm_ms: Mapped[int | None] = mapped_column(Integer)
     total_ms: Mapped[int | None] = mapped_column(Integer)
 
+    # Each Gemini model tried, in order: [{"model", "status", "ms"}]; `model` is the last one.
+    attempts: Mapped[list | None] = mapped_column(JSONB)
+
     # The passages sent to Gemini, in order: [{"bookId", "sequence", "chunk", "page", "score"}].
     sources: Mapped[list | None] = mapped_column(JSONB)
 
