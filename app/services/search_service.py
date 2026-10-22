@@ -23,6 +23,7 @@ changes -- the router and schema stay as they are.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from sqlalchemy import bindparam, text
@@ -201,6 +202,15 @@ async def search(
     # A query that is merely slow gets this long rather than failing.
     await session.execute(text("SET LOCAL statement_timeout = '30000'"))
     order = await _book_order(session)
+    # The same search again within a few minutes (popular words at a busy hour) is answered
+    # from memory; a book added or unpublished changes the order's signature, and the key.
+    cache_key = (normalized_query, page, limit, _order_cache[1] if _order_cache else None,
+                 *(tuple(sorted(map(str, v))) if v else () for v in (
+                     subject_ids, library_ids, languages, author_ids, author_names, work_ids)))
+    cached = _result_cache.get(cache_key)
+    if cached and time.monotonic() - cached[0] < _RESULT_TTL_SECONDS:
+        return cached[1]
+    common = await _common_words(session)
     rank = {book_id: n for n, book_id in enumerate(order)}
     wanted = page * limit
 
@@ -208,14 +218,14 @@ async def search(
     complete = True
     for side_conditions, side_expanding in sides:
         found, side_complete = await _find_pages(
-            session, side_conditions, side_expanding, params, order, rank, wanted)
+            session, side_conditions, side_expanding, params, order, rank, wanted, common)
         complete = complete and side_complete
         for page_id, book_id, sequence in found:
             keys[page_id] = (rank.get(book_id, len(rank)), sequence, book_id)
     ranked = sorted(keys, key=lambda page_id: keys[page_id][:2])
     chosen = ranked[(page - 1) * limit:wanted]
     if not chosen:
-        return [], 0
+        return _remember(cache_key, ([], 0))
     rows = (await session.execute(text(f"""
         WITH candidates AS (
             SELECT p.id, p.book_id, p.sequence, p.page_number, p.section_id, 0 AS rn,
@@ -227,10 +237,47 @@ async def search(
     by_page = {(row.book_id, row.sequence): row for row in rows}  # the select loses the order
     ordered = [by_page[keys[i][2], keys[i][1]] for i in chosen if (keys[i][2], keys[i][1]) in by_page]
     total = len(keys) if complete else max(_MATCH_LIMIT, len(keys))
-    return _build_hits(ordered, normalized_query, books_root), total
+    return _remember(cache_key, (_build_hits(ordered, normalized_query, books_root), total))
 
 
-async def _find_pages(session, conditions, expanding, params, order, rank, wanted):
+_RESULT_TTL_SECONDS = 300
+_RESULT_CACHE_SIZE = 2000
+_result_cache: dict[tuple, tuple[float, tuple]] = {}
+
+
+def _remember(key: tuple, result: tuple) -> tuple:
+    if len(_result_cache) >= _RESULT_CACHE_SIZE:  # drop the oldest
+        oldest = sorted(_result_cache, key=lambda k: _result_cache[k][0])
+        for old in oldest[: _RESULT_CACHE_SIZE // 4]:
+            del _result_cache[old]
+    _result_cache[key] = (time.monotonic(), result)
+    return result
+
+
+# A word on more than this share of all pages ("الله" 57%, "من" 80%) is not looked up in
+# the index for a small batch of books: its entry lists most of the library, and reading it
+# cost ~1 s a batch ("بسم الله الرحمن الرحيم"). The phrase's other words find the pages, and
+# the whole phrase is then checked on those.
+_COMMON_SHARE = 0.10
+_SMALL_BATCH = 16
+_COMMON_TTL_SECONDS = 3600
+_common_cache: tuple[float, dict[str, float]] | None = None
+
+
+async def _common_words(session: AsyncSession) -> dict[str, float]:
+    """Postgres's own statistics of the pages' words: {word: share of pages}, the commonest."""
+    global _common_cache
+    if _common_cache and time.monotonic() - _common_cache[0] < _COMMON_TTL_SECONDS:
+        return _common_cache[1]
+    rows = (await session.execute(text(
+        "SELECT e, f FROM pg_stats,"
+        " unnest(most_common_elems::text::text[], most_common_elem_freqs) x(e, f)"
+        " WHERE tablename = 'pages' AND attname = 'search_tsv'"))).all()
+    _common_cache = (time.monotonic(), {e: f for e, f in rows if f is not None})
+    return _common_cache[1]
+
+
+async def _find_pages(session, conditions, expanding, params, order, rank, wanted, common=None):
     """((page id, book id, sequence) of the pages that match under `conditions`, whether
     that is all of them). Either every match, when there are few enough to find through the
     index and sort here, or -- for a common word -- the first `wanted` in the books' order."""
@@ -309,11 +356,28 @@ async def _find_pages(session, conditions, expanding, params, order, rank, wante
         WHERE p.search_tsv @@ q{extra}
         ORDER BY u.rn, p.sequence
         LIMIT :take""")  # unchanged: a simpler form of it made the planner rescan the phrase
+    words = params["normalized_query"].split()
+    index_words = [w for w in words if (common or {}).get(w, 0) < _COMMON_SHARE]
+    small_sql = None
+    if index_words and len(index_words) < len(words):
+        small_sql = text(f"""
+            SELECT m.id, m.book_id, m.sequence FROM (
+                SELECT p.id, p.book_id, p.sequence FROM pages p
+                WHERE p.book_id = ANY(CAST(:ids AS bigint[]))
+                  AND p.search_tsv @@ plainto_tsquery('{SEARCH_TS_CONFIG}', :index_words)
+                  AND (p.search_tsv || ''::tsvector)
+                      @@ phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query)) m
+            JOIN unnest(CAST(:ids AS bigint[])) WITH ORDINALITY AS u(book_id, rn)
+              ON u.book_id = m.book_id
+            ORDER BY u.rn, m.sequence
+            LIMIT :take""")  # `order` already holds only published books (and the filter's)
     rows: list = []
     start, size = 0, _FIRST_BATCH
     while start < len(order) and len(rows) < wanted:
-        got = await session.execute(batch_sql, {
-            **params, "ids": order[start:start + size], "take": wanted - len(rows)})
+        sql = small_sql if small_sql is not None and size <= _SMALL_BATCH else batch_sql
+        extra_params = {"index_words": " ".join(index_words)} if sql is small_sql else {}
+        got = await session.execute(sql, {
+            **params, **extra_params, "ids": order[start:start + size], "take": wanted - len(rows)})
         rows.extend(got.all())
         start += size
         size = min(size * 3, _MAX_BATCH)

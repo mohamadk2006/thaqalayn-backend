@@ -146,7 +146,9 @@ function read(data) {
   let seq = 1 + Math.floor(Math.random() * Math.max(1, book.pages - 10));
   const pages = 3 + Math.floor(Math.random() * 8);  // a reader turns a few pages
   for (let i = 0; i < pages; i++) {
-    const r = get(`/books/${book.id}/pages/${seq + i}`, 'page');
+    // past a book's last page the API rightly answers 404: not a failure
+    const r = get(`/books/${book.id}/pages/${seq + i}`, 'page',
+      { responseCallback: http.expectedStatuses(200, 404) });
     check(r, { 'page 200/404': (x) => x.status === 200 || x.status === 404 });
     think(3, 10);
   }
