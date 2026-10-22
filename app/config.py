@@ -60,6 +60,21 @@ class Settings(BaseSettings):
     embedder_url: str = "http://thaqalayn-embedder:8080"
     chat_passages: int = 8  # passages sent to Gemini with the question
 
+    # Accounts (docs/accounts_sync_spec.md). Sign-in codes are stored as HMAC-SHA256 keyed
+    # with this pepper; without it, sign-in is switched off (503).
+    auth_code_pepper: str = ""
+    # The App Store review account: this email gets no email and accepts this fixed code.
+    # Empty: no bypass.
+    review_email: str = ""
+    review_code: str = ""
+    # Providers tried in order to send a code (brevo, resend; "console" writes the code to
+    # the server log instead, for development and testing). A provider without its key is
+    # skipped.
+    email_providers: str = "brevo,resend"
+    brevo_api_key: str = ""
+    resend_api_key: str = ""
+    email_from: str = "مكتبة الثقلين <noreply@thaqalaynlibrary.com>"
+
     # Guards the /admin control panel (HTTP Basic). Required, no default -- an admin
     # panel with a guessable or absent credential is worse than no panel at all.
     admin_username: str
