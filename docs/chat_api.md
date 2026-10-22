@@ -47,8 +47,24 @@ X-App-Version: 1.4.0           (optional, max 32 chars)
 |------|---------|------|
 | 422 | empty or too long message | `{"detail": …}` |
 | 429 | Gemini's free-tier limit reached; retry after `Retry-After` seconds | `{"detail": "الخدمة مشغولة الآن، حاول بعد دقيقة.", "id": …}` |
+| 429 | A limit was reached; `code` says which, `Retry-After` is the seconds to wait | `{"code": "daily_limit", "detail": "…", "limit": 10, "remaining": 0, "resetAt": "2026-10-23T00:00:00+00:00"}` |
+| 422 | Question longer than 500 characters | `{"code": "too_long", "detail": "…"}` |
 | 502 | a step failed | `{"detail": "تعذّرت الإجابة الآن، حاول مرة أخرى.", "id": …}` |
 | 503 | chat not enabled on the server | `{"detail": …}` |
 
 A full answer takes a few seconds: show a waiting state. Every request, failed ones too,
 is logged on the server with its tokens and timings (table `chat_requests`).
+
+
+## Limits
+
+Counted per asker: the signed-in user (`Authorization: Bearer`), else `X-Client-Id`, else the address.
+
+| `code` | Meaning | Default |
+|---|---|---|
+| `daily_limit` | Questions per asker per day, reset at 00:00 UTC | 10 |
+| `too_fast` | Questions per asker per minute | 3 |
+| `in_progress` | The asker's previous question is still being answered | 1 at a time |
+| `service_limit` | Everyone's questions today (protects the free Gemini quota) | 150 |
+
+A 200 answer carries `quota: {limit, remaining, resetAt}` so the app can show the questions left. Failed questions do not count against the asker's daily quota. Settings: `CHAT_DAILY_LIMIT`, `CHAT_PER_MINUTE`, `CHAT_GLOBAL_DAILY_LIMIT`, `CHAT_MAX_CHARS` (0 = no limit).

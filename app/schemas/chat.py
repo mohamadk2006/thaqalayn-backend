@@ -28,6 +28,12 @@ class ChatUsage(BaseModel):
     totalTokens: int | None = None
 
 
+class ChatQuota(BaseModel):
+    limit: int  # questions per day (0 = no limit)
+    remaining: int  # left today, after this one
+    resetAt: str  # when the day's count starts again (UTC, ISO 8601)
+
+
 class ChatOut(BaseModel):
     id: int  # the log row: quote it when reporting a bad answer
     status: str  # ok | no_results
@@ -38,3 +44,4 @@ class ChatOut(BaseModel):
     # What was searched besides the message itself (the rewrite step's texts)
     searchQueries: list[str] = []
     timings: dict[str, int]
+    quota: ChatQuota | None = None

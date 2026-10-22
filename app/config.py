@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     chat_rerank: bool = True
     gemini_rerank_model: str = "gemini-3.5-flash-lite"
     chat_candidates: int = 20
+    # Limits that keep the free Gemini quota from running out (app/services/chat_limits.py);
+    # 0 = no limit. A question costs about three Gemini calls.
+    chat_daily_limit: int = 10  # questions per asker per day (UTC)
+    chat_per_minute: int = 3  # questions per asker per minute
+    chat_global_daily_limit: int = 150  # questions per day for everyone
+    chat_max_chars: int = 500  # longest question
 
     # Accounts (docs/accounts_sync_spec.md). Sign-in codes are stored as HMAC-SHA256 keyed
     # with this pepper; without it, sign-in is switched off (503).

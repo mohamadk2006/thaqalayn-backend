@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from app.config import Settings, get_settings
 from app.db import get_session
 from app.main import create_app
-from app.services import chat_service
+from app.services import chat_limits, chat_service
 
 PASSAGE = {
     "bookId": "4407",
@@ -67,9 +67,15 @@ def fake_post(gemini_status=200, gemini_body=GEMINI_OK, hits=(PASSAGE,), rewrite
 def logged(monkeypatch):
     rows = []
 
-    async def record(session, question, result, client_id, app_version):
+    async def record(session, question, result, client_id, app_version, who=None):
         rows.append(
-            {"question": question, "result": result, "client": client_id, "version": app_version}
+            {
+                "question": question,
+                "result": result,
+                "client": client_id,
+                "version": app_version,
+                "who": who,
+            }
         )
         return len(rows)
 
@@ -77,8 +83,20 @@ def logged(monkeypatch):
     return rows
 
 
+@pytest.fixture(autouse=True)
+def used(monkeypatch):
+    """What the log says has been asked already; tests change its fields."""
+    c = chat_limits.Counts(day=0, minute=0, everyone=0)
+
+    async def counts(session, who, now):
+        return c
+
+    monkeypatch.setattr(chat_limits, "counts", counts)
+    return c
+
+
 @pytest.fixture
-def app() -> FastAPI:
+def app(used) -> FastAPI:
     app = create_app()
     settings = Settings(
         gemini_api_key="g", qdrant_api_key="q", chat_rewrite=False, chat_rerank=False
@@ -477,3 +495,47 @@ async def test_a_slow_keyword_is_given_up_and_the_others_kept(monkeypatch):
     monkeypatch.setattr(chat_service, "WORD_SEARCH_TIMEOUT", 0.2)
     _, info = await chat_service._word_search(Settings(), ["بطيء جدا", "سريع"])
     assert info["timedOut"] == ["بطيء جدا"] and "error" not in info
+
+
+async def test_asker_over_the_daily_limit_gets_429_without_a_gemini_call(
+    app, logged, used, monkeypatch
+):
+    post, calls = fake_post()
+    monkeypatch.setattr(chat_service, "_post", post)
+    used.day = 10
+    r = await _ask(app, "سؤال", {"X-Client-Id": "dev-1"})
+    assert r.status_code == 429 and r.json()["code"] == "daily_limit"
+    assert int(r.headers["retry-after"]) > 0 and r.json()["remaining"] == 0
+    assert not calls and not logged
+
+
+async def test_everyone_over_the_daily_total_and_too_fast(app, logged, used, monkeypatch):
+    monkeypatch.setattr(chat_service, "_post", fake_post()[0])
+    used.everyone = 150
+    assert (await _ask(app, "سؤال")).json()["code"] == "service_limit"
+    used.everyone, used.minute = 0, 3
+    r = await _ask(app, "سؤال")
+    assert r.json()["code"] == "too_fast" and r.headers["retry-after"] == "60"
+
+
+async def test_answer_reports_the_remaining_quota_and_who_asked(app, logged, used, monkeypatch):
+    monkeypatch.setattr(chat_service, "_post", fake_post()[0])
+    used.day = 3
+    r = await _ask(app, "سؤال", {"X-Client-Id": "dev-1"})
+    assert r.json()["quota"]["limit"] == 10 and r.json()["quota"]["remaining"] == 6
+    assert logged[0]["who"] == "c:dev-1"
+
+
+async def test_too_long_question_is_422(app, logged, monkeypatch):
+    r = await _ask(app, "ا" * 501)
+    assert r.status_code == 422 and r.json()["code"] == "too_long"
+
+
+async def test_second_question_while_one_is_running_is_refused(app, logged, used, monkeypatch):
+    monkeypatch.setattr(chat_service, "_post", fake_post()[0])
+    chat_limits.begin("c:dev-1")
+    try:
+        r = await _ask(app, "سؤال", {"X-Client-Id": "dev-1"})
+    finally:
+        chat_limits.end("c:dev-1")
+    assert r.status_code == 429 and r.json()["code"] == "in_progress"

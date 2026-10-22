@@ -532,11 +532,13 @@ async def log_request(
     result: ChatResult,
     client_id: str | None,
     app_version: str | None,
+    who: str | None = None,
 ) -> int:
     usage = result.usage
     row = ChatRequest(
         client_id=client_id,
         app_version=app_version,
+        who=who,
         message=question,
         answer=result.answer,
         status=result.status,

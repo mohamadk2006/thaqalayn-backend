@@ -29,6 +29,8 @@ class ChatRequest(Base):
     # count questions per device. Never a name or an account.
     client_id: Mapped[str | None] = mapped_column(Text)
     app_version: Mapped[str | None] = mapped_column(Text)
+    # Who asked, for the limits: "u:<user id>" signed in, else "c:<client id>", else "ip:<address>".
+    who: Mapped[str | None] = mapped_column(Text)
 
     message: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str | None] = mapped_column(Text)
@@ -76,4 +78,5 @@ class ChatRequest(Base):
         ),
         Index("ix_chat_requests_created", "created_at"),
         Index("ix_chat_requests_client", "client_id"),
+        Index("ix_chat_requests_who", "who", "created_at"),
     )
