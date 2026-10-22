@@ -60,7 +60,8 @@ async def chat(
                 page=str(p["page"]) if p.get("page") is not None else None,
                 sequence=p["sequence"],
                 text=p.get("text") or "",
-                score=p["score"],
+                score=p.get("score") or 0.0,
+                foundBy=p.get("foundBy"),
             )
             for n, p in enumerate(result.sources, 1)
         ],

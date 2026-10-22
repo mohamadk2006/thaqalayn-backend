@@ -59,6 +59,14 @@ class ChatRequest(Base):
     rewrite_tokens: Mapped[int | None] = mapped_column(Integer)
     rewrite_ms: Mapped[int | None] = mapped_column(Integer)
 
+    # The word search (keywords, hits, ms, error) and the rerank step (model, status, ms,
+    # candidates, the numbers it chose, usage); time and tokens split out.
+    word_search: Mapped[dict | None] = mapped_column(JSONB)
+    word_ms: Mapped[int | None] = mapped_column(Integer)
+    rerank: Mapped[dict | None] = mapped_column(JSONB)
+    rerank_tokens: Mapped[int | None] = mapped_column(Integer)
+    rerank_ms: Mapped[int | None] = mapped_column(Integer)
+
     # The passages sent to Gemini, in order: [{"bookId", "sequence", "chunk", "page", "score"}].
     sources: Mapped[list | None] = mapped_column(JSONB)
 

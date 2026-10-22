@@ -18,6 +18,7 @@ class ChatSource(BaseModel):
     sequence: int  # the page's position in the book: GET /api/books/{bookId}/pages/{sequence}
     text: str  # the passage itself (a ~220-word chunk of that page)
     score: float
+    foundBy: str | None = None  # "meaning" (vector search) or "words" (exact word search)
 
 
 class ChatUsage(BaseModel):

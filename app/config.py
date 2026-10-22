@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     # the way the books would say it (CHAT_REWRITE=false: search the message as typed).
     chat_rewrite: bool = True
     gemini_rewrite_model: str = "gemini-3.5-flash-lite"
+    # The rewrite's exact keywords also go to the library's word search (CHAT_WORD_SEARCH).
+    chat_word_search: bool = True
+    # A cheap model picks the best passages among the candidates (CHAT_RERANK=false: the
+    # merged order). CHAT_CANDIDATES: passages the vector search brings for it to choose from.
+    chat_rerank: bool = True
+    gemini_rerank_model: str = "gemini-3.5-flash-lite"
+    chat_candidates: int = 20
 
     # Accounts (docs/accounts_sync_spec.md). Sign-in codes are stored as HMAC-SHA256 keyed
     # with this pepper; without it, sign-in is switched off (503).

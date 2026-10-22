@@ -4,6 +4,8 @@ No database either: the log is written through chat_service.log_request, replace
 a recorder, so these tests check what is logged without needing Postgres.
 """
 
+import json
+
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -78,7 +80,9 @@ def logged(monkeypatch):
 @pytest.fixture
 def app() -> FastAPI:
     app = create_app()
-    settings = Settings(gemini_api_key="g", qdrant_api_key="q", chat_rewrite=False)
+    settings = Settings(
+        gemini_api_key="g", qdrant_api_key="q", chat_rewrite=False, chat_rerank=False
+    )
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_session] = lambda: None
     return app
@@ -105,6 +109,7 @@ async def test_answer_with_sources_usage_and_log(app, logged, monkeypatch):
         "sequence": 52,
         "text": PASSAGE["text"],
         "score": 0.7123,
+        "foundBy": "meaning",
     }
     assert body["usage"] == {
         "promptTokens": 900,
@@ -239,7 +244,13 @@ REWRITE_OK = (
 @pytest.fixture
 def rewriting_app() -> FastAPI:
     app = create_app()
-    settings = Settings(gemini_api_key="g", qdrant_api_key="q", chat_rewrite=True)
+    settings = Settings(
+        gemini_api_key="g",
+        qdrant_api_key="q",
+        chat_rewrite=True,
+        chat_rerank=False,
+        chat_word_search=False,
+    )
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_session] = lambda: None
     return app
@@ -311,3 +322,112 @@ def test_merged_lists_put_a_passage_found_by_several_texts_first(monkeypatch):
     monkeypatch.setattr(chat_service, "_post", post)
     out = chat_service._search(Settings(qdrant_api_key="q", chat_passages=2), [[0.0], [0.0]])
     assert [p["chunk"] for p in out] == [2, 0] and out[0]["score"] == 0.6
+
+
+# ── word search and rerank ──────────────────────────────────────────────────────────
+
+
+def _passage(n, book="1"):
+    return {**PASSAGE, "bookId": book, "sequence": n, "chunk": 0, "text": f"نص المقطع {n}"}
+
+
+def test_candidates_found_by_both_searches_come_first_and_keep_the_vector_passage():
+    meaning = [
+        {**_passage(1), "id": "a", "foundBy": "meaning"},
+        {**_passage(2), "id": "b", "foundBy": "meaning"},
+    ]
+    words = [
+        {**_passage(2), "id": "w2", "text": "word text", "foundBy": "words"},
+        {**_passage(3), "id": "w3", "foundBy": "words"},
+    ]
+    merged = chat_service.merge_candidates(meaning, words)
+    assert [p["sequence"] for p in merged] == [2, 1, 3]
+    assert merged[0]["foundBy"] == "meaning" and merged[0]["text"] == "نص المقطع 2"
+
+
+def rerank_reply(best):
+    return 200, {
+        "candidates": [
+            {"content": {"parts": [{"text": json.dumps({"best": best})}]}, "finishReason": "STOP"}
+        ],
+        "usageMetadata": {"totalTokenCount": 5000},
+    }
+
+
+def test_rerank_picks_and_orders_the_passages(monkeypatch):
+    seen = {}
+
+    def post(url, body, headers, timeout):
+        seen["prompt"] = body["contents"][0]["parts"][0]["text"]
+        return rerank_reply([3, 1, 3, 99])  # a repeat and an unknown number are dropped
+
+    monkeypatch.setattr(chat_service, "_post", post)
+    cands = [_passage(n) for n in (1, 2, 3)]
+    chosen, info = chat_service._rerank(Settings(gemini_api_key="g"), "سؤال", cands)
+    assert [p["sequence"] for p in chosen] == [3, 1] and info["best"] == [3, 1]
+    assert "[2] (الصحيفة السجادية، ج1، ص48)" in seen["prompt"] and seen["prompt"].startswith(
+        "السؤال: سؤال"
+    )
+
+
+def test_a_failed_or_empty_rerank_keeps_the_merged_order(monkeypatch):
+    cands = [_passage(n) for n in range(1, 12)]
+    for reply in ((503, "busy"), rerank_reply([])):
+        monkeypatch.setattr(chat_service, "_post", lambda *a, reply=reply: reply)
+        chosen, _ = chat_service._rerank(Settings(gemini_api_key="g", chat_passages=8), "q", cands)
+        assert [p["sequence"] for p in chosen] == list(range(1, 9))
+
+
+async def test_the_whole_chat_with_word_search_and_rerank(monkeypatch, logged):
+    app = create_app()
+    settings = Settings(gemini_api_key="g", qdrant_api_key="q")  # every step on
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_session] = lambda: None
+    word_hit = {**_passage(9, book="77"), "id": "w:77:9", "foundBy": "words", "score": 0.0}
+
+    async def fake_words(s, keywords):
+        assert keywords == ["الصبر رأس الإيمان"]
+        return [word_hit], {"keywords": keywords, "hits": 1, "ms": 12}
+
+    def post(url, body, headers, timeout):
+        if url.endswith("/embed"):
+            return 200, {"vectors": [[0.0] for _ in body["texts"]], "ms": 5}
+        if "/points/search" in url:
+            return 200, search_result(body, (PASSAGE,))
+        system = body["systemInstruction"]["parts"][0]["text"]
+        if system.startswith("You prepare searches"):
+            return 200, {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "queries": ["فضل الصبر"],
+                                            "keywords": ["الصبر رأس الإيمان"],
+                                        }
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usageMetadata": {"totalTokenCount": 300},
+            }
+        if system.startswith("You choose passages"):
+            return rerank_reply([2])  # the word-search page only
+        return 200, GEMINI_OK
+
+    monkeypatch.setattr(chat_service, "_word_search", fake_words)
+    monkeypatch.setattr(chat_service, "_post", post)
+    r = await _ask(app, "ما فضل الصبر؟")
+    body = r.json()
+    assert r.status_code == 200 and [s["bookId"] for s in body["sources"]] == ["77"]
+    assert body["sources"][0]["foundBy"] == "words"
+    assert {"rewriteMs", "embedMs", "searchMs", "wordMs", "rerankMs", "llmMs", "totalMs"} <= set(
+        body["timings"]
+    )
+    result = logged[0]["result"]
+    assert result.rerank["best"] == [2] and result.rerank["usage"]["totalTokenCount"] == 5000
+    assert result.words["hits"] == 1
