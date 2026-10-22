@@ -34,4 +34,6 @@ class ChatOut(BaseModel):
     sources: list[ChatSource]
     model: str
     usage: ChatUsage
+    # What was searched besides the message itself (the rewrite step's texts)
+    searchQueries: list[str] = []
     timings: dict[str, int]

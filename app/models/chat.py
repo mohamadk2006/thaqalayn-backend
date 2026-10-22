@@ -54,6 +54,11 @@ class ChatRequest(Base):
     # Each Gemini model tried, in order: [{"model", "status", "ms"}]; `model` is the last one.
     attempts: Mapped[list | None] = mapped_column(JSONB)
 
+    # The rewrite step (model, status, ms, the search texts, usage); its tokens and time split out.
+    rewrite: Mapped[dict | None] = mapped_column(JSONB)
+    rewrite_tokens: Mapped[int | None] = mapped_column(Integer)
+    rewrite_ms: Mapped[int | None] = mapped_column(Integer)
+
     # The passages sent to Gemini, in order: [{"bookId", "sequence", "chunk", "page", "score"}].
     sources: Mapped[list | None] = mapped_column(JSONB)
 

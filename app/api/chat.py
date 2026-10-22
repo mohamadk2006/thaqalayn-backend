@@ -70,5 +70,6 @@ async def chat(
             thoughtsTokens=usage.get("thoughtsTokenCount"),
             totalTokens=usage.get("totalTokenCount"),
         ),
+        searchQueries=(result.rewrite or {}).get("queries") or [],
         timings=result.timings,
     )

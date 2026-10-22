@@ -31,15 +31,31 @@ GEMINI_OK = {
 }
 
 
-def fake_post(gemini_status=200, gemini_body=GEMINI_OK, hits=(PASSAGE,)):
+def search_result(body, hits):
+    """Qdrant's batch answer: one list of hits per search in the request."""
+    return {
+        "result": [
+            [{"id": f"p{n}", "payload": h, "score": 0.71234} for n, h in enumerate(hits)]
+            for _ in body["searches"]
+        ]
+    }
+
+
+def is_rewrite(body):
+    return (body.get("generationConfig") or {}).get("responseMimeType") == "application/json"
+
+
+def fake_post(gemini_status=200, gemini_body=GEMINI_OK, hits=(PASSAGE,), rewrite=None):
     calls = []
 
     def post(url, body, headers, timeout):
         calls.append((url, body))
         if url.endswith("/embed"):
-            return 200, {"vectors": [[0.0] * 1024], "ms": 5}
+            return 200, {"vectors": [[0.0] * 1024 for _ in body["texts"]], "ms": 5}
         if "/points/search" in url:
-            return 200, {"result": [{"payload": h, "score": 0.71234} for h in hits]}
+            return 200, search_result(body, hits)
+        if is_rewrite(body):
+            return rewrite if rewrite else (500, "no rewrite in this test")
         return gemini_status, gemini_body
 
     return post, calls
@@ -62,7 +78,7 @@ def logged(monkeypatch):
 @pytest.fixture
 def app() -> FastAPI:
     app = create_app()
-    settings = Settings(gemini_api_key="g", qdrant_api_key="q")
+    settings = Settings(gemini_api_key="g", qdrant_api_key="q", chat_rewrite=False)
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_session] = lambda: None
     return app
@@ -160,9 +176,9 @@ async def test_a_busy_model_hands_over_to_the_next(app, logged, monkeypatch):
 
     def post(url, body, headers, timeout):
         if url.endswith("/embed"):
-            return 200, {"vectors": [[0.0] * 1024], "ms": 5}
+            return 200, {"vectors": [[0.0] * 1024 for _ in body["texts"]], "ms": 5}
         if "/points/search" in url:
-            return 200, {"result": [{"payload": PASSAGE, "score": 0.7}]}
+            return 200, search_result(body, (PASSAGE,))
         model = url.split("/models/")[1].split(":")[0]
         tried.append(model)
         return (503, "high demand") if len(tried) == 1 else (200, GEMINI_OK)
@@ -194,3 +210,104 @@ async def test_all_models_busy_is_429_with_every_attempt_logged(app, logged, mon
 def test_model_order_has_no_repeats():
     s = Settings(gemini_chat_model="gemini-3.6-flash", gemini_fallback_models="gemini-3.6-flash, x")
     assert chat_service.chat_models(s) == ["gemini-3.6-flash", "x"]
+
+
+# ── the rewrite step ────────────────────────────────────────────────────────────────
+
+REWRITE_OK = (
+    200,
+    {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {"text": '{"queries": ["فضل الصبر عن أبي عبد الله", "الصبر رأس الإيمان"]}'}
+                    ]
+                },
+                "finishReason": "STOP",
+            }
+        ],
+        "usageMetadata": {
+            "promptTokenCount": 300,
+            "candidatesTokenCount": 30,
+            "totalTokenCount": 330,
+        },
+    },
+)
+
+
+@pytest.fixture
+def rewriting_app() -> FastAPI:
+    app = create_app()
+    settings = Settings(gemini_api_key="g", qdrant_api_key="q", chat_rewrite=True)
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_session] = lambda: None
+    return app
+
+
+async def test_the_rewrite_texts_are_searched_with_the_message(rewriting_app, logged, monkeypatch):
+    post, calls = fake_post(rewrite=REWRITE_OK)
+    monkeypatch.setattr(chat_service, "_post", post)
+    r = await _ask(rewriting_app, "اكتب لي مقالة عن فضل الصبر")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["searchQueries"] == ["فضل الصبر عن أبي عبد الله", "الصبر رأس الإيمان"]
+    assert "rewriteMs" in body["timings"]
+    rewrite_call = next(b for u, b in calls if "generateContent" in u and is_rewrite(b))
+    assert "BGE-M3" in rewrite_call["systemInstruction"]["parts"][0]["text"]
+    assert "gemini-3.5-flash-lite" in next(
+        u for u, b in calls if "generateContent" in u and is_rewrite(b)
+    )
+    embedded = next(b for u, b in calls if u.endswith("/embed"))["texts"]
+    assert embedded == [
+        "اكتب لي مقالة عن فضل الصبر",
+        "فضل الصبر عن أبي عبد الله",
+        "الصبر رأس الإيمان",
+    ]
+    assert len(next(b for u, b in calls if "/points/search" in u)["searches"]) == 3
+    # the answer is to the user's own message
+    answer_call = [b for u, b in calls if "generateContent" in u and not is_rewrite(b)][-1]
+    assert answer_call["contents"][0]["parts"][0]["text"].endswith(
+        "السؤال: اكتب لي مقالة عن فضل الصبر"
+    )
+    result = logged[0]["result"]
+    assert (
+        result.rewrite["queries"] == body["searchQueries"]
+        and result.rewrite["usage"]["totalTokenCount"] == 330
+    )
+
+
+async def test_a_failed_rewrite_searches_the_message_as_typed(rewriting_app, logged, monkeypatch):
+    post, calls = fake_post(rewrite=(503, "high demand"))
+    monkeypatch.setattr(chat_service, "_post", post)
+    r = await _ask(rewriting_app, "ما فضل الصبر؟")
+    assert r.status_code == 200 and r.json()["status"] == "ok" and r.json()["searchQueries"] == []
+    assert next(b for u, b in calls if u.endswith("/embed"))["texts"] == ["ما فضل الصبر؟"]
+    assert logged[0]["result"].rewrite["status"] == 503
+
+
+async def test_rewrite_that_is_not_json_is_ignored(rewriting_app, logged, monkeypatch):
+    bad = (
+        200,
+        {"candidates": [{"content": {"parts": [{"text": "sorry"}]}, "finishReason": "STOP"}]},
+    )
+    post, calls = fake_post(rewrite=bad)
+    monkeypatch.setattr(chat_service, "_post", post)
+    assert (await _ask(rewriting_app, "سؤال")).status_code == 200
+    assert "not JSON" in logged[0]["result"].rewrite["error"]
+
+
+def test_merged_lists_put_a_passage_found_by_several_texts_first(monkeypatch):
+    a, b, c = ({**PASSAGE, "chunk": n} for n in range(3))
+
+    def post(url, body, headers, timeout):
+        return 200, {
+            "result": [
+                [{"id": "a", "payload": a, "score": 0.9}, {"id": "c", "payload": c, "score": 0.5}],
+                [{"id": "b", "payload": b, "score": 0.8}, {"id": "c", "payload": c, "score": 0.6}],
+            ]
+        }
+
+    monkeypatch.setattr(chat_service, "_post", post)
+    out = chat_service._search(Settings(qdrant_api_key="q", chat_passages=2), [[0.0], [0.0]])
+    assert [p["chunk"] for p in out] == [2, 0] and out[0]["score"] == 0.6

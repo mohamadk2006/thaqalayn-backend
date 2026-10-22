@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     qdrant_collection: str = "library_bge_m3"
     embedder_url: str = "http://thaqalayn-embedder:8080"
     chat_passages: int = 8  # passages sent to Gemini with the question
+    # Before the search, a cheap model turns the user's message into search texts written
+    # the way the books would say it (CHAT_REWRITE=false: search the message as typed).
+    chat_rewrite: bool = True
+    gemini_rewrite_model: str = "gemini-3.5-flash-lite"
 
     # Accounts (docs/accounts_sync_spec.md). Sign-in codes are stored as HMAC-SHA256 keyed
     # with this pepper; without it, sign-in is switched off (503).
