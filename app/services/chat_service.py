@@ -38,6 +38,7 @@ WORD_HITS_PER_KEYWORD = 6
 WORD_SEARCH_TIMEOUT = 8.0  # seconds for all the keywords together
 PASSAGE_RADIUS = 650  # characters each side of a word-search match: a passage of ~220 words
 RERANK_PASSAGE_CHARS = 1200  # of each candidate shown to the reranker
+COMMON_KEYWORD_SHARE = 0.02  # a keyword needs one word on fewer than 2% of all pages
 ANSWER_MAX_TOKENS = 8192  # the answer model's thinking and its answer together
 # The cheap steps are only worth their wait while short: past these the chat goes on without
 # them (the message searched as typed, the merged order).
@@ -69,10 +70,17 @@ Write 1 to 3 "queries" that:
 - are 5 to 30 words each, in Arabic (in Persian only when the user asks about Persian books);
 - differ from each other (another wording, another likely phrasing in the books).
 
-2. An exact word search: pages that hold the words side by side, as written (diacritics and
-hamza forms do not matter). Write 0 to 3 "keywords", each 1 to 4 words, that the answering
-page would contain exactly: a name, a rare term, a book title, a distinctive phrase of a
-well-known narration or verse. Never a word found on most pages (الله، قال، النبي، الإمام).
+2. An exact word search: pages that hold the words side by side, exactly as written
+(diacritics and hamza forms do not matter). It is only useful for words that are RARE in a
+large religious library, so it finds the few pages that matter. Write 0 to 3 "keywords",
+each 2 to 6 words, that the answering page would contain word for word:
+- the distinctive words of a narration, verse or saying the user quotes or means
+  (good: "الصبر رأس الإيمان", "أول أهل بيته لحوقا به", "إني تارك فيكم الثقلين");
+- a person, place, book or event that is rarely mentioned (good: "علاء الدولة", "واقعة الحرة");
+- a rare technical term (good: "الجندبادستر", "بيع الصرف").
+Never a topic word or a common phrase that thousands of pages contain (bad: "فضل الصبر",
+"الصابرين", "البلاء", "الإمام علي", "حكم الصلاة"). When nothing in the message is that
+distinctive, give no keywords: an empty list is better than a common one.
 
 If the message is not about the books' content (a greeting, a question about you), return
 both lists empty. Return only JSON: {"queries": ["..."], "keywords": ["..."]}"""
@@ -287,6 +295,18 @@ async def _word_search(settings: Settings, keywords: list[str]) -> tuple[list[di
     from app.services.arabic import find_original_match, normalize
 
     t = time.monotonic()
+    # A keyword of only common words (each on 2%+ of the library's pages, by Postgres's own
+    # statistics) finds thousands of pages in book order, not the few that matter: dropped.
+    async with get_sessionmaker()() as session:
+        common = await search_service._common_words(session)
+    asked = keywords
+    keywords = [
+        k
+        for k in keywords
+        if any(common.get(w, 0) < COMMON_KEYWORD_SHARE for w in normalize(k).split())
+    ]
+    if not keywords:
+        return [], {"keywords": [], "dropped": asked, "hits": 0, "ms": _ms(t)}
 
     async def one(keyword: str) -> list[dict]:
         async with get_sessionmaker()() as session:
@@ -333,6 +353,8 @@ async def _word_search(settings: Settings, keywords: list[str]) -> tuple[list[di
             asyncio.gather(*(one(k) for k in keywords)), WORD_SEARCH_TIMEOUT
         )
         info = {"keywords": keywords, "hits": sum(len(x) for x in lists)}
+        if len(keywords) < len(asked):
+            info["dropped"] = [k for k in asked if k not in keywords]
     except Exception as exc:  # noqa: BLE001 -- a slow or failed word search: vectors alone
         lists, info = (
             [],

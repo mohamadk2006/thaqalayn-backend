@@ -431,3 +431,29 @@ async def test_the_whole_chat_with_word_search_and_rerank(monkeypatch, logged):
     result = logged[0]["result"]
     assert result.rerank["best"] == [2] and result.rerank["usage"]["totalTokenCount"] == 5000
     assert result.words["hits"] == 1
+
+
+async def test_keywords_of_only_common_words_are_dropped(monkeypatch):
+    from app.services import search_service
+
+    async def common(session):
+        return {"الامام": 0.08, "علي": 0.72, "حكم": 0.08, "الصلاه": 0.07}
+
+    searched = []
+
+    async def search(session, query, **kw):
+        searched.append(query)
+        return [], 0
+
+    monkeypatch.setattr(search_service, "_common_words", common)
+    monkeypatch.setattr(search_service, "search", search)
+    _, info = await chat_service._word_search(
+        Settings(), ["الإمام علي", "الصبر رأس الإيمان", "حكم الصلاة"]
+    )
+    assert searched == ["الصبر رأس الإيمان"]
+    assert info["keywords"] == ["الصبر رأس الإيمان"] and info["dropped"] == [
+        "الإمام علي",
+        "حكم الصلاة",
+    ]
+    _, info = await chat_service._word_search(Settings(), ["الإمام علي"])
+    assert info["keywords"] == [] and info["hits"] == 0
