@@ -38,6 +38,11 @@ WORD_HITS_PER_KEYWORD = 6
 WORD_SEARCH_TIMEOUT = 8.0  # seconds for all the keywords together
 PASSAGE_RADIUS = 650  # characters each side of a word-search match: a passage of ~220 words
 RERANK_PASSAGE_CHARS = 1200  # of each candidate shown to the reranker
+ANSWER_MAX_TOKENS = 8192  # the answer model's thinking and its answer together
+# The cheap steps are only worth their wait while short: past these the chat goes on without
+# them (the message searched as typed, the merged order).
+REWRITE_TIMEOUT = 8
+RERANK_TIMEOUT = 10
 
 SYSTEM_PROMPT = """أنت مساعد البحث في مكتبة الثقلين، وهي مكتبة كتب إسلامية شيعية.
 تُعطى سؤال المستخدم ومقاطع مرقّمة من كتب المكتبة.
@@ -199,7 +204,7 @@ def _strings(value, most: int) -> list[str]:
 def _rewrite(settings: Settings, question: str) -> tuple[list[str], list[str], dict]:
     """(search texts, keywords, log record). Never raises."""
     out, info = _json_call(
-        settings, settings.gemini_rewrite_model, REWRITE_PROMPT, question, 500, 20
+        settings, settings.gemini_rewrite_model, REWRITE_PROMPT, question, 500, REWRITE_TIMEOUT
     )
     if out is None:
         return [], [], info
@@ -360,7 +365,7 @@ def _rerank(settings: Settings, question: str, candidates: list[dict]) -> tuple[
         RERANK_PROMPT.format(top=top),
         f"السؤال: {question}\n\nالمقاطع:\n\n{listing}",
         200,
-        30,
+        RERANK_TIMEOUT,
     )
     info["candidates"] = len(candidates)
     best = []
@@ -395,7 +400,9 @@ def _gemini(
         {
             "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
             "contents": [{"role": "user", "parts": [{"text": build_contents(question, passages)}]}],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
+            # thinking counts against this limit: at 2048, a model that thought for 1,967
+            # tokens was cut off after 77 tokens of answer, mid-sentence
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": ANSWER_MAX_TOKENS},
         },
         {"x-goog-api-key": settings.gemini_api_key},
         settings.gemini_attempt_timeout,
