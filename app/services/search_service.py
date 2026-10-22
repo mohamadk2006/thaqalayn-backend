@@ -235,19 +235,35 @@ async def _find_pages(session, conditions, expanding, params, order, rank, wante
     that is all of them). Either every match, when there are few enough to find through the
     index and sort here, or -- for a common word -- the first `wanted` in the books' order."""
     extra = (" AND " + " AND ".join(conditions)) if conditions else ""
-    match_from = f"""
-        FROM pages p
-        JOIN books b ON b.id = p.book_id AND b.is_published
-        JOIN works w ON w.id = b.work_id
-        LEFT JOIN authors a ON a.id = b.author_id,
-        phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query) q
-        WHERE p.search_tsv @@ q{extra}"""
 
     def statement(sql: str):
         stmt = text(sql)
         if expanding:
             stmt = stmt.bindparams(*(bindparam(name, expanding=True) for name in expanding))
         return stmt
+
+    match_from = f"""
+        FROM pages p
+        JOIN books b ON b.id = p.book_id AND b.is_published,
+        phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query) q
+        WHERE p.search_tsv @@ q"""
+    if conditions:
+        # 0. A filtered search takes the filter's books first and searches only their pages:
+        #    the planner then ANDs the book index with the word index. With the filter checked
+        #    after the match instead, a phrase common in the library but rare in the subject
+        #    ("نهج البلاغة" in medicine: 366 pages) rechecked all 85,000 pages holding it and
+        #    timed out at 45 s; this way it takes 0.16 s. The books' order is narrowed the same
+        #    way, so the batches of step 2 hold only the filter's books.
+        book_ids = [r[0] for r in (await session.execute(statement(
+            "SELECT b.id FROM books b JOIN works w ON w.id = b.work_id"
+            f" LEFT JOIN authors a ON a.id = b.author_id WHERE b.is_published{extra}"),
+            params)).all()]
+        if not book_ids:
+            return [], True
+        params = {**params, "filter_book_ids": book_ids}
+        match_from += " AND p.book_id = ANY(CAST(:filter_book_ids AS bigint[]))"
+        allowed = set(book_ids)
+        order = [book_id for book_id in order if book_id in allowed]
 
     # 1. Most phrases match few enough pages to find them all through the index and sort
     #    them here: exact order, exact total. Words that are each common but rarely
@@ -260,8 +276,7 @@ async def _find_pages(session, conditions, expanding, params, order, rank, wante
     #    tsvector until it has 1,001 matches -- 1.6-4.6 s each, mostly disk, and searches
     #    running together then queue on it (15-30 s at five users). Through the index the
     #    same 1,001 take 0.1-0.2 s.
-    match_sql = statement(
-        f"SELECT p.id, p.book_id, p.sequence {match_from} LIMIT {_MATCH_LIMIT + 1}")
+    match_sql = text(f"SELECT p.id, p.book_id, p.sequence {match_from} LIMIT {_MATCH_LIMIT + 1}")
     try:
         async with session.begin_nested():
             await session.execute(text("SET LOCAL statement_timeout = '15000'"))
@@ -293,7 +308,7 @@ async def _find_pages(session, conditions, expanding, params, order, rank, wante
         phraseto_tsquery('{SEARCH_TS_CONFIG}', :normalized_query) q
         WHERE p.search_tsv @@ q{extra}
         ORDER BY u.rn, p.sequence
-        LIMIT :take""")
+        LIMIT :take""")  # unchanged: a simpler form of it made the planner rescan the phrase
     rows: list = []
     start, size = 0, _FIRST_BATCH
     while start < len(order) and len(rows) < wanted:

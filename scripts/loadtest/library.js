@@ -71,8 +71,8 @@ export const options = {
   },
   thresholds: {
     // stop the test (not just fail it) before it hurts the real users
-    http_req_failed: [{ threshold: 'rate<0.02', abortOnFail: true, delayAbortEval: '1m' }],
-    'http_req_duration{kind:search}': [{ threshold: 'p(95)<15000', abortOnFail: true, delayAbortEval: '1m' }],
+    http_req_failed: [{ threshold: 'rate<0.02', abortOnFail: true, delayAbortEval: '3m' }],
+    'http_req_duration{kind:search}': [{ threshold: 'p(95)<15000', abortOnFail: true, delayAbortEval: '3m' }],
     // the goals, reported as pass/fail
     'search_ms{query:common}': ['p(95)<3000'],
     'search_ms{query:rare}': ['p(95)<1500'],
@@ -122,6 +122,9 @@ function search(data) {
   const r = get(path, 'search', { tags: { kind: 'search', name: 'search', query } });
   check(r, { 'search 200': (x) => x.status === 200 });
   searchMs.add(r.timings.duration, { query: query.replace('_filtered', '') });
+  if (r.timings.duration > 5000) {  // which searches are slow, to look into them
+    console.log(`SLOW ${(r.timings.duration / 1000).toFixed(1)}s ${query} ${decodeURIComponent(path)}`);
+  }
   if (r.status === 200) searchHits.add(r.json('total') || 0);
   // a third of searchers look at the next page of results
   if (r.status === 200 && Math.random() < 0.33) {
