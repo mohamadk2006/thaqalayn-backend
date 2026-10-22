@@ -457,3 +457,23 @@ async def test_keywords_of_only_common_words_are_dropped(monkeypatch):
     ]
     _, info = await chat_service._word_search(Settings(), ["الإمام علي"])
     assert info["keywords"] == [] and info["hits"] == 0
+
+
+async def test_a_slow_keyword_is_given_up_and_the_others_kept(monkeypatch):
+    import asyncio
+
+    from app.services import search_service
+
+    async def common(session):
+        return {}
+
+    async def search(session, query, **kw):
+        if query == "بطيء جدا":
+            await asyncio.sleep(5)
+        return [], 0
+
+    monkeypatch.setattr(search_service, "_common_words", common)
+    monkeypatch.setattr(search_service, "search", search)
+    monkeypatch.setattr(chat_service, "WORD_SEARCH_TIMEOUT", 0.2)
+    _, info = await chat_service._word_search(Settings(), ["بطيء جدا", "سريع"])
+    assert info["timedOut"] == ["بطيء جدا"] and "error" not in info

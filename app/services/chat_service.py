@@ -348,18 +348,24 @@ async def _word_search(settings: Settings, keywords: list[str]) -> tuple[list[di
             )
         return out
 
-    try:
-        lists = await asyncio.wait_for(
-            asyncio.gather(*(one(k) for k in keywords)), WORD_SEARCH_TIMEOUT
-        )
-        info = {"keywords": keywords, "hits": sum(len(x) for x in lists)}
-        if len(keywords) < len(asked):
-            info["dropped"] = [k for k in asked if k not in keywords]
-    except Exception as exc:  # noqa: BLE001 -- a slow or failed word search: vectors alone
-        lists, info = (
-            [],
-            {"keywords": keywords, "hits": 0, "error": f"{type(exc).__name__}: {exc}"[:200]},
-        )
+    # each keyword on its own: the ones done in time are kept, a slow one is given up
+    tasks = {asyncio.ensure_future(one(k)): k for k in keywords}
+    done, pending = await asyncio.wait(tasks, timeout=WORD_SEARCH_TIMEOUT)
+    for task in pending:
+        task.cancel()
+    lists, failed = [], {}
+    for task in done:
+        if task.exception() is not None:
+            failed[tasks[task]] = f"{type(task.exception()).__name__}: {task.exception()}"[:150]
+        else:
+            lists.append(task.result())
+    info = {"keywords": keywords, "hits": sum(len(x) for x in lists)}
+    if pending:
+        info["timedOut"] = [tasks[task] for task in pending]
+    if failed:
+        info["failed"] = failed
+    if len(keywords) < len(asked):
+        info["dropped"] = [k for k in asked if k not in keywords]
     info["ms"] = round((time.monotonic() - t) * 1000)
     return rrf(lists), info
 
