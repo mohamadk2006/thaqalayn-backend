@@ -255,19 +255,27 @@ async def _find_pages(session, conditions, expanding, params, order, rank, wante
     #    scan recheck every page that holds both words: 8 seconds the first time, 0.2 after.
     #    A search that takes over 15 seconds is made again with gin_fuzzy_search_limit, which
     #    thins that scan at random and so finds only some of the pages (206 of the 534).
+    #    Always through the GIN index: for a very common word ("النار", 294,000 pages) the
+    #    planner otherwise reads the pages table from the start, detoasting every page's
+    #    tsvector until it has 1,001 matches -- 1.6-4.6 s each, mostly disk, and searches
+    #    running together then queue on it (15-30 s at five users). Through the index the
+    #    same 1,001 take 0.1-0.2 s.
     match_sql = statement(
         f"SELECT p.id, p.book_id, p.sequence {match_from} LIMIT {_MATCH_LIMIT + 1}")
     try:
         async with session.begin_nested():
             await session.execute(text("SET LOCAL statement_timeout = '15000'"))
             await session.execute(text("SET LOCAL gin_fuzzy_search_limit = 0"))
+            await session.execute(text("SET LOCAL enable_seqscan = off"))
             found = (await session.execute(match_sql, params)).all()
     except DBAPIError as exc:
         if "statement timeout" not in str(exc):
             raise
         await session.execute(text("SET LOCAL gin_fuzzy_search_limit = 100000"))
+        await session.execute(text("SET LOCAL enable_seqscan = off"))
         found = (await session.execute(match_sql, params)).all()
     await session.execute(text("SET LOCAL statement_timeout = '30000'"))  # the 15s was for this
+    await session.execute(text("SET LOCAL enable_seqscan = on"))  # and this, for this query only
     if len(found) <= _MATCH_LIMIT:
         return [(r.id, r.book_id, r.sequence) for r in found], True
 
