@@ -9,6 +9,7 @@
 //   k6 run -e STAGE=spike scripts/loadtest/library.js          # straight to PEAK users for 2 minutes
 //   k6 run -e STAGE=soak -e PEAK=50 scripts/loadtest/library.js   # PEAK users for 30 minutes
 //   k6 run -e STAGE=search scripts/loadtest/library.js         # searches only, ramping
+//   k6 run -e STAGE=ramp -e TOP=400 scripts/loadtest/library.js   # ramp further, to TOP users
 //
 // Other settings: BASE (API address), PEAK (users for spike/soak), DOWNLOADS=0 to skip the
 // downloads (a slow home connection measures itself, not the server).
@@ -19,11 +20,21 @@
 import http from 'k6/http';
 import { check, group, sleep } from 'k6';
 import { Trend } from 'k6/metrics';
+import { SharedArray } from 'k6/data';
 
 const BASE = __ENV.BASE || 'https://api.thaqalaynlibrary.com/api';
 const STAGE = __ENV.STAGE || 'baseline';
 const PEAK = Number(__ENV.PEAK || 100);
 const DOWNLOADS = __ENV.DOWNLOADS !== '0';
+// POOL=fixed: only the ~55 hand-picked searches below (most repeat, so the server's result
+// cache answers many). Default: thousands of words and phrases from the library's own text
+// (scripts/loadtest/make_queries.py), so few searches repeat.
+const POOL = __ENV.POOL || 'library';
+const LIBRARY = POOL === 'fixed' ? null : {
+  common: new SharedArray('common', () => JSON.parse(open('./queries.json')).common),
+  rare: new SharedArray('rare', () => JSON.parse(open('./queries.json')).rare),
+  phrase: new SharedArray('phrase', () => JSON.parse(open('./queries.json')).phrase),
+};
 
 // ── what is being searched ──────────────────────────────────────────────────────────
 // Common words match hundreds of thousands of pages (the hardest case for ranking);
@@ -43,13 +54,10 @@ const TOC_WORDS = ['الصبر', 'الصلاة', 'باب', 'فضل', 'الطها
 // ── how many users, for how long ────────────────────────────────────────────────────
 const PLANS = {
   baseline: [{ duration: '1m', target: 5 }, { duration: '4m', target: 5 }],
-  ramp: [
-    { duration: '1m', target: 10 }, { duration: '4m', target: 10 },
-    { duration: '1m', target: 25 }, { duration: '4m', target: 25 },
-    { duration: '1m', target: 50 }, { duration: '4m', target: 50 },
-    { duration: '1m', target: 100 }, { duration: '4m', target: 100 },
-    { duration: '1m', target: 0 },
-  ],
+  // 10, 25, 50, 100 users (and 200, 400, 800 up to TOP), 5 minutes each
+  ramp: [10, 25, 50, 100, 200, 400, 800].filter((n) => n <= Number(__ENV.TOP || 100))
+    .flatMap((n) => [{ duration: '1m', target: n }, { duration: '4m', target: n }])
+    .concat([{ duration: '1m', target: 0 }]),
   spike: [{ duration: '10s', target: PEAK }, { duration: '2m', target: PEAK }, { duration: '30s', target: 0 }],
   soak: [{ duration: '2m', target: PEAK }, { duration: '30m', target: PEAK }, { duration: '1m', target: 0 }],
   search: [
@@ -110,7 +118,12 @@ export function setup() {
 function search(data) {
   const roll = Math.random();
   let query, q;
-  if (roll < 0.45) { query = 'common'; q = pick(COMMON); }
+  if (LIBRARY) {  // the library's own words: mostly common ones, as real searches
+    if (roll < 0.40) { query = 'common'; q = pick(LIBRARY.common); }
+    else if (roll < 0.55) { query = 'medium'; q = pick(Math.random() < 0.5 ? MEDIUM : COMMON); }
+    else if (roll < 0.75) { query = 'phrase'; q = pick(Math.random() < 0.8 ? LIBRARY.phrase : PHRASES); }
+    else { query = 'rare'; q = pick(LIBRARY.rare); }
+  } else if (roll < 0.45) { query = 'common'; q = pick(COMMON); }
   else if (roll < 0.70) { query = 'medium'; q = pick(MEDIUM); }
   else if (roll < 0.85) { query = 'phrase'; q = pick(PHRASES); }
   else { query = 'rare'; q = pick(RARE); }
