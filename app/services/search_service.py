@@ -130,36 +130,12 @@ _FINAL_SELECT = """    SELECT
 """
 
 
-async def search(
-    session: AsyncSession,
-    *,
-    query: str,
-    page: int,
-    limit: int,
-    books_root: Path,
-    subject_ids: list[str] | None = None,
-    library_ids: list[int] | None = None,
-    languages: list[str] | None = None,
-    author_ids: list[int] | None = None,
-    author_names: list[str] | None = None,
-    work_ids: list[int] | None = None,
-) -> tuple[list[SearchHit], int]:
-    """Pages that contain the phrase, in one fixed order: the author's death year (oldest
-    first; no year, last), then the work's title, the volume and the page -- so a phrase
-    found in al-Kafi's volumes and in Bihar al-Anwar reads al-Kafi 1, 1, 2, then Bihar.
-
-    The books are taken in that order, a batch at a time, until the page is full: a very
-    common word fills it from the first batch, where sorting every match of it first
-    timed out at 90 seconds on the real library. A rare phrase just goes through every
-    batch, each one a GIN lookup."""
-    normalized_query = normalize(query)
-    if not normalized_query:
-        return [], 0
-
-    # AND across filter kinds (subject/language/author), OR within each -- a book must
-    # match at least one selected value per kind, but all kinds that were given.
-    conditions = []
-    params: dict = {"normalized_query": normalized_query}
+def filter_conditions(subject_ids, library_ids, languages, author_ids, author_names):
+    """(SQL conditions on books b / works w / authors a, their parameters, the names of the
+    list parameters) for the given filters. AND across filter kinds, OR within each: a book
+    must match at least one selected value per kind, but all kinds that were given."""
+    conditions: list[str] = []
+    params: dict = {}
     expanding: list[str] = []
     if subject_ids:
         conditions.append(
@@ -190,6 +166,70 @@ async def search(
         conditions.append("a.name_norm IN :author_names")
         params["author_names"] = [normalize(name) for name in author_names]
         expanding.append("author_names")
+    return conditions, params, expanding
+
+
+async def filtered_book_ids(
+    session: AsyncSession,
+    *,
+    subject_ids=None,
+    library_ids=None,
+    languages=None,
+    author_ids=None,
+    author_names=None,
+    work_ids=None,
+) -> list[int] | None:
+    """The published books the filters select -- the same selection as search(): the filters
+    together, plus the books of the works named. None when no filter was given."""
+    conditions, params, expanding = filter_conditions(
+        subject_ids, library_ids, languages, author_ids, author_names)
+    if not conditions and not work_ids:
+        return None
+    sides = [(conditions, expanding)] if conditions else []
+    if work_ids:
+        sides.append((["b.work_id IN :work_ids"], ["work_ids"]))
+        params["work_ids"] = work_ids
+    ids: set[int] = set()
+    for side_conditions, side_expanding in sides:
+        statement = text(
+            "SELECT b.id FROM books b JOIN works w ON w.id = b.work_id"
+            " LEFT JOIN authors a ON a.id = b.author_id"
+            " WHERE b.is_published AND " + " AND ".join(side_conditions)
+        ).bindparams(*(bindparam(n, expanding=True) for n in side_expanding))
+        used = {k: v for k, v in params.items() if k in side_expanding}
+        ids.update(r[0] for r in (await session.execute(statement, used)).all())
+    return sorted(ids)
+
+
+async def search(
+    session: AsyncSession,
+    *,
+    query: str,
+    page: int,
+    limit: int,
+    books_root: Path,
+    subject_ids: list[str] | None = None,
+    library_ids: list[int] | None = None,
+    languages: list[str] | None = None,
+    author_ids: list[int] | None = None,
+    author_names: list[str] | None = None,
+    work_ids: list[int] | None = None,
+) -> tuple[list[SearchHit], int]:
+    """Pages that contain the phrase, in one fixed order: the author's death year (oldest
+    first; no year, last), then the work's title, the volume and the page -- so a phrase
+    found in al-Kafi's volumes and in Bihar al-Anwar reads al-Kafi 1, 1, 2, then Bihar.
+
+    The books are taken in that order, a batch at a time, until the page is full: a very
+    common word fills it from the first batch, where sorting every match of it first
+    timed out at 90 seconds on the real library. A rare phrase just goes through every
+    batch, each one a GIN lookup."""
+    normalized_query = normalize(query)
+    if not normalized_query:
+        return [], 0
+
+    conditions, filter_params, expanding = filter_conditions(
+        subject_ids, library_ids, languages, author_ids, author_names)
+    params: dict = {"normalized_query": normalized_query, **filter_params}
     # Each "side" is searched by itself: the filters together, and the works named (the
     # works are added to what the filters select: "(author X AND subject Y) OR work Z").
     # Searched as one (a AND b) OR c condition the planner gave up the per-batch index

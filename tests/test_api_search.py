@@ -299,3 +299,30 @@ class TestReadingWithoutDownload:
         assert [(e["title"], e["pageSequence"]) for e in body["entries"]] == [
             ("باب في فضل الإمام", 1)
         ]
+
+
+class TestFilteredBookIds:
+    """The books the filters select -- what the meaning search is limited to."""
+
+    async def test_same_selection_as_the_regular_search_filters(self, imported: AsyncClient):
+        from app.services import search_service
+
+        work_id = int(await _work_id(imported))
+        subject = "مصادر الحديث الشيعية - القسم العام"
+        async with get_sessionmaker()() as session:
+            ids = lambda **f: search_service.filtered_book_ids(session, **f)  # noqa: E731
+            assert await ids() is None  # no filter: no limit
+            assert int(BOOK_ID) in await ids(subject_ids=[subject])
+            assert int(BOOK_ID) not in await ids(subject_ids=["الطب"])
+            assert await ids(subject_ids=["الطب"], author_names=["مؤلف الاختبار الثالث"]) == []
+            assert await ids(author_names=["مؤلف الاختبار الثالث"]) == [int(BOOK_ID)]
+            # the named works are added to what the other filters select
+            assert int(BOOK_ID) in await ids(subject_ids=["الطب"], work_ids=[work_id])
+            assert await ids(work_ids=[work_id]) == [int(BOOK_ID)]
+
+    async def test_meaning_search_without_a_matching_book_is_empty(self, imported: AsyncClient):
+        response = await imported.get(
+            "/api/search/meaning", params={"q": "الامام الصادق", "subject": "الطب"}
+        )
+        # filtered to no book at all: empty, without asking the embedder
+        assert response.status_code == 200 and response.json()["items"] == []

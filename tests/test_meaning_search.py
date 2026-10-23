@@ -77,7 +77,7 @@ async def test_passages_with_book_author_and_page_one_per_page(client):
 async def test_books_filter_and_cache(client):
     params = {"q": "دعاء النور", "bookId": [4407, 12]}
     await client.get("/api/search/meaning", params=params)
-    assert client.seen["books"] == ["4407", "12"]
+    assert client.seen["books"] == ["12", "4407"]
     client.seen.clear()
     await client.get("/api/search/meaning", params=params)  # the same search: from the cache
     assert not client.seen

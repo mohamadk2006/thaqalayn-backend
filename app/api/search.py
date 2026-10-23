@@ -53,11 +53,22 @@ async def search_by_meaning(
     ),
     limit: int = Query(20, ge=1, le=50),
     bookId: list[int] | None = Query(None, max_length=50, description="Only these books"),
+    subject: list[str] | None = Query(None, description="One or more subject category IDs"),
+    library: list[int] | None = Query(None, description="One or more library IDs"),
+    language: list[str] | None = Query(None, description="One or more language codes"),
+    author: list[int] | None = Query(None, description="One or more author IDs"),
+    authorName: list[str] | None = Query(None, description="One or more author names"),
+    work: list[int] | None = Query(
+        None, description="Work IDs searched in addition to what the other filters select"
+    ),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ):
     """Passages of the library closest in meaning to `q` (not the same words): each with its
-    book, author, page and text. No AI-written answer; for that see POST /api/chat."""
+    book, author, page and text. No AI-written answer; for that see POST /api/chat.
+
+    Takes the same filters as GET /api/search (subject, library, language, author, authorName,
+    work), combined the same way; `bookId` narrows the result further to those books."""
     try:
         meaning_search.allow(auth.client_ip(request) or "unknown")
     except meaning_search.TooManySearches:
@@ -66,11 +77,19 @@ async def search_by_meaning(
             status_code=429,
             headers={"Retry-After": "60"},
         )
+    books = await search_service.filtered_book_ids(
+        session, subject_ids=subject, library_ids=library, languages=language,
+        author_ids=author, author_names=authorName, work_ids=work,
+    )
+    if bookId:
+        books = sorted(set(bookId) & set(books)) if books is not None else sorted(set(bookId))
+    if books is not None and not books:
+        return MeaningOut(query=q.strip(), items=[])
     if not (settings.qdrant_api_key and settings.embedder_url):
         return JSONResponse({"detail": "البحث بالمعنى غير مفعّل على هذا الخادم."}, status_code=503)
     try:
         items = await meaning_search.search(
-            session, settings, q.strip(), limit, [str(b) for b in bookId] if bookId else None
+            session, settings, q.strip(), limit, [str(b) for b in books] if books else None
         )
     except RuntimeError:
         return JSONResponse({"detail": "تعذّر البحث الآن، حاول مرة أخرى."}, status_code=502)
