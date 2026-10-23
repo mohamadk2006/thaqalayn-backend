@@ -270,7 +270,7 @@ def _search(
                     # binary-quantized vectors in RAM, re-scored with the full ones;
                     # ef well above the limit
                     "params": {
-                        "hnsw_ef": min(max(128, 8 * limit), 512),
+                        "hnsw_ef": min(max(128, 8 * limit), 256),
                         "quantization": {"rescore": True, "oversampling": 2.0},
                     },
                 }
