@@ -94,3 +94,13 @@ async def test_too_many_searches_from_one_address(client):
 
 async def test_query_too_short_is_422(client):
     assert (await client.get("/api/search/meaning", params={"q": "ا"})).status_code == 422
+
+
+async def test_limit_up_to_100(client):
+    assert (
+        await client.get("/api/search/meaning", params={"q": "دعاء النور", "limit": 100})
+    ).status_code == 200
+    assert client.seen["limit"] == 200
+    assert (
+        await client.get("/api/search/meaning", params={"q": "دعاء النور", "limit": 101})
+    ).status_code == 422

@@ -71,7 +71,7 @@ A 200 answer carries `quota: {limit, remaining, resetAt}` so the app can show th
 
 ## Search by meaning (no chatbot)
 
-`GET /api/search/meaning?q=…&limit=20&bookId=4407&bookId=12` returns the passages of the library
+`GET /api/search/meaning?q=…&limit=20&bookId=4407&bookId=12` (limit 1-100) returns the passages of the library
 closest in meaning to `q`, with no Gemini call and no daily quota:
 
 ```json

@@ -51,7 +51,7 @@ async def search_by_meaning(
     q: str = Query(
         ..., min_length=2, max_length=500, description="A question or a topic, in words"
     ),
-    limit: int = Query(20, ge=1, le=50),
+    limit: int = Query(20, ge=1, le=100),
     bookId: list[int] | None = Query(None, max_length=50, description="Only these books"),
     subject: list[str] | None = Query(None, description="One or more subject category IDs"),
     library: list[int] | None = Query(None, description="One or more library IDs"),

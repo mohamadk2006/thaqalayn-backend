@@ -65,7 +65,7 @@ async def search(
     # one result per page (a page can hold several chunks, even identical ones): ask for more,
     # keep the best chunk of each page
     found = await asyncio.to_thread(
-        chat_service._search, settings, vectors, min(limit * 2, 100), book_ids
+        chat_service._search, settings, vectors, min(limit * 2, 200), book_ids
     )
     passages, pages = [], set()
     for p in found:
