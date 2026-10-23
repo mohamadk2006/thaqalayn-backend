@@ -29,7 +29,11 @@ def client(monkeypatch):
 
     def search(settings, vectors, limit=None, book_ids=None):
         seen["limit"], seen["books"] = limit, book_ids
-        return [{**PASSAGE, "score": 0.7123}]
+        return [
+            {**PASSAGE, "score": 0.7123},
+            {**PASSAGE, "chunk": 1, "score": 0.7},  # another chunk of the same page
+            {**PASSAGE, "sequence": 53, "page": "49", "score": 0.6},
+        ]
 
     class Rows:
         def all(self):
@@ -52,22 +56,22 @@ def client(monkeypatch):
     return c
 
 
-async def test_passages_with_book_author_and_page(client):
+async def test_passages_with_book_author_and_page_one_per_page(client):
     r = await client.get("/api/search/meaning", params={"q": "دعاء النور", "limit": 5})
     assert r.status_code == 200
-    assert r.json()["items"] == [
-        {
-            "bookId": "4407",
-            "title": "الصحيفة السجادية",
-            "author": "الإمام زين العابدين",
-            "volume": "1",
-            "page": "48",
-            "sequence": 52,
-            "text": PASSAGE["text"],
-            "score": 0.7123,
-        }
-    ]
-    assert client.seen["texts"] == ["دعاء النور"] and client.seen["limit"] == 5
+    items = r.json()["items"]
+    assert [i["sequence"] for i in items] == [52, 53]  # the page's second chunk is left out
+    assert items[0] == {
+        "bookId": "4407",
+        "title": "الصحيفة السجادية",
+        "author": "الإمام زين العابدين",
+        "volume": "1",
+        "page": "48",
+        "sequence": 52,
+        "text": PASSAGE["text"],
+        "score": 0.7123,
+    }
+    assert client.seen["texts"] == ["دعاء النور"] and client.seen["limit"] == 10
 
 
 async def test_books_filter_and_cache(client):

@@ -62,7 +62,17 @@ async def search(
 
     async with _slots:
         vectors = await asyncio.to_thread(chat_service._embed, settings, [query])
-    passages = await asyncio.to_thread(chat_service._search, settings, vectors, limit, book_ids)
+    # one result per page (a page can hold several chunks, even identical ones): ask for more,
+    # keep the best chunk of each page
+    found = await asyncio.to_thread(
+        chat_service._search, settings, vectors, min(limit * 2, 100), book_ids
+    )
+    passages, pages = [], set()
+    for p in found:
+        if (p["bookId"], p["sequence"]) not in pages:
+            pages.add((p["bookId"], p["sequence"]))
+            passages.append(p)
+    passages = passages[:limit]
 
     ids = {int(p["bookId"]) for p in passages if str(p["bookId"]).isdigit()}
     authors = {}
