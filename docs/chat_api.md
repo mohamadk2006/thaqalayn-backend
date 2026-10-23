@@ -80,7 +80,6 @@ closest in meaning to `q`, with no Gemini call and no daily quota:
 ```
 
 `bookId` (optional, repeatable, up to 50) limits the search to those books, e.g. "search this book
-by meaning". Open the page with `GET /api/books/{bookId}/pages/{sequence}`. 30 searches a minute per
-Also takes the same filters as `GET /api/search` (`subject`, `library`, `language`, `author`,
+by meaning". Open the page with `GET /api/books/{bookId}/pages/{sequence}`. Also takes the same filters as `GET /api/search` (`subject`, `library`, `language`, `author`,
 `authorName`, `work`), combined the same way; `bookId` narrows further. A filter that selects no
-book returns `items: []`. 30 searches a minute per address (429 `too_fast`); the same search is answered from a 5-minute cache.
+book returns `items: []`. 30 searches a minute per address (429 `too_fast`); the same search is answered from a 5-minute cache. One result per page (its best chunk).
