@@ -244,9 +244,14 @@ def rrf(lists: list[list[dict]], key=lambda p: p["id"]) -> list[dict]:
     return [e[0] for e in sorted(merged.values(), key=lambda e: e[1], reverse=True)]
 
 
-def _search(settings: Settings, vectors: list[list[float]], limit: int | None = None) -> list[dict]:
-    """The passages closest to any of the vectors: one Qdrant batch request, the lists merged
-    by reciprocal rank."""
+def _search(
+    settings: Settings,
+    vectors: list[list[float]],
+    limit: int | None = None,
+    book_ids: list[str] | None = None,
+) -> list[dict]:
+    """The passages closest to any of the vectors (only in the given books, if any): one
+    Qdrant batch request, the lists merged by reciprocal rank."""
     limit = limit or settings.chat_passages
     status, body = _post(
         f"{settings.qdrant_url.rstrip('/')}/collections/{settings.qdrant_collection}"
@@ -257,6 +262,11 @@ def _search(settings: Settings, vectors: list[list[float]], limit: int | None = 
                     "vector": v,
                     "limit": limit,
                     "with_payload": PAYLOAD_FIELDS,
+                    **(
+                        {"filter": {"must": [{"key": "bookId", "match": {"any": book_ids}}]}}
+                        if book_ids
+                        else {}
+                    ),
                     # binary-quantized vectors in RAM, re-scored with the full ones;
                     # ef well above the limit
                     "params": {

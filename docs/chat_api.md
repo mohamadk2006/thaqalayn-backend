@@ -68,3 +68,17 @@ Counted per asker: the signed-in user (`Authorization: Bearer`), else `X-Client-
 | `service_limit` | Everyone's questions today (protects the free Gemini quota) | 150 |
 
 A 200 answer carries `quota: {limit, remaining, resetAt}` so the app can show the questions left. Failed questions do not count against the asker's daily quota. Settings: `CHAT_DAILY_LIMIT`, `CHAT_PER_MINUTE`, `CHAT_GLOBAL_DAILY_LIMIT`, `CHAT_MAX_CHARS` (0 = no limit).
+
+## Search by meaning (no chatbot)
+
+`GET /api/search/meaning?q=…&limit=20&bookId=4407&bookId=12` returns the passages of the library
+closest in meaning to `q`, with no Gemini call and no daily quota:
+
+```json
+{"query": "…", "items": [{"bookId": "4407", "title": "…", "author": "…", "volume": "1",
+  "page": "48", "sequence": 52, "text": "the ~220-word passage", "score": 0.71}]}
+```
+
+`bookId` (optional, repeatable, up to 50) limits the search to those books, e.g. "search this book
+by meaning". Open the page with `GET /api/books/{bookId}/pages/{sequence}`. 30 searches a minute per
+address (429 `too_fast`); the same search is answered from a 5-minute cache.
