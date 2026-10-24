@@ -11,7 +11,8 @@ back with its sources. No question rewriting and no reranking yet.
 ```http
 POST /api/chat
 Content-Type: application/json
-X-Client-Id: 3f1c…            (optional: an anonymous install id, max 64 chars)
+Authorization: Bearer <access token>   (REQUIRED: the chat is for signed-in users)
+X-Client-Id: 3f1c…            (optional: an install id kept in the log, max 64 chars)
 X-App-Version: 1.4.0           (optional, max 32 chars)
 
 {"message": "ما فضل الصبر؟"}
@@ -58,7 +59,10 @@ is logged on the server with its tokens and timings (table `chat_requests`).
 
 ## Limits
 
-Counted per asker: the signed-in user (`Authorization: Bearer`), else `X-Client-Id`, else the address.
+The chat needs a signed-in user: `Authorization: Bearer <access token>` on `POST /api/chat`, `POST /api/chat/stream`
+and `GET /api/chat/quota`. Without a valid token the answer is `401 {"code": "token_expired"}` (the same as the
+account and sync endpoints): the app refreshes the token and retries, or asks the user to sign in. Limits are
+counted per user, on any device.
 
 | `code` | Meaning | Default |
 |---|---|---|
@@ -87,7 +91,7 @@ book returns `items: []`. 30 searches a minute per address (429 `too_fast`); the
 
 ## Questions left: GET /api/chat/quota
 
-Same identity as the chat (`Authorization: Bearer` if signed in, else `X-Client-Id`). Costs nothing and is
+Signed-in users only, like the chat. Costs nothing and is
 not counted. Call it when the chat screen opens, and after a refusal:
 
 ```json

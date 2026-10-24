@@ -83,6 +83,25 @@ def logged(monkeypatch):
     return rows
 
 
+SIGNED_IN = {"Authorization": "Bearer user-1"}
+
+
+@pytest.fixture(autouse=True)
+def signed_in(monkeypatch):
+    """The token check, faked: "Bearer <id>" is the user <id>; no token is 401."""
+    from types import SimpleNamespace
+
+    from app.api.errors import ApiError
+    from app.services import auth_service
+
+    async def caller(session, authorization):
+        if not authorization or not authorization.startswith("Bearer "):
+            raise ApiError(401, "token_expired")
+        return SimpleNamespace(user=SimpleNamespace(id=authorization.split()[-1]))
+
+    monkeypatch.setattr(auth_service, "caller", caller)
+
+
 @pytest.fixture(autouse=True)
 def used(monkeypatch):
     """What the log says has been asked already; tests change its fields."""
@@ -108,7 +127,9 @@ def app(used) -> FastAPI:
 
 async def _ask(app, message, headers=None):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        return await client.post("/api/chat", json={"message": message}, headers=headers or {})
+        return await client.post(
+            "/api/chat", json={"message": message}, headers={**SIGNED_IN, **(headers or {})}
+        )
 
 
 async def test_answer_with_sources_usage_and_log(app, logged, monkeypatch):
@@ -523,7 +544,7 @@ async def test_answer_reports_the_remaining_quota_and_who_asked(app, logged, use
     used.day = 3
     r = await _ask(app, "سؤال", {"X-Client-Id": "dev-1"})
     assert r.json()["quota"]["limit"] == 10 and r.json()["quota"]["remaining"] == 6
-    assert logged[0]["who"] == "c:dev-1"
+    assert logged[0]["who"] == "u:user-1"
 
 
 async def test_too_long_question_is_422(app, logged, monkeypatch):
@@ -533,11 +554,11 @@ async def test_too_long_question_is_422(app, logged, monkeypatch):
 
 async def test_second_question_while_one_is_running_is_refused(app, logged, used, monkeypatch):
     monkeypatch.setattr(chat_service, "_post", fake_post()[0])
-    chat_limits.begin("c:dev-1")
+    chat_limits.begin("u:user-1")
     try:
         r = await _ask(app, "سؤال", {"X-Client-Id": "dev-1"})
     finally:
-        chat_limits.end("c:dev-1")
+        chat_limits.end("u:user-1")
     assert r.status_code == 429 and r.json()["code"] == "in_progress"
 
 
@@ -640,7 +661,7 @@ ANSWER_STREAM = [
 async def _stream(app, message, headers=None):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         return await client.post(
-            "/api/chat/stream", json={"message": message}, headers=headers or {}
+            "/api/chat/stream", json={"message": message}, headers={**SIGNED_IN, **(headers or {})}
         )
 
 
@@ -666,7 +687,7 @@ async def test_stream_tells_each_step_then_gives_the_answer(app, logged, monkeyp
     assert final["answer"] == "يطلب الداعي نوراً [1]." and final["usage"]["totalTokens"] == 940
     assert name == "done" and final["status"] == "ok" and final["sources"][0]["bookId"] == "4407"
     assert final["quota"]["limit"] == 10
-    assert logged[0]["who"] == "c:dev-1"
+    assert logged[0]["who"] == "u:user-1"
 
 
 async def test_stream_with_rewrite_and_rerank_reports_what_it_found(logged, monkeypatch):
@@ -741,13 +762,31 @@ async def test_stream_refused_up_front_is_plain_json(app, logged, used, monkeypa
 async def test_quota_without_asking(app, used):
     used.day = 4
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        r = await client.get("/api/chat/quota", headers={"X-Client-Id": "dev-1"})
+        r = await client.get("/api/chat/quota", headers=SIGNED_IN)
         assert r.status_code == 200
         body = r.json()
         assert (body["limit"], body["remaining"], body["maxChars"]) == (10, 6, 500)
         assert body["blocked"] is None and body["resetAt"].endswith("+00:00")
         used.day = 10
-        body = (await client.get("/api/chat/quota", headers={"X-Client-Id": "dev-1"})).json()
+        body = (await client.get("/api/chat/quota", headers=SIGNED_IN)).json()
         assert body["remaining"] == 0 and body["blocked"] == "daily_limit"
         used.day, used.everyone = 0, 150
-        assert (await client.get("/api/chat/quota")).json()["blocked"] == "service_limit"
+        assert (await client.get("/api/chat/quota", headers=SIGNED_IN)).json()[
+            "blocked"
+        ] == "service_limit"
+
+
+async def test_chat_needs_sign_in(app, logged, monkeypatch):
+    post, calls = fake_post()
+    monkeypatch.setattr(chat_service, "_post", post)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        for method, path in (
+            ("post", "/api/chat"),
+            ("post", "/api/chat/stream"),
+            ("get", "/api/chat/quota"),
+        ):
+            kwargs = {"json": {"message": "سؤال"}} if method == "post" else {}
+            r = await getattr(client, method)(path, **kwargs)
+            assert r.status_code == 401 and r.json()["code"] == "token_expired", path
+            assert r.headers["www-authenticate"] == "Bearer"
+    assert not calls and not logged

@@ -1,6 +1,7 @@
 """POST /api/chat -- the chatbot prototype: answers a question from the library's books.
 
 Every request is logged in chat_requests (see app/models/chat.py), failures included.
+Signing in is required (Authorization: Bearer; 401 token_expired without a valid token).
 Limits: see app/services/chat_limits.py (429 with a `code`).
 Statuses: 200 with status "ok" (an answer) or "no_results"; 429 when Gemini's free tier
 refuses for its rate limit; 502 when a step fails; 503 when the chatbot is not configured.
@@ -17,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,13 +41,10 @@ LIMIT_TEXTS = {
 }
 
 
-async def asker(request: Request, session: AsyncSession, authorization, client_id) -> str:
-    """Who is asking, for the limits: the signed-in user, else the install, else the address."""
-    if authorization:
-        return f"u:{(await auth.caller(session, authorization)).user.id}"
-    if client_id:
-        return f"c:{client_id}"
-    return f"ip:{auth.client_ip(request)}"
+async def asker(session: AsyncSession, authorization: str | None) -> str:
+    """Who is asking, for the limits: the signed-in user. Without a valid access token the
+    answer is 401 token_expired (the app refreshes the token, or asks the user to sign in)."""
+    return f"u:{(await auth.caller(session, authorization)).user.id}"
 
 
 _running: set[asyncio.Task] = set()  # streamed chats still being answered
@@ -54,14 +52,13 @@ _running: set[asyncio.Task] = set()  # streamed chats still being answered
 
 async def admit(
     body: ChatIn,
-    request: Request,
     session: AsyncSession,
     settings: Settings,
     authorization: str | None,
-    client_id: str | None,
 ):
     """(question, who, limits verdict) when the question may be asked now; else the JSON
-    response that refuses it."""
+    response that refuses it. Signing in is required (401 otherwise)."""
+    who = await asker(session, authorization)
     question = body.message.strip()
     if not question:
         return JSONResponse({"detail": "اكتب سؤالاً."}, status_code=422)
@@ -72,7 +69,6 @@ async def admit(
         )
     if not chat_service.configured(settings):
         return JSONResponse({"detail": OFF}, status_code=503)
-    who = await asker(request, session, authorization, client_id)
     verdict = await chat_limits.check(session, settings, who)
     if verdict.code:
         return JSONResponse(
@@ -139,15 +135,13 @@ def chat_out(result, log_id: int, verdict) -> ChatOut:
 
 @router.get("/chat/quota", response_model=ChatQuotaOut)
 async def chat_quota(
-    request: Request,
     authorization: str | None = Header(None),
-    x_client_id: str | None = Header(None, max_length=64),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ):
     """The asker's questions left today and whether one would be accepted now. Costs nothing:
     no question is asked, and it is not counted."""
-    who = await asker(request, session, authorization, x_client_id)
+    who = await asker(session, authorization)
     verdict = await chat_limits.check(session, settings, who)
     return ChatQuotaOut(
         limit=verdict.limit,
@@ -161,14 +155,13 @@ async def chat_quota(
 @router.post("/chat", response_model=ChatOut)
 async def chat(
     body: ChatIn,
-    request: Request,
     authorization: str | None = Header(None),
     x_client_id: str | None = Header(None, max_length=64),
     x_app_version: str | None = Header(None, max_length=32),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ):
-    admitted = await admit(body, request, session, settings, authorization, x_client_id)
+    admitted = await admit(body, session, settings, authorization)
     if isinstance(admitted, JSONResponse):
         return admitted
     question, who, verdict = admitted
@@ -193,7 +186,6 @@ def sse(event: str, data: dict | str) -> str:
 @router.post("/chat/stream")
 async def chat_stream(
     body: ChatIn,
-    request: Request,
     authorization: str | None = Header(None),
     x_client_id: str | None = Header(None, max_length=64),
     x_app_version: str | None = Header(None, max_length=32),
@@ -201,7 +193,7 @@ async def chat_stream(
     settings: Settings = Depends(get_settings),
 ):
     """The same chat as POST /api/chat, told step by step as server-sent events."""
-    admitted = await admit(body, request, session, settings, authorization, x_client_id)
+    admitted = await admit(body, session, settings, authorization)
     if isinstance(admitted, JSONResponse):
         return admitted
     question, who, verdict = admitted
