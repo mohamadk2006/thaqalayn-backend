@@ -89,9 +89,10 @@ distinctive, give no keywords: an empty list is better than a common one.
 3. Scope. When the user asks what a named AUTHOR (a scholar who wrote books, such as "الشيخ
 المفيد", "الشيخ الصدوق", "العلامة المجلسي") or a named BOOK ("الكافي", "نهج البلاغة", "بحار
 الأنوار") says, write that name in "authors" or "books", as the user wrote it. The search is
-then limited to those books. Only for an author or book the user names. Not for a person the
-question is merely about (the Prophet, the Imams, a companion, a narrator) and not for a
-topic. When unsure, leave both lists empty.
+then limited to those books, so do NOT repeat the name inside "queries" or "keywords": write
+the topic only (a name there only pulls the books' title pages). Only for an author or book the
+user names. Not for a person the question is merely about (the Prophet, the Imams, a
+companion, a narrator) and not for a topic. When unsure, leave both lists empty.
 
 If a previous conversation is given, the new message may depend on it ("and what about the
 second one?", "explain more", "and in fiqh?"): write the queries and keywords so that each stands
@@ -440,8 +441,20 @@ async def _word_search(
 
 def merge_candidates(meaning: list[dict], words: list[dict]) -> list[dict]:
     """The two searches' candidates in one list, by reciprocal rank; a page found by both
-    keeps the vector passage."""
-    return rrf([meaning, words], key=lambda p: (str(p["bookId"]), p["sequence"]))
+    keeps the vector passage. A passage that reads the same as a better one (another edition
+    of the same book) is left out: it would take a slot and add nothing."""
+    from app.services.arabic import normalize
+
+    merged = rrf([meaning, words], key=lambda p: (str(p["bookId"]), p["sequence"]))
+    seen: set[str] = set()
+    out = []
+    for p in merged:
+        signature = normalize(p.get("text") or "")[:300]
+        if signature and signature in seen:
+            continue
+        seen.add(signature)
+        out.append(p)
+    return out
 
 
 # ── 3. rerank ───────────────────────────────────────────────────────────────────────
@@ -645,7 +658,7 @@ async def _ask(
             emit({"step": step, "state": state, **details})
 
     timings = result.timings
-    queries, keywords, named, scope = [], [], {}, None
+    queries, keywords, named, scope, scoped_question = [], [], {}, None, ""
     if settings.chat_rewrite:
         say("rewrite", "start")
         queries, keywords, named, result.rewrite = await asyncio.to_thread(
@@ -656,6 +669,14 @@ async def _ask(
             async with get_sessionmaker()() as session:
                 scope = await chat_scope.resolve(session, named["authors"], named["books"])
             result.rewrite["scope"] = scope.info()
+            if scope.book_ids:
+                # the search is limited to their books: their names would only match the
+                # title and cover pages
+                names = [*named["authors"], *named["books"], *scope.authors, *scope.works]
+                queries = [q for q in (chat_scope.strip_names(q, names) for q in queries) if q]
+                keywords = [k for k in (chat_scope.strip_names(k, names) for k in keywords) if k]
+                scoped_question = chat_scope.strip_names(question, names)
+                result.rewrite["searched"] = queries  # the texts without the names
         say(
             "rewrite",
             "done",
@@ -665,7 +686,9 @@ async def _ask(
             authors=scope.authors if scope else [],
             works=scope.works if scope else [],
         )
-    texts = list(dict.fromkeys([question, *queries]))  # the message itself is always searched
+    # the message itself is always searched (without the named author's or book's name, if
+    # the search is limited to their books)
+    texts = list(dict.fromkeys([scoped_question or question, *queries]))
 
     async def meaning() -> list[dict]:
         t = time.monotonic()

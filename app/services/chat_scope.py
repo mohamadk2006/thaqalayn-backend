@@ -8,6 +8,7 @@ filter would hide the right answer.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from sqlalchemy import text
@@ -66,6 +67,26 @@ def core(name: str) -> str:
     while len(words) > 1 and words[0] in TITLES:
         words.pop(0)
     return " ".join(words)
+
+
+def strip_names(text: str, names: list[str]) -> str:
+    """`text` without the given author and book names (as whole words, titles in front of a
+    name included). Once a search is limited to an author's or a book's pages the name only
+    pulls their title and cover pages, which hold nothing but it."""
+    tokens = text.split()
+    folded = [re.sub(r"[^\w]", "", normalize(t)) for t in tokens]
+    drop = [False] * len(tokens)
+    for name in names:
+        bare = [re.sub(r"[^\w]", "", w) for w in core(name).split()]
+        bare = [w for w in bare if w]
+        for i in range(len(tokens) - len(bare) + 1) if bare else []:
+            if folded[i : i + len(bare)] == bare:
+                drop[i : i + len(bare)] = [True] * len(bare)
+                j = i - 1
+                while j >= 0 and folded[j] in TITLES:
+                    drop[j] = True
+                    j -= 1
+    return " ".join(t for t, d in zip(tokens, drop, strict=True) if not d).strip()
 
 
 async def _match(session, table: str, column: str, label: str, name: str, most: int):

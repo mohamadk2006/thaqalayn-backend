@@ -606,7 +606,7 @@ async def test_a_named_author_limits_the_vector_search_to_his_books(
         assert authors == ["الشيخ المفيد"] and books == []
         return chat_scope.Scope(book_ids=[11, 12], author_ids=[5], authors=["الشيخ المفيد"])
 
-    hits = [{**PASSAGE, "sequence": n} for n in (1, 2, 3)]
+    hits = [{**PASSAGE, "sequence": n, "text": f"مقطع {n}"} for n in (1, 2, 3)]
     post, calls = fake_post(hits=hits, rewrite=rewrite_reply(authors=["الشيخ المفيد"]))
     monkeypatch.setattr(chat_scope, "resolve", resolve)
     monkeypatch.setattr(chat_service, "_post", post)
@@ -722,7 +722,7 @@ async def test_stream_with_rewrite_and_rerank_reports_what_it_found(logged, monk
     settings = Settings(gemini_api_key="g", qdrant_api_key="q", chat_word_search=False)
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_session] = lambda: None
-    hits = [{**PASSAGE, "sequence": n} for n in (1, 2)]
+    hits = [{**PASSAGE, "sequence": n, "text": f"مقطع {n}"} for n in (1, 2)]
     base, _ = fake_post(hits=hits, rewrite=rewrite_reply(queries=["الصبر في الكتب"]))
 
     def post(url, body, headers, timeout):
@@ -891,3 +891,54 @@ async def test_stream_starts_by_naming_the_chat(app, logged, history, monkeypatc
     name, data = events[0]
     assert name == "conversation" and data["new"] is True
     assert events[-1][1]["conversationId"] == data["id"]
+
+
+def test_names_are_stripped_from_a_search_that_is_limited_to_them():
+    from app.services.chat_scope import strip_names
+
+    names = ["السيد مرتضى العسكري", "مرتضى العسكري"]
+    assert strip_names("السيد مرتضى العسكري عائشة أم المؤمنين", names) == "عائشة أم المؤمنين"
+    assert strip_names("رأي العلامة السيد مرتضى العسكري في عائشة", names) == "رأي في عائشة"
+    assert strip_names("آراء السيد مرتضى العسكري، بأم المؤمنين عائشة", names) == (
+        "آراء بأم المؤمنين عائشة"
+    )
+    assert strip_names("مرتضى العسكري", names) == ""  # nothing left: the caller keeps the original
+    assert strip_names("فضل الصبر في الإسلام", names) == "فضل الصبر في الإسلام"
+
+
+async def test_a_named_author_is_not_in_the_texts_that_are_searched(
+    rewriting_app, logged, monkeypatch
+):
+    from app.services import chat_scope
+
+    async def resolve(session, authors, books):
+        return chat_scope.Scope(book_ids=[11, 12], author_ids=[5], authors=["السيد مرتضى العسكري"])
+
+    hits = [{**PASSAGE, "sequence": n, "text": f"مقطع {n}"} for n in (1, 2, 3)]
+    reply = rewrite_reply(
+        queries=["السيد مرتضى العسكري عائشة", "موقف السيد مرتضى العسكري من عثمان"],
+        keywords=["مرتضى العسكري"],
+        authors=["السيد مرتضى العسكري"],
+    )
+    post, calls = fake_post(hits=hits, rewrite=reply)
+    monkeypatch.setattr(chat_scope, "resolve", resolve)
+    monkeypatch.setattr(chat_service, "_post", post)
+    r = await _ask(rewriting_app, "آراء السيد مرتضى العسكري بأم المؤمنين عائشة")
+    assert r.status_code == 200
+    embedded = next(b for u, b in calls if u.endswith("/embed"))["texts"]
+    assert embedded == ["آراء بأم المؤمنين عائشة", "عائشة", "موقف من عثمان"]
+    assert logged[0]["result"].rewrite["keywords"] == ["مرتضى العسكري"]  # as the model wrote it
+    assert r.json()["searchQueries"] == ["عائشة", "موقف من عثمان"]
+
+
+def test_the_same_passage_in_another_edition_takes_one_slot():
+    a = {"id": "1", "bookId": "17405", "sequence": 32, "text": "كثرة ما روي عن أم المؤمنين عائشة"}
+    same = {
+        "id": "2",
+        "bookId": "17409",
+        "sequence": 32,
+        "text": "كثرة ما روي عن أم المؤمنين عائشة",
+    }
+    other = {"id": "3", "bookId": "17405", "sequence": 40, "text": "فقرة أخرى"}
+    merged = chat_service.merge_candidates([a, same, other], [])
+    assert [p["id"] for p in merged] == ["1", "3"]

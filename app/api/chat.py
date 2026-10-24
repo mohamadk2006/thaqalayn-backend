@@ -178,7 +178,9 @@ def chat_out(result, log_id: int, verdict, conversation_id=None, message_id=None
             thoughtsTokens=usage.get("thoughtsTokenCount"),
             totalTokens=usage.get("totalTokenCount"),
         ),
-        searchQueries=(result.rewrite or {}).get("queries") or [],
+        searchQueries=(result.rewrite or {}).get("searched")
+        or (result.rewrite or {}).get("queries")
+        or [],
         timings=result.timings,
         quota=ChatQuota(
             limit=verdict.limit,
