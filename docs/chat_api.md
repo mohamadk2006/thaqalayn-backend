@@ -85,6 +85,19 @@ by meaning". Open the page with `GET /api/books/{bookId}/pages/{sequence}`. Also
 book returns `items: []`. 30 searches a minute per address (429 `too_fast`); the same search is answered from a 5-minute cache. One result per page (its best chunk).
 
 
+## Questions left: GET /api/chat/quota
+
+Same identity as the chat (`Authorization: Bearer` if signed in, else `X-Client-Id`). Costs nothing and is
+not counted. Call it when the chat screen opens, and after a refusal:
+
+```json
+{"limit": 10, "remaining": 6, "resetAt": "2026-10-25T00:00:00+00:00", "maxChars": 500, "blocked": null}
+```
+
+`limit` 0 means no limit. `blocked` is why a question would be refused right now, the same `code` as
+the 429 (`daily_limit`, `service_limit`, `too_fast`, `in_progress`), or null. `resetAt` is UTC: show it in
+local time. `maxChars`: the longest question (0 = no limit).
+
 ## Showing the steps: POST /api/chat/stream
 
 Same request, headers, limits and errors as `POST /api/chat` (a refused request is a plain JSON

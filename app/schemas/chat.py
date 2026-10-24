@@ -34,6 +34,13 @@ class ChatQuota(BaseModel):
     resetAt: str  # when the day's count starts again (UTC, ISO 8601)
 
 
+class ChatQuotaOut(ChatQuota):
+    """GET /api/chat/quota: what the asker may do now, without asking a question."""
+
+    maxChars: int  # longest question (0 = no limit)
+    blocked: str | None = None  # why a question would be refused now (the 429 `code`), else null
+
+
 class ChatOut(BaseModel):
     id: int  # the log row: quote it when reporting a bad answer
     status: str  # ok | no_results

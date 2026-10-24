@@ -736,3 +736,18 @@ async def test_stream_refused_up_front_is_plain_json(app, logged, used, monkeypa
     r = await _stream(app, "سؤال")
     assert r.status_code == 429 and r.json()["code"] == "daily_limit"
     assert not logged
+
+
+async def test_quota_without_asking(app, used):
+    used.day = 4
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get("/api/chat/quota", headers={"X-Client-Id": "dev-1"})
+        assert r.status_code == 200
+        body = r.json()
+        assert (body["limit"], body["remaining"], body["maxChars"]) == (10, 6, 500)
+        assert body["blocked"] is None and body["resetAt"].endswith("+00:00")
+        used.day = 10
+        body = (await client.get("/api/chat/quota", headers={"X-Client-Id": "dev-1"})).json()
+        assert body["remaining"] == 0 and body["blocked"] == "daily_limit"
+        used.day, used.everyone = 0, 150
+        assert (await client.get("/api/chat/quota")).json()["blocked"] == "service_limit"

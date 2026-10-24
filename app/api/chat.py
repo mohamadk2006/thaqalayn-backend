@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
 from app.db import get_session, get_sessionmaker
-from app.schemas.chat import ChatIn, ChatOut, ChatQuota, ChatSource, ChatUsage
+from app.schemas.chat import ChatIn, ChatOut, ChatQuota, ChatQuotaOut, ChatSource, ChatUsage
 from app.services import auth_service as auth
 from app.services import chat_limits, chat_service
 
@@ -134,6 +134,27 @@ def chat_out(result, log_id: int, verdict) -> ChatOut:
             remaining=max(0, verdict.remaining - 1) if verdict.limit else 0,
             resetAt=verdict.reset_at.isoformat(),
         ),
+    )
+
+
+@router.get("/chat/quota", response_model=ChatQuotaOut)
+async def chat_quota(
+    request: Request,
+    authorization: str | None = Header(None),
+    x_client_id: str | None = Header(None, max_length=64),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+):
+    """The asker's questions left today and whether one would be accepted now. Costs nothing:
+    no question is asked, and it is not counted."""
+    who = await asker(request, session, authorization, x_client_id)
+    verdict = await chat_limits.check(session, settings, who)
+    return ChatQuotaOut(
+        limit=verdict.limit,
+        remaining=verdict.remaining,
+        resetAt=verdict.reset_at.isoformat(),
+        maxChars=settings.chat_max_chars,
+        blocked=verdict.code,
     )
 
 
