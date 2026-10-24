@@ -326,3 +326,27 @@ class TestFilteredBookIds:
         )
         # filtered to no book at all: empty, without asking the embedder
         assert response.status_code == 200 and response.json()["items"] == []
+
+
+class TestChatScope:
+    """The authors and books a question names, matched with the library's."""
+
+    async def test_names_are_matched_with_authors_and_works(self, imported: AsyncClient):
+        from app.services import chat_scope
+
+        async with get_sessionmaker()() as session:
+            # with or without the title in front, exact or as whole words
+            for name in ("مؤلف الاختبار الثالث", "الشيخ مؤلف الاختبار الثالث", "الاختبار الثالث"):
+                scope = await chat_scope.resolve(session, [name], [])
+                assert scope.book_ids == [int(BOOK_ID)], name
+                assert scope.authors == ["مؤلف الاختبار الثالث"]
+            scope = await chat_scope.resolve(session, [], ["كتاب اختبار البحث"])
+            assert scope.book_ids == [int(BOOK_ID)] and scope.works == ["كتاب اختبار البحث"]
+
+    async def test_unknown_or_too_short_names_are_left_out(self, imported: AsyncClient):
+        from app.services import chat_scope
+
+        async with get_sessionmaker()() as session:
+            scope = await chat_scope.resolve(session, ["مؤلف لا وجود له", "ال"], ["كتاب مجهول"])
+            assert scope.book_ids is None
+            assert set(scope.ignored) == {"مؤلف لا وجود له", "ال", "كتاب مجهول"}

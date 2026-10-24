@@ -83,3 +83,76 @@ closest in meaning to `q`, with no Gemini call and no daily quota:
 by meaning". Open the page with `GET /api/books/{bookId}/pages/{sequence}`. Also takes the same filters as `GET /api/search` (`subject`, `library`, `language`, `author`,
 `authorName`, `work`), combined the same way; `bookId` narrows further. A filter that selects no
 book returns `items: []`. 30 searches a minute per address (429 `too_fast`); the same search is answered from a 5-minute cache. One result per page (its best chunk).
+
+
+## Showing the steps: POST /api/chat/stream
+
+Same request, headers, limits and errors as `POST /api/chat` (a refused request is a plain JSON
+error with its status code, before any stream). When accepted the answer is a stream of
+server-sent events (`Content-Type: text/event-stream`), so the app can show where the question is:
+
+```
+event: step
+data: {"step":"rewrite","state":"start"}
+
+event: step
+data: {"step":"rewrite","state":"done","ok":true,"queries":["…"],"keywords":["…"],"authors":["الشيخ المفيد"],"works":[]}
+
+event: step
+data: {"step":"search","state":"start"}
+
+event: step
+data: {"step":"search","state":"done","candidates":20,"byWords":3}
+
+event: step
+data: {"step":"rerank","state":"start"}   …  {"step":"rerank","state":"done","chosen":8}
+
+event: step
+data: {"step":"answer","state":"start","passages":8}
+
+event: done
+data: { …the same body as POST /api/chat… }
+```
+
+Steps, in order (a step can be missing: `rewrite` and `rerank` are skipped when switched off):
+
+| step | meaning | text for the user |
+|---|---|---|
+| `rewrite` | the question is understood and turned into search texts; `authors`/`works` are the named authors and books the search is limited to | «أفهم سؤالك…» |
+| `search` | meaning search and word search in the library; `candidates` = passages found | «أبحث في الكتب…» |
+| `rerank` | the best passages are chosen; `chosen` = how many | «أختار أنسب المقاطع…» |
+| `answer` | the answer is written from the passages (the longest step, 5-60 s) | «أكتب الإجابة…» |
+
+The last event is `done` (the answer, as `POST /api/chat` returns it) or `error`
+(`{"detail": "…", "id": …}`, the same bodies as that endpoint's 429 and 502). Lines starting with
+`:` are keep-alive comments: ignore them. A stream that ends with neither is a failure.
+
+Swift sketch (iOS 15+):
+
+```swift
+var req = URLRequest(url: URL(string: "https://api.thaqalaynlibrary.com/api/chat/stream")!)
+req.httpMethod = "POST"
+req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+req.httpBody = try JSONEncoder().encode(["message": question])
+req.timeoutInterval = 180
+let (bytes, response) = try await URLSession.shared.bytes(for: req)
+guard (response as? HTTPURLResponse)?.statusCode == 200 else { /* plain JSON error: limits, 503… */ }
+var event = ""
+for try await line in bytes.lines {
+    if line.hasPrefix("event: ") { event = String(line.dropFirst(7)) }
+    else if line.hasPrefix("data: ") {
+        let data = Data(line.dropFirst(6).utf8)
+        switch event {
+        case "step": /* decode {step, state, …}: update the progress text */ break
+        case "done": /* decode ChatOut: show the answer and sources */ break
+        case "error": /* decode {detail, id}: show detail */ break
+        default: break
+        }
+    }
+}
+```
+
+Named authors and books: when the question names one ("ماذا قال الشيخ المفيد عن…"), the search is
+limited to his books (if that finds too little, the whole library is searched). The names matched
+arrive in the `rewrite` step's `authors` and `works`, and `searchQueries` in the final body is
+unchanged.

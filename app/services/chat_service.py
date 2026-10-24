@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
 from app.models.chat import ChatRequest
+from app.services.chat_scope import Scope
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 PAYLOAD_FIELDS = ["bookId", "title", "volume", "authorDeath", "sequence", "page", "chunk", "text"]
@@ -38,11 +39,12 @@ WORD_HITS_PER_KEYWORD = 6
 WORD_SEARCH_TIMEOUT = 8.0  # seconds for all the keywords together
 PASSAGE_RADIUS = 650  # characters each side of a word-search match: a passage of ~220 words
 RERANK_PASSAGE_CHARS = 1200  # of each candidate shown to the reranker
+MIN_SCOPED_HITS = 3  # fewer vector hits in the named author's or book's pages: use the library
 COMMON_KEYWORD_SHARE = 0.02  # a keyword needs one word on fewer than 2% of all pages
 ANSWER_MAX_TOKENS = 8192  # the answer model's thinking and its answer together
 # The cheap steps are only worth their wait while short: past these the chat goes on without
 # them (the message searched as typed, the merged order).
-REWRITE_TIMEOUT = 8
+REWRITE_TIMEOUT = 15
 RERANK_TIMEOUT = 10
 
 SYSTEM_PROMPT = """أنت مساعد البحث في مكتبة الثقلين، وهي مكتبة كتب إسلامية شيعية.
@@ -82,8 +84,16 @@ Never a topic word or a common phrase that thousands of pages contain (bad: "ف�
 "الصابرين", "البلاء", "الإمام علي", "حكم الصلاة"). When nothing in the message is that
 distinctive, give no keywords: an empty list is better than a common one.
 
+3. Scope. When the user asks what a named AUTHOR (a scholar who wrote books, such as "الشيخ
+المفيد", "الشيخ الصدوق", "العلامة المجلسي") or a named BOOK ("الكافي", "نهج البلاغة", "بحار
+الأنوار") says, write that name in "authors" or "books", as the user wrote it. The search is
+then limited to those books. Only for an author or book the user names. Not for a person the
+question is merely about (the Prophet, the Imams, a companion, a narrator) and not for a
+topic. When unsure, leave both lists empty.
+
 If the message is not about the books' content (a greeting, a question about you), return
-both lists empty. Return only JSON: {"queries": ["..."], "keywords": ["..."]}"""
+all lists empty. Return only JSON:
+{"queries": ["..."], "keywords": ["..."], "authors": ["..."], "books": ["..."]}"""
 
 
 RERANK_PROMPT = """You choose passages for answering a question from a library of classical
@@ -209,15 +219,16 @@ def _strings(value, most: int) -> list[str]:
 # ── 1. rewrite ──────────────────────────────────────────────────────────────────────
 
 
-def _rewrite(settings: Settings, question: str) -> tuple[list[str], list[str], dict]:
-    """(search texts, keywords, log record). Never raises."""
+def _rewrite(settings: Settings, question: str) -> tuple[list[str], list[str], dict, dict]:
+    """(search texts, keywords, {"authors", "books"} named, log record). Never raises."""
     out, info = _json_call(
-        settings, settings.gemini_rewrite_model, REWRITE_PROMPT, question, 500, REWRITE_TIMEOUT
+        settings, settings.gemini_rewrite_model, REWRITE_PROMPT, question, 600, REWRITE_TIMEOUT
     )
     if out is None:
-        return [], [], info
+        return [], [], {}, info
     queries, keywords = _strings(out.get("queries"), 3), _strings(out.get("keywords"), 3)
-    return queries, keywords, {**info, "queries": queries, "keywords": keywords}
+    named = {"authors": _strings(out.get("authors"), 2), "books": _strings(out.get("books"), 2)}
+    return queries, keywords, named, {**info, "queries": queries, "keywords": keywords, **named}
 
 
 # ── 2a. vector search ───────────────────────────────────────────────────────────────
@@ -295,7 +306,9 @@ def _search(
 # ── 2b. word search ─────────────────────────────────────────────────────────────────
 
 
-async def _word_search(settings: Settings, keywords: list[str]) -> tuple[list[dict], dict]:
+async def _word_search(
+    settings: Settings, keywords: list[str], scope: Scope | None = None
+) -> tuple[list[dict], dict]:
     """Pages holding each keyword exactly (the library's own full-text search), each cut to a
     passage around the match. Never raises; gives up after WORD_SEARCH_TIMEOUT seconds."""
     if not keywords:
@@ -320,13 +333,25 @@ async def _word_search(settings: Settings, keywords: list[str]) -> tuple[list[di
 
     async def one(keyword: str) -> list[dict]:
         async with get_sessionmaker()() as session:
-            hits, _ = await search_service.search(
-                session,
-                query=keyword,
-                page=1,
-                limit=WORD_HITS_PER_KEYWORD,
-                books_root=settings.books_root,
-            )
+            hits = []
+            if scope and scope.book_ids:  # the named authors' and books' pages first
+                hits, _ = await search_service.search(
+                    session,
+                    query=keyword,
+                    page=1,
+                    limit=WORD_HITS_PER_KEYWORD,
+                    books_root=settings.books_root,
+                    author_ids=sorted(set(scope.author_ids)) or None,
+                    work_ids=sorted(set(scope.work_ids)) or None,
+                )
+            if not hits:
+                hits, _ = await search_service.search(
+                    session,
+                    query=keyword,
+                    page=1,
+                    limit=WORD_HITS_PER_KEYWORD,
+                    books_root=settings.books_root,
+                )
         cache: dict = {}
         out = []
         for h in hits:
@@ -484,12 +509,37 @@ def _ms(t: float) -> int:
     return round((time.monotonic() - t) * 1000)
 
 
-async def _ask(settings: Settings, question: str, result: ChatResult) -> None:
+async def _ask(settings: Settings, question: str, result: ChatResult, emit=None) -> None:
+    """Runs the pipeline. `emit(event)` (optional, called on the event loop) is told each
+    step as it starts and ends: {"step", "state": "start"|"done", ...details}."""
+    from app.db import get_sessionmaker
+    from app.services import chat_scope
+
+    def say(step: str, state: str, **details) -> None:
+        if emit:
+            emit({"step": step, "state": state, **details})
+
     timings = result.timings
-    queries, keywords = [], []
+    queries, keywords, named, scope = [], [], {}, None
     if settings.chat_rewrite:
-        queries, keywords, result.rewrite = await asyncio.to_thread(_rewrite, settings, question)
+        say("rewrite", "start")
+        queries, keywords, named, result.rewrite = await asyncio.to_thread(
+            _rewrite, settings, question
+        )
         timings["rewriteMs"] = result.rewrite["ms"]
+        if named.get("authors") or named.get("books"):
+            async with get_sessionmaker()() as session:
+                scope = await chat_scope.resolve(session, named["authors"], named["books"])
+            result.rewrite["scope"] = scope.info()
+        say(
+            "rewrite",
+            "done",
+            ok=result.rewrite.get("status") == 200,
+            queries=queries,
+            keywords=keywords,
+            authors=scope.authors if scope else [],
+            works=scope.works if scope else [],
+        )
     texts = list(dict.fromkeys([question, *queries]))  # the message itself is always searched
 
     async def meaning() -> list[dict]:
@@ -497,12 +547,20 @@ async def _ask(settings: Settings, question: str, result: ChatResult) -> None:
         vectors = await asyncio.to_thread(_embed, settings, texts)
         timings["embedMs"] = _ms(t)
         t = time.monotonic()
-        found = await asyncio.to_thread(_search, settings, vectors, settings.chat_candidates)
+        found = await asyncio.to_thread(
+            _search, settings, vectors, settings.chat_candidates, scope.book_ids if scope else None
+        )
+        if scope and scope.book_ids and len(found) < MIN_SCOPED_HITS:
+            # the named author or book holds too little: search the whole library instead
+            scope.fallback = True
+            result.rewrite["scope"] = scope.info()
+            found = await asyncio.to_thread(_search, settings, vectors, settings.chat_candidates)
         timings["searchMs"] = _ms(t)
         return found
 
+    say("search", "start")
     words_task = (
-        _word_search(settings, keywords)
+        _word_search(settings, keywords, scope)
         if settings.chat_word_search
         else asyncio.sleep(0, result=([], {}))
     )
@@ -510,25 +568,34 @@ async def _ask(settings: Settings, question: str, result: ChatResult) -> None:
     if result.words:
         timings["wordMs"] = result.words["ms"]
     candidates = merge_candidates(found, worded)
+    say("search", "done", candidates=len(candidates), byWords=len(worded))
     if not candidates:
         result.status = "no_results"
         return
 
     passages = candidates[: settings.chat_passages]
     if settings.chat_rerank and len(candidates) > 1:
+        say("rerank", "start")
         passages, result.rerank = await asyncio.to_thread(_rerank, settings, question, candidates)
         timings["rerankMs"] = result.rerank["ms"]
+        say("rerank", "done", chosen=len(passages))
     result.sources = passages
+    say("answer", "start", passages=len(passages))
     await asyncio.to_thread(_generate, settings, question, passages, result)
+    say("answer", "done")
 
 
-async def answer(settings: Settings, question: str) -> ChatResult:
-    if not (settings.gemini_api_key and settings.qdrant_api_key):
+def configured(settings: Settings) -> bool:
+    return bool(settings.gemini_api_key and settings.qdrant_api_key)
+
+
+async def answer(settings: Settings, question: str, emit=None) -> ChatResult:
+    if not configured(settings):
         raise ChatUnavailable
     t = time.monotonic()
     result = ChatResult(None, [], "error", chat_models(settings)[0])
     try:
-        await _ask(settings, question, result)
+        await _ask(settings, question, result, emit)
     except Exception as exc:  # noqa: BLE001 -- the embedder or Qdrant failing is logged like any error
         result.status, result.answer = "error", None
         result.error = f"{type(exc).__name__}: {exc}"[:500]

@@ -4,16 +4,24 @@ Every request is logged in chat_requests (see app/models/chat.py), failures incl
 Limits: see app/services/chat_limits.py (429 with a `code`).
 Statuses: 200 with status "ok" (an answer) or "no_results"; 429 when Gemini's free tier
 refuses for its rate limit; 502 when a step fails; 503 when the chatbot is not configured.
+
+POST /api/chat/stream takes the same request and answers as a stream of server-sent events:
+a `step` event as each step starts and ends, then `done` (the same body as POST /api/chat) or
+`error`. A request refused up front (limits, length, not configured) is a plain JSON error,
+as for POST /api/chat.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 from fastapi import APIRouter, Depends, Header, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
-from app.db import get_session
+from app.db import get_session, get_sessionmaker
 from app.schemas.chat import ChatIn, ChatOut, ChatQuota, ChatSource, ChatUsage
 from app.services import auth_service as auth
 from app.services import chat_limits, chat_service
@@ -40,16 +48,19 @@ async def asker(request: Request, session: AsyncSession, authorization, client_i
     return f"ip:{auth.client_ip(request)}"
 
 
-@router.post("/chat", response_model=ChatOut)
-async def chat(
+_running: set[asyncio.Task] = set()  # streamed chats still being answered
+
+
+async def admit(
     body: ChatIn,
     request: Request,
-    authorization: str | None = Header(None),
-    x_client_id: str | None = Header(None, max_length=64),
-    x_app_version: str | None = Header(None, max_length=32),
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_settings),
+    session: AsyncSession,
+    settings: Settings,
+    authorization: str | None,
+    client_id: str | None,
 ):
+    """(question, who, limits verdict) when the question may be asked now; else the JSON
+    response that refuses it."""
     question = body.message.strip()
     if not question:
         return JSONResponse({"detail": "اكتب سؤالاً."}, status_code=422)
@@ -58,7 +69,9 @@ async def chat(
             {"code": "too_long", "detail": f"السؤال أطول من {settings.chat_max_chars} حرفاً."},
             status_code=422,
         )
-    who = await asker(request, session, authorization, x_client_id)
+    if not chat_service.configured(settings):
+        return JSONResponse({"detail": OFF}, status_code=503)
+    who = await asker(request, session, authorization, client_id)
     verdict = await chat_limits.check(session, settings, who)
     if verdict.code:
         return JSONResponse(
@@ -72,22 +85,21 @@ async def chat(
             status_code=429,
             headers={"Retry-After": str(verdict.retry_after)},
         )
-    chat_limits.begin(who)
-    try:
-        result = await chat_service.answer(settings, question)
-    except chat_service.ChatUnavailable:
-        return JSONResponse({"detail": OFF}, status_code=503)
-    finally:
-        chat_limits.end(who)
-    log_id = await chat_service.log_request(
-        session, question, result, x_client_id, x_app_version, who
-    )
+    return question, who, verdict
+
+
+def failure(result, log_id: int) -> JSONResponse | None:
+    """The error response for a chat that did not get an answer, else None."""
     if result.status == "rate_limited":
         return JSONResponse(
             {"detail": BUSY, "id": log_id}, status_code=429, headers={"Retry-After": "60"}
         )
     if result.status == "error":
         return JSONResponse({"detail": FAILED, "id": log_id}, status_code=502)
+    return None
+
+
+def chat_out(result, log_id: int, verdict) -> ChatOut:
     usage = result.usage
     return ChatOut(
         id=log_id,
@@ -121,4 +133,99 @@ async def chat(
             remaining=max(0, verdict.remaining - 1) if verdict.limit else 0,
             resetAt=verdict.reset_at.isoformat(),
         ),
+    )
+
+
+@router.post("/chat", response_model=ChatOut)
+async def chat(
+    body: ChatIn,
+    request: Request,
+    authorization: str | None = Header(None),
+    x_client_id: str | None = Header(None, max_length=64),
+    x_app_version: str | None = Header(None, max_length=32),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+):
+    admitted = await admit(body, request, session, settings, authorization, x_client_id)
+    if isinstance(admitted, JSONResponse):
+        return admitted
+    question, who, verdict = admitted
+    chat_limits.begin(who)
+    try:
+        result = await chat_service.answer(settings, question)
+    except chat_service.ChatUnavailable:
+        return JSONResponse({"detail": OFF}, status_code=503)
+    finally:
+        chat_limits.end(who)
+    log_id = await chat_service.log_request(
+        session, question, result, x_client_id, x_app_version, who
+    )
+    return failure(result, log_id) or chat_out(result, log_id, verdict)
+
+
+def sse(event: str, data: dict | str) -> str:
+    payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    body: ChatIn,
+    request: Request,
+    authorization: str | None = Header(None),
+    x_client_id: str | None = Header(None, max_length=64),
+    x_app_version: str | None = Header(None, max_length=32),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+):
+    """The same chat as POST /api/chat, told step by step as server-sent events."""
+    admitted = await admit(body, request, session, settings, authorization, x_client_id)
+    if isinstance(admitted, JSONResponse):
+        return admitted
+    question, who, verdict = admitted
+    queue: asyncio.Queue = asyncio.Queue()
+    chat_limits.begin(who)
+
+    async def run() -> None:
+        # Not tied to the connection: an answer already paid for is logged even if the
+        # app went away.
+        try:
+            result = await chat_service.answer(
+                settings, question, emit=lambda ev: queue.put_nowait(("step", ev))
+            )
+            async with get_sessionmaker()() as logging_session:
+                log_id = await chat_service.log_request(
+                    logging_session, question, result, x_client_id, x_app_version, who
+                )
+            failed = failure(result, log_id)
+            if failed is not None:
+                queue.put_nowait(("error", json.loads(failed.body)))
+            else:
+                queue.put_nowait(("done", chat_out(result, log_id, verdict).model_dump_json()))
+        except Exception as exc:  # noqa: BLE001 -- whatever broke, the app is told
+            queue.put_nowait(("error", {"detail": FAILED, "error": type(exc).__name__}))
+        finally:
+            chat_limits.end(who)
+            queue.put_nowait(None)
+
+    task = asyncio.create_task(run())
+    _running.add(task)
+    task.add_done_callback(_running.discard)
+
+    async def events():
+        yield ": open\n\n"  # sends the headers at once
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=15)
+            except TimeoutError:
+                yield ": ping\n\n"  # keeps the connection open through proxies
+                continue
+            if item is None:
+                return
+            yield sse(*item)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

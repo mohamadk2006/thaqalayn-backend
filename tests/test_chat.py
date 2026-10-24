@@ -403,7 +403,7 @@ async def test_the_whole_chat_with_word_search_and_rerank(monkeypatch, logged):
     app.dependency_overrides[get_session] = lambda: None
     word_hit = {**_passage(9, book="77"), "id": "w:77:9", "foundBy": "words", "score": 0.0}
 
-    async def fake_words(s, keywords):
+    async def fake_words(s, keywords, scope=None):
         assert keywords == ["الصبر رأس الإيمان"]
         return [word_hit], {"keywords": keywords, "hits": 1, "ms": 12}
 
@@ -539,3 +539,134 @@ async def test_second_question_while_one_is_running_is_refused(app, logged, used
     finally:
         chat_limits.end("c:dev-1")
     assert r.status_code == 429 and r.json()["code"] == "in_progress"
+
+
+def rewrite_reply(**fields):
+    body = {"queries": ["الصبر"], "keywords": [], "authors": [], "books": [], **fields}
+    return 200, {
+        "candidates": [{"content": {"parts": [{"text": json.dumps(body, ensure_ascii=False)}]}}],
+        "usageMetadata": {"totalTokenCount": 100},
+    }
+
+
+async def test_a_named_author_limits_the_vector_search_to_his_books(
+    rewriting_app, logged, monkeypatch
+):
+    from app.services import chat_scope
+
+    async def resolve(session, authors, books):
+        assert authors == ["الشيخ المفيد"] and books == []
+        return chat_scope.Scope(book_ids=[11, 12], author_ids=[5], authors=["الشيخ المفيد"])
+
+    hits = [{**PASSAGE, "sequence": n} for n in (1, 2, 3)]
+    post, calls = fake_post(hits=hits, rewrite=rewrite_reply(authors=["الشيخ المفيد"]))
+    monkeypatch.setattr(chat_scope, "resolve", resolve)
+    monkeypatch.setattr(chat_service, "_post", post)
+    r = await _ask(rewriting_app, "ماذا قال الشيخ المفيد عن الصبر؟")
+    assert r.status_code == 200
+    searches = next(b for u, b in calls if "/points/search" in u)["searches"]
+    must = searches[0]["filter"]["must"][0]
+    assert must == {"key": "bookId", "match": {"any": [11, 12]}}
+    assert logged[0]["result"].rewrite["scope"]["authors"] == ["الشيخ المفيد"]
+    assert logged[0]["result"].rewrite["scope"]["fallback"] is False
+
+
+async def test_too_few_hits_in_the_named_books_search_the_whole_library(
+    rewriting_app, logged, monkeypatch
+):
+    from app.services import chat_scope
+
+    async def resolve(session, authors, books):
+        return chat_scope.Scope(book_ids=[11], author_ids=[5], authors=["مؤلف"])
+
+    post, calls = fake_post(rewrite=rewrite_reply(authors=["مؤلف"]))
+    monkeypatch.setattr(chat_scope, "resolve", resolve)
+    monkeypatch.setattr(chat_service, "_post", post)
+    r = await _ask(rewriting_app, "ماذا قال مؤلف عن الصبر؟")  # one hit: fewer than the minimum
+    assert r.status_code == 200
+    searches = [b["searches"][0] for u, b in calls if "/points/search" in u]
+    assert "filter" in searches[0] and "filter" not in searches[1]
+    assert logged[0]["result"].rewrite["scope"]["fallback"] is True
+
+
+def sse_events(text):
+    """[(event, data)] of a server-sent-events body; comments (": ...") are skipped."""
+    out = []
+    for block in text.strip().split("\n\n"):
+        lines = [line for line in block.split("\n") if not line.startswith(":")]
+        if lines:
+            name = lines[0].removeprefix("event: ")
+            out.append((name, json.loads(lines[1].removeprefix("data: "))))
+    return out
+
+
+async def _stream(app, message, headers=None):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        return await client.post(
+            "/api/chat/stream", json={"message": message}, headers=headers or {}
+        )
+
+
+async def test_stream_tells_each_step_then_gives_the_answer(app, logged, monkeypatch):
+    monkeypatch.setattr(chat_service, "_post", fake_post()[0])
+    r = await _stream(app, "ما دعاء النور؟", {"X-Client-Id": "dev-1"})
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
+    events = sse_events(r.text)
+    steps = [(d["step"], d["state"]) for name, d in events if name == "step"]
+    assert steps == [
+        ("search", "start"),
+        ("search", "done"),
+        ("answer", "start"),
+        ("answer", "done"),
+    ]
+    name, final = events[-1]
+    assert name == "done" and final["status"] == "ok" and final["sources"][0]["bookId"] == "4407"
+    assert final["quota"]["limit"] == 10
+    assert logged[0]["who"] == "c:dev-1"
+
+
+async def test_stream_with_rewrite_and_rerank_reports_what_it_found(logged, monkeypatch):
+    app = create_app()
+    settings = Settings(gemini_api_key="g", qdrant_api_key="q", chat_word_search=False)
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_session] = lambda: None
+    hits = [{**PASSAGE, "sequence": n} for n in (1, 2)]
+    base, _ = fake_post(hits=hits, rewrite=rewrite_reply(queries=["الصبر في الكتب"]))
+
+    def post(url, body, headers, timeout):
+        if (
+            (body.get("systemInstruction") or {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+            .startswith("You choose passages")
+        ):
+            return rerank_reply([2])
+        return base(url, body, headers, timeout)
+
+    monkeypatch.setattr(chat_service, "_post", post)
+    steps = [
+        d for name, d in sse_events((await _stream(app, "ما فضل الصبر؟")).text) if name == "step"
+    ]
+    assert [(d["step"], d["state"]) for d in steps] == [
+        ("rewrite", "start"), ("rewrite", "done"), ("search", "start"), ("search", "done"),
+        ("rerank", "start"), ("rerank", "done"), ("answer", "start"), ("answer", "done"),
+    ]  # fmt: skip
+    assert steps[1]["queries"] == ["الصبر في الكتب"] and steps[3]["candidates"] == 2
+    assert steps[5]["chosen"] == 1 and steps[6]["passages"] == 1
+
+
+async def test_stream_failure_is_an_error_event(app, logged, monkeypatch):
+    monkeypatch.setattr(
+        chat_service, "_post", fake_post(gemini_status=429, gemini_body="RESOURCE_EXHAUSTED")[0]
+    )
+    events = sse_events((await _stream(app, "سؤال")).text)
+    name, data = events[-1]
+    assert name == "error" and data["id"] == 1 and "مشغولة" in data["detail"]
+
+
+async def test_stream_refused_up_front_is_plain_json(app, logged, used, monkeypatch):
+    monkeypatch.setattr(chat_service, "_post", fake_post()[0])
+    used.day = 10
+    r = await _stream(app, "سؤال")
+    assert r.status_code == 429 and r.json()["code"] == "daily_limit"
+    assert not logged
