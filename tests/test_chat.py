@@ -942,6 +942,9 @@ def test_the_same_passage_in_another_edition_takes_one_slot():
     other = {"id": "3", "bookId": "17405", "sequence": 40, "text": "فقرة أخرى"}
     merged = chat_service.merge_candidates([a, same, other], [])
     assert [p["id"] for p in merged] == ["1", "3"]
+    quoted = {"id": "4", "bookId": "17409", "sequence": 9, "text": "ليست ( ( الثكلى كالمستأجرة ) )"}
+    plain = {"id": "5", "bookId": "17405", "sequence": 9, "text": 'ليست " الثكلى كالمستأجرة "'}
+    assert len(chat_service.merge_candidates([plain, quoted], [])) == 1  # only the marks differ
 
 
 def test_title_and_publication_pages_are_dropped_unless_the_question_is_about_the_book():

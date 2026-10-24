@@ -469,7 +469,8 @@ def merge_candidates(meaning: list[dict], words: list[dict]) -> list[dict]:
     seen: set[str] = set()
     out = []
     for p in merged:
-        signature = normalize(p.get("text") or "")[:300]
+        # letters and digits only: editions differ in quotation marks and spacing
+        signature = re.sub(r"\W", "", normalize(p.get("text") or ""))[:200]
         if signature and signature in seen:
             continue
         seen.add(signature)
