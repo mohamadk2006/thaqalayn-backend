@@ -166,6 +166,7 @@ def _item(r: SyncRecord) -> dict:
         "deleted": r.deleted,
         "updatedAt": iso(r.updated_at),
         "orderChangedAt": iso(r.order_changed_at),
+        "seq": r.seq,
         "data": None if r.deleted else r.data,
     }
 

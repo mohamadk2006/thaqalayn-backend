@@ -15,8 +15,8 @@ Decisions already made:
 - **Notes: the newer edit wins.** The version with the newer `updatedAt` replaces the other.
   The losing text is kept as a separate copy, so nothing is lost silently (§5.4).
 - **Each book in a study session is its own record**, not one list inside the session (§5.3).
-- **Search, catalog and download endpoints stay public.** The `/api/chat` endpoint also stays
-  public. Only `/api/account*` and `/api/sync*` need a token.
+- **Search, catalog and download endpoints stay public.** `/api/account*`, `/api/sync*` and
+  `/api/chat*` need a token (the chat was made sign-in only on 2026-10-24).
 
 ---
 
@@ -239,10 +239,10 @@ server simple, and new fields can be added by the apps without a server change.
   "hasMore": false,
   "items": [
     {"kind": "note", "key": "6F1C…", "deleted": false,
-     "updatedAt": "2026-10-22T09:12:03.120Z", "orderChangedAt": null,
+     "updatedAt": "2026-10-22T09:12:03.120Z", "orderChangedAt": null, "seq": 18300,
      "data": { … see §6 … }},
     {"kind": "highlight", "key": "A93D…", "deleted": true,
-     "updatedAt": "2026-10-22T09:13:00Z", "data": null}
+     "updatedAt": "2026-10-22T09:13:00Z", "seq": 18342, "data": null}
   ]
 }
 ```
@@ -519,3 +519,9 @@ Everything above is implemented as written (`app/api/account.py`, `app/api/sync.
   - codes and verify calls older than a day;
   - email send logs older than 90 days;
   - login sessions that ended or expired over 30 days ago.
+- **`seq` in pull items (2026-10-24).** Every item of `GET /api/sync/changes` also carries the
+  record's `seq`, which is what a client sends back as `baseSeq` when it pushes a change to that
+  record. (Before, only push results carried it.) Clients that ignore unknown fields are not
+  affected.
+- **CORS (2026-10-24).** The website's origins may also POST, PATCH and DELETE, and read
+  `Retry-After` (see `docs/website_developer_brief.md`).

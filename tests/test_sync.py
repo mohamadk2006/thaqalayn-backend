@@ -231,6 +231,7 @@ async def test_push_then_pull_on_another_device(phones):
         ("note", "6F1C-AAAA", "hello")
     ]
     assert items[0]["updatedAt"] == "2026-10-01T00:01:00.000Z"
+    assert items[0]["seq"] == res[0]["seq"]  # a client sends it back as baseSeq
 
 
 async def test_keys_compare_case_insensitively(phones):
