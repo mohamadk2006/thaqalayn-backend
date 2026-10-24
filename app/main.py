@@ -19,6 +19,7 @@ from app.api import (
     books,
     catalog_sync,
     chat,
+    conversations,
     errors,
     health,
     metadata,
@@ -53,12 +54,13 @@ async def lifespan(app: FastAPI):
 async def _daily_cleanup() -> None:
     """Old sign-in codes, rate-limit rows, email send logs and ended logins, once a day."""
     from app.db import get_sessionmaker
-    from app.services import auth_service
+    from app.services import auth_service, chat_history
 
     while True:
         try:
             async with get_sessionmaker()() as session:
                 await auth_service.cleanup(session)
+                await chat_history.purge(session)
         except Exception:  # noqa: BLE001 -- a failed cleanup is retried tomorrow
             logging.getLogger(__name__).exception("daily account cleanup failed")
         await asyncio.sleep(24 * 3600)
@@ -113,6 +115,7 @@ def create_app() -> FastAPI:
     app.include_router(search.router, prefix="/api")
     app.include_router(toc_search.router, prefix="/api")
     app.include_router(chat.router, prefix="/api")
+    app.include_router(conversations.router, prefix="/api")
     app.include_router(account.router, prefix="/api")
     app.include_router(sync.router, prefix="/api")
     errors.register(app)

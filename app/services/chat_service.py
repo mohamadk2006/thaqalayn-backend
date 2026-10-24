@@ -55,7 +55,9 @@ SYSTEM_PROMPT = """أنت مساعد البحث في مكتبة الثقلين،
 - بعد كل معلومة اذكر رقم المقطع الذي أُخذت منه بين معقوفين، مثل [1] أو [2][4].
 - إذا لم تكن في المقاطع إجابة عن السؤال فقل ذلك صراحة، ولا تخمّن.
 - انقل الآيات والأحاديث كما وردت في المقاطع دون تغيير.
-- أجب بلغة السؤال، بإيجاز ووضوح، وبتنسيق Markdown بسيط."""
+- أجب بلغة السؤال، بإيجاز ووضوح، وبتنسيق Markdown بسيط.
+- قد يسبق السؤال «المحادثة السابقة»: افهم سؤال المتابعة في ضوئها،
+  لكن خذ المعلومة من المقاطع المرقّمة وحدها، ولا تستشهد بأرقام المحادثة السابقة."""
 
 
 REWRITE_PROMPT = """You prepare searches over the Thaqalayn Library: classical Arabic (and
@@ -90,6 +92,10 @@ distinctive, give no keywords: an empty list is better than a common one.
 then limited to those books. Only for an author or book the user names. Not for a person the
 question is merely about (the Prophet, the Imams, a companion, a narrator) and not for a
 topic. When unsure, leave both lists empty.
+
+If a previous conversation is given, the new message may depend on it ("and what about the
+second one?", "explain more", "and in fiqh?"): write the queries and keywords so that each stands
+on its own, naming the topic, person or book the conversation is about.
 
 If the message is not about the books' content (a greeting, a question about you), return
 all lists empty. Return only JSON:
@@ -157,10 +163,21 @@ def _where(p: dict) -> str:
     return where
 
 
-def build_contents(question: str, passages: list[dict]) -> str:
-    """The user turn Gemini sees: the numbered passages, then the question."""
+HISTORY_CHARS = 1200  # of each earlier message shown to a model
+
+
+def format_history(history: list[tuple[str, str]]) -> str:
+    """The earlier turns of the chat, as text for a model."""
+    who = {"user": "المستخدم", "assistant": "المساعد"}
+    return "\n".join(f"{who.get(role, role)}: {text[:HISTORY_CHARS]}" for role, text in history)
+
+
+def build_contents(question: str, passages: list[dict], history=None) -> str:
+    """The user turn Gemini sees: the earlier turns (if any), the numbered passages, then the
+    question."""
     parts = [f"[{n}] ({_where(p)})\n{p.get('text', '')}" for n, p in enumerate(passages, 1)]
-    return "المقاطع:\n\n" + "\n\n".join(parts) + f"\n\nالسؤال: {question}"
+    earlier = f"المحادثة السابقة:\n{format_history(history)}\n\n" if history else ""
+    return earlier + "المقاطع:\n\n" + "\n\n".join(parts) + f"\n\nالسؤال: {question}"
 
 
 def read_answer(response: dict) -> tuple[str | None, str | None]:
@@ -219,10 +236,18 @@ def _strings(value, most: int) -> list[str]:
 # ── 1. rewrite ──────────────────────────────────────────────────────────────────────
 
 
-def _rewrite(settings: Settings, question: str) -> tuple[list[str], list[str], dict, dict]:
-    """(search texts, keywords, {"authors", "books"} named, log record). Never raises."""
+def _rewrite(
+    settings: Settings, question: str, history=None
+) -> tuple[list[str], list[str], dict, dict]:
+    """(search texts, keywords, {"authors", "books"} named, log record). Never raises. In a
+    follow-up the earlier turns come with the message, so the searches stand on their own."""
+    message = (
+        f"Previous conversation:\n{format_history(history)}\n\nNew message: {question}"
+        if history
+        else question
+    )
     out, info = _json_call(
-        settings, settings.gemini_rewrite_model, REWRITE_PROMPT, question, 600, REWRITE_TIMEOUT
+        settings, settings.gemini_rewrite_model, REWRITE_PROMPT, message, 600, REWRITE_TIMEOUT
     )
     if out is None:
         return [], [], {}, info
@@ -463,10 +488,12 @@ def chat_models(settings: Settings) -> list[str]:
     return list(dict.fromkeys(n.strip() for n in names if n.strip()))
 
 
-def _answer_request(question: str, passages: list[dict]) -> dict:
+def _answer_request(question: str, passages: list[dict], history=None) -> dict:
     return {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-        "contents": [{"role": "user", "parts": [{"text": build_contents(question, passages)}]}],
+        "contents": [
+            {"role": "user", "parts": [{"text": build_contents(question, passages, history)}]}
+        ],
         # thinking counts against this limit: at 2048, a model that thought for 1,967
         # tokens was cut off after 77 tokens of answer, mid-sentence
         "generationConfig": {"temperature": 0.3, "maxOutputTokens": ANSWER_MAX_TOKENS},
@@ -499,7 +526,7 @@ def _stream_lines(url: str, body: dict, headers: dict, timeout: float):
 
 
 def _gemini_stream(
-    settings: Settings, model: str, question: str, passages: list[dict], on_text
+    settings: Settings, model: str, question: str, passages: list[dict], on_text, history=None
 ) -> tuple[int, dict | str]:
     """Like _gemini, but every piece of the answer goes to `on_text` as Gemini writes it. The
     result has the shape of a generateContent response (the whole text in one part). A stream
@@ -510,7 +537,7 @@ def _gemini_stream(
     try:
         for line in _stream_lines(
             GEMINI_URL.format(model=model) + "?alt=sse",
-            _answer_request(question, passages),
+            _answer_request(question, passages, history),
             {"x-goog-api-key": settings.gemini_api_key},
             settings.gemini_attempt_timeout,
         ):
@@ -539,20 +566,25 @@ def _gemini_stream(
 
 
 def _gemini(
-    settings: Settings, model: str, question: str, passages: list[dict], on_text=None
+    settings: Settings, model: str, question: str, passages: list[dict], on_text=None, history=None
 ) -> tuple[int, dict | str]:
     if on_text:
-        return _gemini_stream(settings, model, question, passages, on_text)
+        return _gemini_stream(settings, model, question, passages, on_text, history)
     return _post(
         GEMINI_URL.format(model=model),
-        _answer_request(question, passages),
+        _answer_request(question, passages, history),
         {"x-goog-api-key": settings.gemini_api_key},
         settings.gemini_attempt_timeout,
     )
 
 
 def _generate(
-    settings: Settings, question: str, passages: list[dict], result: ChatResult, on_text=None
+    settings: Settings,
+    question: str,
+    passages: list[dict],
+    result: ChatResult,
+    on_text=None,
+    history=None,
 ) -> None:
     """The answer, from the first model that gives one; fills `result`. With `on_text`, the
     answer is streamed to it piece by piece (called from this thread)."""
@@ -569,7 +601,7 @@ def _generate(
     for model in models:
         t = time.monotonic()
         status, body = _gemini(
-            settings, model, question, passages, forward if on_text else None
+            settings, model, question, passages, forward if on_text else None, history
         )
         result.attempts.append(
             {"model": model, "status": status, "ms": round((time.monotonic() - t) * 1000)}
@@ -600,7 +632,9 @@ def _ms(t: float) -> int:
     return round((time.monotonic() - t) * 1000)
 
 
-async def _ask(settings: Settings, question: str, result: ChatResult, emit=None) -> None:
+async def _ask(
+    settings: Settings, question: str, result: ChatResult, emit=None, history=None
+) -> None:
     """Runs the pipeline. `emit(event)` (optional, called on the event loop) is told each
     step as it starts and ends: {"step", "state": "start"|"done", ...details}."""
     from app.db import get_sessionmaker
@@ -615,7 +649,7 @@ async def _ask(settings: Settings, question: str, result: ChatResult, emit=None)
     if settings.chat_rewrite:
         say("rewrite", "start")
         queries, keywords, named, result.rewrite = await asyncio.to_thread(
-            _rewrite, settings, question
+            _rewrite, settings, question, history
         )
         timings["rewriteMs"] = result.rewrite["ms"]
         if named.get("authors") or named.get("books"):
@@ -667,7 +701,8 @@ async def _ask(settings: Settings, question: str, result: ChatResult, emit=None)
     passages = candidates[: settings.chat_passages]
     if settings.chat_rerank and len(candidates) > 1:
         say("rerank", "start")
-        passages, result.rerank = await asyncio.to_thread(_rerank, settings, question, candidates)
+        asked = f"{queries[0]} — {question}" if history and queries else question
+        passages, result.rerank = await asyncio.to_thread(_rerank, settings, asked, candidates)
         timings["rerankMs"] = result.rerank["ms"]
         say("rerank", "done", chosen=len(passages))
     result.sources = passages
@@ -676,7 +711,9 @@ async def _ask(settings: Settings, question: str, result: ChatResult, emit=None)
     on_text = (
         (lambda piece: loop.call_soon_threadsafe(emit, {"token": piece})) if emit else None
     )
-    await asyncio.to_thread(_generate, settings, question, passages, result, on_text)
+    await asyncio.to_thread(
+        _generate, settings, question, passages, result, on_text, history
+    )
     say("answer", "done")
 
 
@@ -684,13 +721,13 @@ def configured(settings: Settings) -> bool:
     return bool(settings.gemini_api_key and settings.qdrant_api_key)
 
 
-async def answer(settings: Settings, question: str, emit=None) -> ChatResult:
+async def answer(settings: Settings, question: str, emit=None, history=None) -> ChatResult:
     if not configured(settings):
         raise ChatUnavailable
     t = time.monotonic()
     result = ChatResult(None, [], "error", chat_models(settings)[0])
     try:
-        await _ask(settings, question, result, emit)
+        await _ask(settings, question, result, emit, history)
     except Exception as exc:  # noqa: BLE001 -- the embedder or Qdrant failing is logged like any error
         result.status, result.answer = "error", None
         result.error = f"{type(exc).__name__}: {exc}"[:500]
@@ -705,12 +742,14 @@ async def log_request(
     client_id: str | None,
     app_version: str | None,
     who: str | None = None,
+    conversation_id=None,
 ) -> int:
     usage = result.usage
     row = ChatRequest(
         client_id=client_id,
         app_version=app_version,
         who=who,
+        conversation_id=conversation_id,
         message=question,
         answer=result.answer,
         status=result.status,

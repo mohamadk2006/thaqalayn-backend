@@ -21,6 +21,9 @@ DETAILS = {
     "email_unavailable": "تعذّر إرسال البريد الآن، حاول بعد قليل.",
     "auth_unavailable": "تسجيل الدخول غير مفعّل على هذا الخادم.",
     "device_not_found": "هذا الجهاز غير موجود في الحساب.",
+    "conversation_not_found": "هذه المحادثة غير موجودة.",
+    "conversation_full": "المحادثة طويلة، ابدأ محادثة جديدة.",
+    "too_many_conversations": "لديك محادثات كثيرة، احذف بعضها أولاً.",
 }
 
 

@@ -10,7 +10,7 @@ from app.models.account import (
     User,
     VerifyCall,
 )
-from app.models.chat import ChatRequest
+from app.models.chat import ChatConversation, ChatMessage, ChatRequest
 from app.models.library import (
     Author,
     Book,
@@ -36,6 +36,8 @@ __all__ = [
     "VerifyCall",
     "Author",
     "Book",
+    "ChatConversation",
+    "ChatMessage",
     "ChatRequest",
     "ImportLog",
     "Language",

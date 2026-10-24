@@ -7,8 +7,8 @@ Statuses: 200 with status "ok" (an answer) or "no_results"; 429 when Gemini's fr
 refuses for its rate limit; 502 when a step fails; 503 when the chatbot is not configured.
 
 POST /api/chat/stream takes the same request and answers as a stream of server-sent events:
-a `step` event as each step starts and ends, `token` events with the answer as it is
-written, then `done` (the same body as POST /api/chat) or
+a `conversation` event (the chat's id), a `step` event as each step starts and ends,
+`token` events with the answer as it is written, then `done` (the same body as POST /api/chat) or
 `error`. A request refused up front (limits, length, not configured) is a plain JSON error,
 as for POST /api/chat.
 """
@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
+from dataclasses import dataclass
 
 from fastapi import APIRouter, Depends, Header
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -26,7 +28,7 @@ from app.config import Settings, get_settings
 from app.db import get_session, get_sessionmaker
 from app.schemas.chat import ChatIn, ChatOut, ChatQuota, ChatQuotaOut, ChatSource, ChatUsage
 from app.services import auth_service as auth
-from app.services import chat_limits, chat_service
+from app.services import chat_history, chat_limits, chat_service
 
 router = APIRouter(tags=["chat"])
 
@@ -41,13 +43,25 @@ LIMIT_TEXTS = {
 }
 
 
-async def asker(session: AsyncSession, authorization: str | None) -> str:
-    """Who is asking, for the limits: the signed-in user. Without a valid access token the
-    answer is 401 token_expired (the app refreshes the token, or asks the user to sign in)."""
-    return f"u:{(await auth.caller(session, authorization)).user.id}"
+async def asker(session: AsyncSession, authorization: str | None) -> tuple[str, uuid.UUID]:
+    """(who, user id): the signed-in user. Without a valid access token the answer is 401
+    token_expired (the app refreshes the token, or asks the user to sign in)."""
+    user_id = (await auth.caller(session, authorization)).user.id
+    return f"u:{user_id}", user_id
 
 
 _running: set[asyncio.Task] = set()  # streamed chats still being answered
+
+
+@dataclass
+class Admitted:
+    question: str
+    who: str
+    user_id: uuid.UUID
+    verdict: object  # chat_limits.Verdict
+    conversation_id: uuid.UUID  # the chat the question goes in (new if the request had none)
+    is_new: bool
+    history: list  # [(role, text)] of the chat so far
 
 
 async def admit(
@@ -56,9 +70,10 @@ async def admit(
     settings: Settings,
     authorization: str | None,
 ):
-    """(question, who, limits verdict) when the question may be asked now; else the JSON
-    response that refuses it. Signing in is required (401 otherwise)."""
-    who = await asker(session, authorization)
+    """An Admitted when the question may be asked now; else the JSON response that refuses
+    it. Signing in is required (401 otherwise); a chat that is not the user's is a 404, a
+    full one a 409."""
+    who, user_id = await asker(session, authorization)
     question = body.message.strip()
     if not question:
         return JSONResponse({"detail": "اكتب سؤالاً."}, status_code=422)
@@ -69,6 +84,7 @@ async def admit(
         )
     if not chat_service.configured(settings):
         return JSONResponse({"detail": OFF}, status_code=503)
+    await chat_history.check_room(session, settings, user_id, body.conversationId)
     verdict = await chat_limits.check(session, settings, who)
     if verdict.code:
         return JSONResponse(
@@ -82,7 +98,16 @@ async def admit(
             status_code=429,
             headers={"Retry-After": str(verdict.retry_after)},
         )
-    return question, who, verdict
+    history = await chat_history.earlier_turns(session, settings, body.conversationId)
+    return Admitted(
+        question,
+        who,
+        user_id,
+        verdict,
+        body.conversationId or uuid.uuid4(),
+        body.conversationId is None,
+        history,
+    )
 
 
 def failure(result, log_id: int) -> JSONResponse | None:
@@ -96,27 +121,57 @@ def failure(result, log_id: int) -> JSONResponse | None:
     return None
 
 
-def chat_out(result, log_id: int, verdict) -> ChatOut:
+def source_list(result) -> list[ChatSource]:
+    return [
+        ChatSource(
+            n=n,
+            bookId=str(p["bookId"]),
+            title=p.get("title") or "",
+            volume=str(p["volume"]) if p.get("volume") not in (None, "") else None,
+            page=str(p["page"]) if p.get("page") is not None else None,
+            sequence=p["sequence"],
+            text=p.get("text") or "",
+            score=p.get("score") or 0.0,
+            foundBy=p.get("foundBy"),
+        )
+        for n, p in enumerate(result.sources, 1)
+    ]
+
+
+async def finish(
+    session: AsyncSession, ask: Admitted, result, client_id, app_version
+) -> tuple[int, ChatOut | JSONResponse]:
+    """Logs the question; an answer (or "nothing found") is added to the chat. Returns the log
+    id and the response body: a ChatOut, or the error response."""
+    log_id = await chat_service.log_request(
+        session, ask.question, result, client_id, app_version, ask.who, ask.conversation_id
+    )
+    failed = failure(result, log_id)
+    if failed is not None:
+        return log_id, failed
+    _, reply = await chat_history.add_turn(
+        session,
+        ask.user_id,
+        ask.conversation_id,
+        ask.question,
+        result.answer,
+        result.status,
+        [s.model_dump() for s in source_list(result)],
+        log_id,
+    )
+    return log_id, chat_out(result, log_id, ask.verdict, ask.conversation_id, reply.id)
+
+
+def chat_out(result, log_id: int, verdict, conversation_id=None, message_id=None) -> ChatOut:
     usage = result.usage
     return ChatOut(
         id=log_id,
         status=result.status,
         answer=result.answer,
         model=result.model,
-        sources=[
-            ChatSource(
-                n=n,
-                bookId=str(p["bookId"]),
-                title=p.get("title") or "",
-                volume=str(p["volume"]) if p.get("volume") not in (None, "") else None,
-                page=str(p["page"]) if p.get("page") is not None else None,
-                sequence=p["sequence"],
-                text=p.get("text") or "",
-                score=p.get("score") or 0.0,
-                foundBy=p.get("foundBy"),
-            )
-            for n, p in enumerate(result.sources, 1)
-        ],
+        sources=source_list(result),
+        conversationId=str(conversation_id) if conversation_id else None,
+        messageId=message_id,
         usage=ChatUsage(
             promptTokens=usage.get("promptTokenCount"),
             outputTokens=usage.get("candidatesTokenCount"),
@@ -141,7 +196,7 @@ async def chat_quota(
 ):
     """The asker's questions left today and whether one would be accepted now. Costs nothing:
     no question is asked, and it is not counted."""
-    who = await asker(session, authorization)
+    who, _ = await asker(session, authorization)
     verdict = await chat_limits.check(session, settings, who)
     return ChatQuotaOut(
         limit=verdict.limit,
@@ -161,21 +216,18 @@ async def chat(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ):
-    admitted = await admit(body, session, settings, authorization)
-    if isinstance(admitted, JSONResponse):
-        return admitted
-    question, who, verdict = admitted
-    chat_limits.begin(who)
+    ask = await admit(body, session, settings, authorization)
+    if isinstance(ask, JSONResponse):
+        return ask
+    chat_limits.begin(ask.who)
     try:
-        result = await chat_service.answer(settings, question)
+        result = await chat_service.answer(settings, ask.question, history=ask.history)
     except chat_service.ChatUnavailable:
         return JSONResponse({"detail": OFF}, status_code=503)
     finally:
-        chat_limits.end(who)
-    log_id = await chat_service.log_request(
-        session, question, result, x_client_id, x_app_version, who
-    )
-    return failure(result, log_id) or chat_out(result, log_id, verdict)
+        chat_limits.end(ask.who)
+    _, response = await finish(session, ask, result, x_client_id, x_app_version)
+    return response
 
 
 def sse(event: str, data: dict | str) -> str:
@@ -193,37 +245,37 @@ async def chat_stream(
     settings: Settings = Depends(get_settings),
 ):
     """The same chat as POST /api/chat, told step by step as server-sent events."""
-    admitted = await admit(body, session, settings, authorization)
-    if isinstance(admitted, JSONResponse):
-        return admitted
-    question, who, verdict = admitted
+    ask = await admit(body, session, settings, authorization)
+    if isinstance(ask, JSONResponse):
+        return ask
     queue: asyncio.Queue = asyncio.Queue()
-    chat_limits.begin(who)
+    chat_limits.begin(ask.who)
 
     async def run() -> None:
-        # Not tied to the connection: an answer already paid for is logged even if the
-        # app went away.
+        # Not tied to the connection: an answer already paid for is logged and kept in the
+        # chat even if the app went away.
         try:
+            queue.put_nowait(
+                ("conversation", {"id": str(ask.conversation_id), "new": ask.is_new})
+            )
             result = await chat_service.answer(
                 settings,
-                question,
+                ask.question,
                 emit=lambda ev: queue.put_nowait(
                     ("token", {"text": ev["token"]}) if "token" in ev else ("step", ev)
                 ),
+                history=ask.history,
             )
-            async with get_sessionmaker()() as logging_session:
-                log_id = await chat_service.log_request(
-                    logging_session, question, result, x_client_id, x_app_version, who
-                )
-            failed = failure(result, log_id)
-            if failed is not None:
-                queue.put_nowait(("error", json.loads(failed.body)))
+            async with get_sessionmaker()() as own_session:
+                _, response = await finish(own_session, ask, result, x_client_id, x_app_version)
+            if isinstance(response, JSONResponse):
+                queue.put_nowait(("error", json.loads(response.body)))
             else:
-                queue.put_nowait(("done", chat_out(result, log_id, verdict).model_dump_json()))
+                queue.put_nowait(("done", response.model_dump_json()))
         except Exception as exc:  # noqa: BLE001 -- whatever broke, the app is told
             queue.put_nowait(("error", {"detail": FAILED, "error": type(exc).__name__}))
         finally:
-            chat_limits.end(who)
+            chat_limits.end(ask.who)
             queue.put_nowait(None)
 
     task = asyncio.create_task(run())

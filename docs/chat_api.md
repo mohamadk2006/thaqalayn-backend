@@ -187,3 +187,35 @@ Named authors and books: when the question names one ("ماذا قال الشي�
 limited to his books (if that finds too little, the whole library is searched). The names matched
 arrive in the `rewrite` step's `authors` and `works`, and `searchQueries` in the final body is
 unchanged.
+
+
+## Chats (continuing a conversation, several chats)
+
+A chat is stored on the server per user, so it follows the account on any device. Each question and
+answer is added to a chat, and the model sees the chat's last 6 messages when it answers a follow-up
+(the search step reads them too, so «وماذا عن الإمام الصادق؟» is searched as a complete question).
+
+**Asking.** `POST /api/chat` and `/api/chat/stream` take an optional `conversationId`:
+
+```json
+{"message": "وماذا عن الإمام الصادق؟", "conversationId": "6f1c1f0e-5d1e-4b6a-9d58-0a1f3a3b9c11"}
+```
+
+- Without it a new chat starts. Its id comes back as `conversationId` in the answer (and, in the stream, as
+  the first event: `event: conversation` / `data: {"id": "…", "new": true}`), and the app sends it with the
+  next question. The chat is created by its first answer: a question that fails (`error`) is not stored, so
+  retry it without an id (or with the same one).
+- The answer (`done` / `ChatOut`) also carries `messageId`, the answer's id in the chat.
+- Every question still counts as one question of the daily quota.
+- Errors (JSON, before any stream), with a `code` and an Arabic `detail`:
+  `404 conversation_not_found` (not the user's, deleted, or unknown), `409 conversation_full`
+  (40 messages: start a new chat), `409 too_many_conversations` (100 chats: delete some).
+
+**Chats.** All signed in (`401 token_expired` otherwise); another user's chat is a 404.
+
+| Call | Does |
+|---|---|
+| `GET /api/chat/conversations?limit=30&before=<nextBefore>` | `{"items": [{id, title, createdAt, updatedAt}], "nextBefore": "…"|null}`, most recently used first; pass `nextBefore` as `before` for the next page |
+| `GET /api/chat/conversations/{id}` | the chat with `messages`, oldest first: `{id, role: user|assistant, text, status, sources, createdAt}`. An assistant message with `status: "no_results"` has an empty `text`: show «لم أجد ما يخص سؤالك في الكتب». `sources` are as in the answer. |
+| `PATCH /api/chat/conversations/{id}` | `{"title": "…"}` renames (the title starts as the first question, shortened) |
+| `DELETE /api/chat/conversations/{id}` | 204; the chat disappears at once and is removed for good after 30 days, together with the text of its questions in the server's analysis log |

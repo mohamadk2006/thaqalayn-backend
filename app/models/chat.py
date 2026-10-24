@@ -8,9 +8,19 @@ quality can be studied from real use.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, Index, Integer, Text, func
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -31,6 +41,7 @@ class ChatRequest(Base):
     app_version: Mapped[str | None] = mapped_column(Text)
     # Who asked, for the limits: "u:<user id>" signed in, else "c:<client id>", else "ip:<address>".
     who: Mapped[str | None] = mapped_column(Text)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
 
     message: Mapped[str] = mapped_column(Text, nullable=False)
     answer: Mapped[str | None] = mapped_column(Text)
@@ -79,4 +90,49 @@ class ChatRequest(Base):
         Index("ix_chat_requests_created", "created_at"),
         Index("ix_chat_requests_client", "client_id"),
         Index("ix_chat_requests_who", "who", "created_at"),
+        Index("ix_chat_requests_conversation", "conversation_id"),
+    )
+
+
+class ChatConversation(Base):
+    """One chat of a user: a list of questions and answers the model sees again as context.
+    Deleting hides it at once (deleted_at); a daily cleanup removes it for good."""
+
+    __tablename__ = "chat_conversations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    deleted_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_chat_conversations_user", "user_id", "updated_at"),)
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_conversations.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)  # user | assistant
+    text: Mapped[str] = mapped_column(Text, nullable=False)  # "" for an answer not found
+    status: Mapped[str | None] = mapped_column(Text)  # an assistant message: ok | no_results
+    sources: Mapped[list | None] = mapped_column(JSONB)  # an assistant message: the passages
+    request_id: Mapped[int | None] = mapped_column(BigInteger)  # the chat_requests row
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("role IN ('user','assistant')", name="ck_chat_messages_role"),
+        Index("ix_chat_messages_conversation", "conversation_id", "id"),
     )

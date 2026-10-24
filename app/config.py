@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     chat_per_minute: int = 3  # questions per asker per minute
     chat_global_daily_limit: int = 150  # questions per day for everyone
     chat_max_chars: int = 500  # longest question
+    chat_history_messages: int = 6  # earlier messages the model sees in a follow-up
+    chat_max_messages: int = 40  # per conversation, then the user starts a new one
+    chat_max_conversations: int = 100  # per user
 
     # Accounts (docs/accounts_sync_spec.md). Sign-in codes are stored as HMAC-SHA256 keyed
     # with this pepper; without it, sign-in is switched off (503).

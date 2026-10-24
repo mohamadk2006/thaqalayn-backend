@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import uuid
+
 from pydantic import BaseModel, Field
 
 
 class ChatIn(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
+    # Continue this chat (the model sees its earlier messages). Omit to start a new one: its
+    # id comes back in the answer.
+    conversationId: uuid.UUID | None = None
 
 
 class ChatSource(BaseModel):
@@ -52,3 +57,35 @@ class ChatOut(BaseModel):
     searchQueries: list[str] = []
     timings: dict[str, int]
     quota: ChatQuota | None = None
+    conversationId: str | None = None  # the chat this question and answer were added to
+    messageId: int | None = None  # the answer's message in that chat
+
+
+class ConversationOut(BaseModel):
+    id: str
+    title: str
+    createdAt: str
+    updatedAt: str
+
+
+class ConversationList(BaseModel):
+    items: list[ConversationOut]
+    # Pass as `before` to get the next (older) page; null at the end.
+    nextBefore: str | None = None
+
+
+class MessageOut(BaseModel):
+    id: int
+    role: str  # user | assistant
+    text: str  # an assistant message with status "no_results" has an empty text
+    status: str | None = None  # assistant: ok | no_results
+    sources: list[ChatSource] = []
+    createdAt: str
+
+
+class ConversationDetail(ConversationOut):
+    messages: list[MessageOut]
+
+
+class RenameIn(BaseModel):
+    title: str = Field(..., min_length=1, max_length=120)

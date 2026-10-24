@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from app.config import Settings, get_settings
 from app.db import get_session
 from app.main import create_app
-from app.services import chat_limits, chat_service
+from app.services import chat_history, chat_limits, chat_service
 
 PASSAGE = {
     "bookId": "4407",
@@ -67,7 +67,9 @@ def fake_post(gemini_status=200, gemini_body=GEMINI_OK, hits=(PASSAGE,), rewrite
 def logged(monkeypatch):
     rows = []
 
-    async def record(session, question, result, client_id, app_version, who=None):
+    async def record(
+        session, question, result, client_id, app_version, who=None, conversation_id=None
+    ):
         rows.append(
             {
                 "question": question,
@@ -75,6 +77,7 @@ def logged(monkeypatch):
                 "client": client_id,
                 "version": app_version,
                 "who": who,
+                "conversation": conversation_id,
             }
         )
         return len(rows)
@@ -100,6 +103,30 @@ def signed_in(monkeypatch):
         return SimpleNamespace(user=SimpleNamespace(id=authorization.split()[-1]))
 
     monkeypatch.setattr(auth_service, "caller", caller)
+
+
+@pytest.fixture(autouse=True)
+def history(monkeypatch):
+    """The chats' storage, faked: `earlier` is what the chat has so far, `stored` what was added."""
+    from types import SimpleNamespace
+
+    state = SimpleNamespace(earlier=[], stored=[], full=None)
+
+    async def check_room(session, settings, user_id, conversation_id):
+        if state.full:
+            raise state.full
+
+    async def earlier_turns(session, settings, conversation_id):
+        return state.earlier
+
+    async def add_turn(session, user_id, conversation_id, question, answer, status, sources, rid):
+        state.stored.append((conversation_id, question, answer, status, sources, rid))
+        return SimpleNamespace(), SimpleNamespace(id=100 + len(state.stored))
+
+    monkeypatch.setattr(chat_history, "check_room", check_room)
+    monkeypatch.setattr(chat_history, "earlier_turns", earlier_turns)
+    monkeypatch.setattr(chat_history, "add_turn", add_turn)
+    return state
 
 
 @pytest.fixture(autouse=True)
@@ -790,3 +817,77 @@ async def test_chat_needs_sign_in(app, logged, monkeypatch):
             assert r.status_code == 401 and r.json()["code"] == "token_expired", path
             assert r.headers["www-authenticate"] == "Bearer"
     assert not calls and not logged
+
+
+async def test_an_answer_is_added_to_a_new_chat_and_returns_its_id(
+    app, logged, history, monkeypatch
+):
+    monkeypatch.setattr(chat_service, "_post", fake_post()[0])
+    body = (await _ask(app, "ما دعاء النور؟")).json()
+    assert body["conversationId"] and body["messageId"] == 101
+    conversation, question, answer, status, sources, request_id = history.stored[0]
+    assert str(conversation) == body["conversationId"] and question == "ما دعاء النور؟"
+    assert answer.endswith("[1].") and status == "ok" and request_id == body["id"]
+    assert sources[0]["bookId"] == "4407"
+    assert str(logged[0]["conversation"]) == body["conversationId"]
+
+
+async def test_a_follow_up_goes_in_the_same_chat_and_the_models_see_the_chat(
+    rewriting_app, logged, history, monkeypatch
+):
+    history.earlier = [("user", "ما فضل الصبر؟"), ("assistant", "ورد أن الصبر رأس الإيمان [1].")]
+    post, calls = fake_post(rewrite=rewrite_reply(queries=["فضل الصبر عند الإمام الصادق"]))
+    monkeypatch.setattr(chat_service, "_post", post)
+    chat_id = "6f1c1f0e-5d1e-4b6a-9d58-0a1f3a3b9c11"
+    async with AsyncClient(transport=ASGITransport(app=rewriting_app), base_url="http://test") as c:
+        r = await c.post(
+            "/api/chat",
+            json={"message": "وماذا عن الإمام الصادق؟", "conversationId": chat_id},
+            headers=SIGNED_IN,
+        )
+    assert r.status_code == 200 and r.json()["conversationId"] == chat_id
+    assert str(history.stored[0][0]) == chat_id
+    rewrite_call = next(b for u, b in calls if "generateContent" in u and is_rewrite(b))
+    sent = rewrite_call["contents"][0]["parts"][0]["text"]
+    assert "ما فضل الصبر؟" in sent and "New message: وماذا عن الإمام الصادق؟" in sent
+    answer_call = [b for u, b in calls if "generateContent" in u and not is_rewrite(b)][-1]
+    text = answer_call["contents"][0]["parts"][0]["text"]
+    assert text.startswith("المحادثة السابقة:") and "المساعد: ورد أن الصبر" in text
+    assert text.endswith("السؤال: وماذا عن الإمام الصادق؟")
+
+
+async def test_a_failed_answer_is_not_added_to_the_chat(app, logged, history, monkeypatch):
+    monkeypatch.setattr(
+        chat_service, "_post", fake_post(gemini_status=429, gemini_body="RESOURCE_EXHAUSTED")[0]
+    )
+    assert (await _ask(app, "سؤال")).status_code == 429
+    assert history.stored == []
+
+
+async def test_a_full_or_foreign_chat_is_refused_before_any_work(app, logged, history, monkeypatch):
+    from app.api.errors import ApiError
+
+    post, calls = fake_post()
+    monkeypatch.setattr(chat_service, "_post", post)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        for error, status in (
+            (ApiError(409, "conversation_full"), 409),
+            (ApiError(404, "conversation_not_found"), 404),
+        ):
+            history.full = error
+            r = await c.post(
+                "/api/chat",
+                json={"message": "سؤال", "conversationId": "6f1c1f0e-5d1e-4b6a-9d58-0a1f3a3b9c11"},
+                headers=SIGNED_IN,
+            )
+            assert r.status_code == status and r.json()["code"] == error.code
+    assert not calls and not logged
+
+
+async def test_stream_starts_by_naming_the_chat(app, logged, history, monkeypatch):
+    monkeypatch.setattr(chat_service, "_post", fake_post()[0])
+    monkeypatch.setattr(chat_service, "_stream_lines", fake_stream(ANSWER_STREAM)[0])
+    events = sse_events((await _stream(app, "سؤال")).text)
+    name, data = events[0]
+    assert name == "conversation" and data["new"] is True
+    assert events[-1][1]["conversationId"] == data["id"]
