@@ -6,7 +6,8 @@ Statuses: 200 with status "ok" (an answer) or "no_results"; 429 when Gemini's fr
 refuses for its rate limit; 502 when a step fails; 503 when the chatbot is not configured.
 
 POST /api/chat/stream takes the same request and answers as a stream of server-sent events:
-a `step` event as each step starts and ends, then `done` (the same body as POST /api/chat) or
+a `step` event as each step starts and ends, `token` events with the answer as it is
+written, then `done` (the same body as POST /api/chat) or
 `error`. A request refused up front (limits, length, not configured) is a plain JSON error,
 as for POST /api/chat.
 """
@@ -191,7 +192,11 @@ async def chat_stream(
         # app went away.
         try:
             result = await chat_service.answer(
-                settings, question, emit=lambda ev: queue.put_nowait(("step", ev))
+                settings,
+                question,
+                emit=lambda ev: queue.put_nowait(
+                    ("token", {"text": ev["token"]}) if "token" in ev else ("step", ev)
+                ),
             )
             async with get_sessionmaker()() as logging_session:
                 log_id = await chat_service.log_request(

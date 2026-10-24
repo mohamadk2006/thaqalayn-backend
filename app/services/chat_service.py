@@ -463,35 +463,118 @@ def chat_models(settings: Settings) -> list[str]:
     return list(dict.fromkeys(n.strip() for n in names if n.strip()))
 
 
-def _gemini(
-    settings: Settings, model: str, question: str, passages: list[dict]
+def _answer_request(question: str, passages: list[dict]) -> dict:
+    return {
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": [{"role": "user", "parts": [{"text": build_contents(question, passages)}]}],
+        # thinking counts against this limit: at 2048, a model that thought for 1,967
+        # tokens was cut off after 77 tokens of answer, mid-sentence
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": ANSWER_MAX_TOKENS},
+    }
+
+
+class StreamError(Exception):
+    def __init__(self, status: int, body: str):
+        super().__init__(f"{status}: {body[:200]}")
+        self.status, self.body = status, body
+
+
+def _stream_lines(url: str, body: dict, headers: dict, timeout: float):
+    """The lines of a streamed (server-sent events) response; StreamError when Gemini refuses
+    (status and body) or does not answer in time (status 0). `timeout` is per read."""
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        method="POST",
+        headers={"content-type": "application/json", **headers},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            for raw in r:
+                yield raw.decode(errors="replace").strip()
+    except urllib.error.HTTPError as e:
+        raise StreamError(e.code, e.read().decode(errors="replace")) from e
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise StreamError(0, f"{type(e).__name__}: {e}") from e
+
+
+def _gemini_stream(
+    settings: Settings, model: str, question: str, passages: list[dict], on_text
 ) -> tuple[int, dict | str]:
+    """Like _gemini, but every piece of the answer goes to `on_text` as Gemini writes it. The
+    result has the shape of a generateContent response (the whole text in one part). A stream
+    that breaks after text was sent is (0, message): the caller cannot start over."""
+    pieces: list[str] = []
+    usage: dict = {}
+    finish = None
+    try:
+        for line in _stream_lines(
+            GEMINI_URL.format(model=model) + "?alt=sse",
+            _answer_request(question, passages),
+            {"x-goog-api-key": settings.gemini_api_key},
+            settings.gemini_attempt_timeout,
+        ):
+            if not line.startswith("data:"):
+                continue
+            try:
+                chunk = json.loads(line[5:])
+            except ValueError:
+                continue
+            usage = chunk.get("usageMetadata") or usage
+            candidates = chunk.get("candidates") or []
+            if not candidates:
+                finish = (chunk.get("promptFeedback") or {}).get("blockReason") or finish
+                continue
+            finish = candidates[0].get("finishReason") or finish
+            for part in (candidates[0].get("content") or {}).get("parts", []):
+                if part.get("text") and not part.get("thought"):
+                    pieces.append(part["text"])
+                    on_text(part["text"])
+    except StreamError as e:
+        return e.status, e.body
+    return 200, {
+        "candidates": [{"content": {"parts": [{"text": "".join(pieces)}]}, "finishReason": finish}],
+        "usageMetadata": usage,
+    }
+
+
+def _gemini(
+    settings: Settings, model: str, question: str, passages: list[dict], on_text=None
+) -> tuple[int, dict | str]:
+    if on_text:
+        return _gemini_stream(settings, model, question, passages, on_text)
     return _post(
         GEMINI_URL.format(model=model),
-        {
-            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-            "contents": [{"role": "user", "parts": [{"text": build_contents(question, passages)}]}],
-            # thinking counts against this limit: at 2048, a model that thought for 1,967
-            # tokens was cut off after 77 tokens of answer, mid-sentence
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": ANSWER_MAX_TOKENS},
-        },
+        _answer_request(question, passages),
         {"x-goog-api-key": settings.gemini_api_key},
         settings.gemini_attempt_timeout,
     )
 
 
-def _generate(settings: Settings, question: str, passages: list[dict], result: ChatResult) -> None:
-    """The answer, from the first model that gives one; fills `result`."""
+def _generate(
+    settings: Settings, question: str, passages: list[dict], result: ChatResult, on_text=None
+) -> None:
+    """The answer, from the first model that gives one; fills `result`. With `on_text`, the
+    answer is streamed to it piece by piece (called from this thread)."""
+    sent = False
+
+    def forward(piece: str) -> None:
+        nonlocal sent
+        sent = True
+        on_text(piece)
+
     models = chat_models(settings)
     llm_start = time.monotonic()
     status, body, model = 0, "", models[0]
     for model in models:
         t = time.monotonic()
-        status, body = _gemini(settings, model, question, passages)
+        status, body = _gemini(
+            settings, model, question, passages, forward if on_text else None
+        )
         result.attempts.append(
             {"model": model, "status": status, "ms": round((time.monotonic() - t) * 1000)}
         )
-        if status not in RETRY_STATUSES:
+        if status not in RETRY_STATUSES or sent:  # once text was sent, no other model can take over
             break
     result.timings["llmMs"] = round((time.monotonic() - llm_start) * 1000)
     result.model = model
@@ -589,7 +672,11 @@ async def _ask(settings: Settings, question: str, result: ChatResult, emit=None)
         say("rerank", "done", chosen=len(passages))
     result.sources = passages
     say("answer", "start", passages=len(passages))
-    await asyncio.to_thread(_generate, settings, question, passages, result)
+    loop = asyncio.get_running_loop()
+    on_text = (
+        (lambda piece: loop.call_soon_threadsafe(emit, {"token": piece})) if emit else None
+    )
+    await asyncio.to_thread(_generate, settings, question, passages, result, on_text)
     say("answer", "done")
 
 

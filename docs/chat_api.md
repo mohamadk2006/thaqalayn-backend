@@ -110,6 +110,12 @@ data: {"step":"rerank","state":"start"}   …  {"step":"rerank","state":"done","
 event: step
 data: {"step":"answer","state":"start","passages":8}
 
+event: token
+data: {"text":"ورد في "}
+
+event: token
+data: {"text":"المقاطع [1] أن…"}
+
 event: done
 data: { …the same body as POST /api/chat… }
 ```
@@ -122,6 +128,14 @@ Steps, in order (a step can be missing: `rewrite` and `rerank` are skipped when 
 | `search` | meaning search and word search in the library; `candidates` = passages found | «أبحث في الكتب…» |
 | `rerank` | the best passages are chosen; `chosen` = how many | «أختار أنسب المقاطع…» |
 | `answer` | the answer is written from the passages (the longest step, 5-60 s) | «أكتب الإجابة…» |
+
+`token` events carry the answer as the model writes it: append each `text` to the answer view (that is
+the typing effect; the pieces are sentence-sized, so animating them in smoothly looks best). The first
+one comes after the model's thinking, a few seconds into the `answer` step. The `done` event then carries
+the complete answer: replace the typed text with `answer` from it (they are the same text, trimmed).
+If the stream breaks after tokens arrived, the last event is `error`: discard the partial text.
+Citations like `[1]` appear inside the text as it streams; link them to `sources` when `done` arrives.
+`POST /api/chat` (no stream) is unchanged.
 
 The last event is `done` (the answer, as `POST /api/chat` returns it) or `error`
 (`{"detail": "…", "id": …}`, the same bodies as that endpoint's 429 and 502). Lines starting with

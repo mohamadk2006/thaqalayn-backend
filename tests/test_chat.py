@@ -600,6 +600,43 @@ def sse_events(text):
     return out
 
 
+def chunk(text=None, finish=None, usage=None):
+    """One server-sent event of Gemini's streamed answer."""
+    body = {"candidates": [{"content": {"parts": [{"text": text}] if text else []}}]}
+    if finish:
+        body["candidates"][0]["finishReason"] = finish
+    if usage:
+        body["usageMetadata"] = usage
+    return "data: " + json.dumps(body, ensure_ascii=False)
+
+
+def fake_stream(*models):
+    """Replaces the streamed Gemini call: each call takes the next of `models`, a list of
+    lines, ending in a StreamError instance if that model fails."""
+    calls = []
+
+    def stream_lines(url, body, headers, timeout):
+        lines = models[len(calls)]
+        calls.append(url)
+        for line in lines:
+            if isinstance(line, Exception):
+                raise line
+            yield line
+
+    return stream_lines, calls
+
+
+ANSWER_STREAM = [
+    chunk("يطلب الداعي "),
+    "",
+    chunk(
+        "نوراً [1].",
+        "STOP",
+        {"promptTokenCount": 900, "candidatesTokenCount": 40, "totalTokenCount": 940},
+    ),
+]
+
+
 async def _stream(app, message, headers=None):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         return await client.post(
@@ -609,6 +646,7 @@ async def _stream(app, message, headers=None):
 
 async def test_stream_tells_each_step_then_gives_the_answer(app, logged, monkeypatch):
     monkeypatch.setattr(chat_service, "_post", fake_post()[0])
+    monkeypatch.setattr(chat_service, "_stream_lines", fake_stream(ANSWER_STREAM)[0])
     r = await _stream(app, "ما دعاء النور؟", {"X-Client-Id": "dev-1"})
     assert r.status_code == 200 and r.headers["content-type"].startswith("text/event-stream")
     events = sse_events(r.text)
@@ -619,7 +657,13 @@ async def test_stream_tells_each_step_then_gives_the_answer(app, logged, monkeyp
         ("answer", "start"),
         ("answer", "done"),
     ]
+    # the answer arrives piece by piece, between the answer step's start and end
+    tokens = [d["text"] for name, d in events if name == "token"]
+    assert tokens == ["يطلب الداعي ", "نوراً [1]."]
+    names = [name for name, _ in events]
+    assert names.index("token") > names.index("step") and names[-1] == "done"
     name, final = events[-1]
+    assert final["answer"] == "يطلب الداعي نوراً [1]." and final["usage"]["totalTokens"] == 940
     assert name == "done" and final["status"] == "ok" and final["sources"][0]["bookId"] == "4407"
     assert final["quota"]["limit"] == 10
     assert logged[0]["who"] == "c:dev-1"
@@ -656,12 +700,34 @@ async def test_stream_with_rewrite_and_rerank_reports_what_it_found(logged, monk
 
 
 async def test_stream_failure_is_an_error_event(app, logged, monkeypatch):
-    monkeypatch.setattr(
-        chat_service, "_post", fake_post(gemini_status=429, gemini_body="RESOURCE_EXHAUSTED")[0]
-    )
+    monkeypatch.setattr(chat_service, "_post", fake_post()[0])
+    busy = [chat_service.StreamError(429, "RESOURCE_EXHAUSTED")]
+    monkeypatch.setattr(chat_service, "_stream_lines", fake_stream(busy, busy, busy)[0])
     events = sse_events((await _stream(app, "سؤال")).text)
     name, data = events[-1]
     assert name == "error" and data["id"] == 1 and "مشغولة" in data["detail"]
+
+
+async def test_stream_falls_back_to_the_next_model_before_any_text(app, logged, monkeypatch):
+    monkeypatch.setattr(chat_service, "_post", fake_post()[0])
+    stream, calls = fake_stream([chat_service.StreamError(503, "overloaded")], ANSWER_STREAM)
+    monkeypatch.setattr(chat_service, "_stream_lines", stream)
+    events = sse_events((await _stream(app, "سؤال")).text)
+    assert len(calls) == 2 and "gemini-3.8-flash" in calls[0] and "gemini-3.6-flash" in calls[1]
+    assert events[-1][0] == "done" and events[-1][1]["model"] == "gemini-3.6-flash"
+
+
+async def test_stream_that_breaks_after_text_is_an_error_not_a_second_model(
+    app, logged, monkeypatch
+):
+    monkeypatch.setattr(chat_service, "_post", fake_post()[0])
+    stream, calls = fake_stream(
+        [chunk("بدأ الجواب"), chat_service.StreamError(0, "TimeoutError")], ANSWER_STREAM
+    )
+    monkeypatch.setattr(chat_service, "_stream_lines", stream)
+    events = sse_events((await _stream(app, "سؤال")).text)
+    assert len(calls) == 1  # the text already sent cannot be taken back
+    assert events[-1][0] == "error" and ("token", {"text": "بدأ الجواب"}) in events
 
 
 async def test_stream_refused_up_front_is_plain_json(app, logged, used, monkeypatch):
