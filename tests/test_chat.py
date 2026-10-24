@@ -566,7 +566,7 @@ async def test_a_named_author_limits_the_vector_search_to_his_books(
     assert r.status_code == 200
     searches = next(b for u, b in calls if "/points/search" in u)["searches"]
     must = searches[0]["filter"]["must"][0]
-    assert must == {"key": "bookId", "match": {"any": [11, 12]}}
+    assert must == {"key": "bookId", "match": {"any": ["11", "12"]}}  # strings: see _search
     assert logged[0]["result"].rewrite["scope"]["authors"] == ["الشيخ المفيد"]
     assert logged[0]["result"].rewrite["scope"]["fallback"] is False
 

@@ -273,8 +273,16 @@ def _search(
                     "vector": v,
                     "limit": limit,
                     "with_payload": PAYLOAD_FIELDS,
+                    # bookId is a keyword index: ids must go as strings (as integers Qdrant
+                    # ignores the index and scans, 30+ s)
                     **(
-                        {"filter": {"must": [{"key": "bookId", "match": {"any": book_ids}}]}}
+                        {
+                            "filter": {
+                                "must": [
+                                    {"key": "bookId", "match": {"any": [str(b) for b in book_ids]}}
+                                ]
+                            }
+                        }
                         if book_ids
                         else {}
                     ),
