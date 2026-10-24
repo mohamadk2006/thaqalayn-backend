@@ -942,3 +942,41 @@ def test_the_same_passage_in_another_edition_takes_one_slot():
     other = {"id": "3", "bookId": "17405", "sequence": 40, "text": "فقرة أخرى"}
     merged = chat_service.merge_candidates([a, same, other], [])
     assert [p["id"] for p in merged] == ["1", "3"]
+
+
+def test_title_and_publication_pages_are_dropped_unless_the_question_is_about_the_book():
+    title = {
+        "id": "1",
+        "bookId": "1",
+        "sequence": 3,
+        "text": "أحاديث أم المؤمنين عائشة تأليف السيد",
+    }
+    credits = {
+        "id": "2",
+        "bookId": "1",
+        "sequence": 4,
+        "text": "اسم الكتاب : أحاديث ، الطبعة الأولى",
+    }
+    late = {"id": "x", "bookId": "1", "sequence": 300, "text": "قال المؤلف : وتأليف الكتاب"}
+    content = [
+        {"id": str(n), "bookId": "2", "sequence": 40 + n, "text": f"فقرة {n}"} for n in range(5)
+    ]
+    question = "آراء السيد مرتضى العسكري بأم المؤمنين عائشة"
+    kept = chat_service.drop_front_matter([title, credits, late, *content], question)
+    assert [p["id"] for p in kept] == ["x", "0", "1", "2", "3", "4"]  # only early pages go
+    # a question about the book itself wants exactly those pages
+    asked = chat_service.drop_front_matter(
+        [title, credits, *content], "من هو مؤلف كتاب أحاديث عائشة"
+    )
+    assert [p["id"] for p in asked][:2] == ["1", "2"]
+    # too little left otherwise: keep them
+    few = [title, credits, content[0]]
+    assert chat_service.drop_front_matter(few, question) == few
+
+
+async def test_the_rewrite_is_asked_with_temperature_zero(rewriting_app, logged, monkeypatch):
+    post, calls = fake_post(rewrite=rewrite_reply())
+    monkeypatch.setattr(chat_service, "_post", post)
+    await _ask(rewriting_app, "ما فضل الصبر؟")
+    rewrite_call = next(b for u, b in calls if "generateContent" in u and is_rewrite(b))
+    assert rewrite_call["generationConfig"]["temperature"] == 0

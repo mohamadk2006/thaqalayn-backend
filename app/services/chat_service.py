@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -93,6 +94,13 @@ then limited to those books, so do NOT repeat the name inside "queries" or "keyw
 the topic only (a name there only pulls the books' title pages). Only for an author or book the
 user names. Not for a person the question is merely about (the Prophet, the Imams, a
 companion, a narrator) and not for a topic. When unsure, leave both lists empty.
+Examples (message → authors / books / queries):
+- "ماذا قال الشيخ المفيد عن الصبر؟" → authors ["الشيخ المفيد"], queries about patience only.
+- "آراء السيد مرتضى العسكري بأم المؤمنين عائشة" → authors ["السيد مرتضى العسكري"], queries
+  ["موقف وأقوال في أم المؤمنين عائشة", "أدوار عائشة وما روي عنها وموقفها من عثمان وعلي"],
+  keywords [].
+- "ما أحاديث الصبر في الكافي؟" → books ["الكافي"], queries about patience in hadith.
+- "ماذا قال الإمام الصادق عن الصبر؟" → authors [] and books [] (the Imam is the topic).
 
 If a previous conversation is given, the new message may depend on it ("and what about the
 second one?", "explain more", "and in fiqh?"): write the queries and keywords so that each stands
@@ -196,7 +204,13 @@ def read_answer(response: dict) -> tuple[str | None, str | None]:
 
 
 def _json_call(
-    settings: Settings, model: str, system: str, user: str, max_tokens: int, timeout: float
+    settings: Settings,
+    model: str,
+    system: str,
+    user: str,
+    max_tokens: int,
+    timeout: float,
+    temperature: float = 0.2,
 ) -> tuple[dict | None, dict]:
     """A cheap-model call that must return JSON: (the JSON or None, log record)."""
     t = time.monotonic()
@@ -206,7 +220,7 @@ def _json_call(
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
             "generationConfig": {
-                "temperature": 0.2,
+                "temperature": temperature,
                 "maxOutputTokens": max_tokens,
                 "responseMimeType": "application/json",
             },
@@ -248,7 +262,13 @@ def _rewrite(
         else question
     )
     out, info = _json_call(
-        settings, settings.gemini_rewrite_model, REWRITE_PROMPT, message, 600, REWRITE_TIMEOUT
+        settings,
+        settings.gemini_rewrite_model,
+        REWRITE_PROMPT,
+        message,
+        600,
+        REWRITE_TIMEOUT,
+        temperature=0,  # the same message should be understood the same way each time
     )
     if out is None:
         return [], [], {}, info
@@ -455,6 +475,35 @@ def merge_candidates(meaning: list[dict], words: list[dict]) -> list[dict]:
         seen.add(signature)
         out.append(p)
     return out
+
+
+FRONT_MATTER = re.compile(
+    "تأليف|اسم الكتاب|المؤلف\\s*:|الناشر|الطبعة|الطبعه|ردمك|ISBN|حقوق الطبع|رقم الإيداع|فهرسة"
+)
+ABOUT_THE_BOOK = re.compile(
+    "مؤلف|ناشر|طبعة|طبعه|من ألف|تأليف|صاحب كتاب|عدد أجزاء|عدد اجزاء|دار نشر"
+)
+FRONT_PAGES = 12  # title, cover and publication pages are among a book's first pages
+MIN_AFTER_FRONT_MATTER = 5
+
+
+def drop_front_matter(candidates: list[dict], question: str) -> list[dict]:
+    """The candidates without title, cover and publication pages (an early page that names the
+    author, publisher or edition): they match any question that names an author or a book and
+    hold nothing. Kept when the question asks about the book itself, or when too little else
+    is left."""
+    if ABOUT_THE_BOOK.search(question):
+        return candidates
+    kept = [
+        p
+        for p in candidates
+        if not (
+            isinstance(p.get("sequence"), int)
+            and p["sequence"] <= FRONT_PAGES
+            and FRONT_MATTER.search(p.get("text") or "")
+        )
+    ]
+    return kept if len(kept) >= MIN_AFTER_FRONT_MATTER else candidates
 
 
 # ── 3. rerank ───────────────────────────────────────────────────────────────────────
@@ -715,7 +764,7 @@ async def _ask(
     found, (worded, result.words) = await asyncio.gather(meaning(), words_task)
     if result.words:
         timings["wordMs"] = result.words["ms"]
-    candidates = merge_candidates(found, worded)
+    candidates = drop_front_matter(merge_candidates(found, worded), question)
     say("search", "done", candidates=len(candidates), byWords=len(worded))
     if not candidates:
         result.status = "no_results"
