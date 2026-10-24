@@ -280,7 +280,8 @@ Rules for the data (get these exactly right, or the iPhone will show wrong posit
   the newer text wins and the older text is kept as a separate note titled "original title (نسخة محفوظة)"
   with `copyOf` set to the original id. It reaches you on the next pull as an ordinary new note. Nothing to
   do except to display it normally (and not hide notes whose title ends with "(نسخة محفوظة)"). For this to
-  work you MUST send a correct `baseSeq` with every note you push.
+  work you MUST send a correct `baseSeq` with every note you push (see brief 2, section 7: a record changed
+  locally and also changed on the server keeps its OLD `seq` when pushed).
 - **The server does not cascade deletes.** Deleting a study session means you also push tombstones for its
   `sessionBook`s, `sessionProgress`, notes, folders, highlights, numbered marks and bookmarks that have that
   `sessionId`, in the same push.
@@ -378,14 +379,11 @@ screens and Arabic labels so both feel the same):
    created with this `sessionId`, and only this session's are shown. Progress writes `sessionProgress`.
 4. **Notes**: a note has a `title` (`hasCustomTitle` true once the user edits the title, otherwise the title
    is derived from the first line) and `bodyText`; numbered marks link a place in a book to a note line by
-   number (`noteId`, `number`: a line "N. …" in the note refers to mark N). Keep the note body format exactly
-   as the iPhone app writes it.
+   number (`noteId`, `number`: a line "N. …" in the note refers to mark N). The exact note format and rules are in brief 2.
 
-**Things the backend cannot tell you and the iPhone app defines** (ask the iPhone developer, do not guess):
-how a numbered mark is created and renumbered, how note titles are derived, the note line format, the
-colours' exact hex values, and the exact UI wording. If the website guesses differently the data will
-still sync but may look wrong on the phone. The rule of thumb: whatever the iPhone app writes into `data`,
-the website must be able to read and write back unchanged.
+**Notes, highlights, numbered marks, folders and the session screens in detail** (exact behaviour taken from
+the iPhone app, algorithms, labels, colours, examples, known gaps): see **`docs/website_notes_marks_brief.md`**
+(brief 2). Build sections 4 and the notes features from that document; this section only gives the overview.
 
 ---
 
