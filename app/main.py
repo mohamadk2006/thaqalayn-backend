@@ -89,10 +89,12 @@ def create_app() -> FastAPI:
         response.headers["Strict-Transport-Security"] = "max-age=31536000"
         return response
 
-    # Lets the public website (its own domain) read the API from the browser. Read-only
-    # and without credentials: the API is public anyway, and /admin's HTTP Basic login is
-    # never sent cross-site. ETag is exposed so the site can use /api/catalog/version's
-    # If-None-Match the way the app does.
+    # Lets the public website (its own domain) call the API from the browser: reading the
+    # library, and signing in, syncing and chatting (POST/PATCH/DELETE with a bearer token
+    # in the Authorization header). Without cookies or credentials: /admin's HTTP Basic
+    # login is never sent cross-site. ETag is exposed so the site can use
+    # /api/catalog/version's If-None-Match the way the app does; Retry-After so it can
+    # read how long a 429 asks it to wait.
     settings = get_settings()
     app.add_middleware(
         CORSMiddleware,
@@ -100,9 +102,9 @@ def create_app() -> FastAPI:
         allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?"
         if settings.cors_allow_localhost
         else None,
-        allow_methods=["GET", "HEAD"],
+        allow_methods=["GET", "HEAD", "POST", "PATCH", "DELETE"],
         allow_headers=["*"],
-        expose_headers=["ETag"],
+        expose_headers=["ETag", "Retry-After"],
         allow_credentials=False,
         max_age=86400,
     )

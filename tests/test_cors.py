@@ -48,12 +48,37 @@ async def test_preflight_allows_get_with_if_none_match(client):
     assert "GET" in r.headers["access-control-allow-methods"]
 
 
-async def test_preflight_refuses_writes(client):
-    r = await client.options("/api/books", headers={
+@pytest.mark.parametrize("method", ["POST", "PATCH", "DELETE"])
+async def test_preflight_allows_the_accounts_writes_with_a_bearer_token(client, method):
+    r = await client.options("/api/sync/push", headers={
         "Origin": "https://www.thaqalaynlibrary.com",
-        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Method": method,
+        "Access-Control-Request-Headers": "authorization,content-type,x-app-version",
     })
-    assert r.status_code == 400
+    assert r.status_code == 200
+    assert r.headers["access-control-allow-origin"] == "https://www.thaqalaynlibrary.com"
+    assert method in r.headers["access-control-allow-methods"]
+    assert "authorization" in r.headers["access-control-allow-headers"].lower()
+    assert "access-control-allow-credentials" not in r.headers
+
+
+async def test_preflight_refuses_other_methods_and_other_origins(client):
+    put = await client.options("/api/books", headers={
+        "Origin": "https://www.thaqalaynlibrary.com",
+        "Access-Control-Request-Method": "PUT",
+    })
+    assert put.status_code == 400
+    evil = await client.options("/api/chat", headers={
+        "Origin": "https://evil.example.com",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization",
+    })
+    assert evil.status_code == 400
+
+
+async def test_retry_after_is_readable_by_the_site(client):
+    r = await client.get("/api/catalog/version", headers={"Origin": "https://www.thaqalaynlibrary.com"})
+    assert "retry-after" in r.headers.get("access-control-expose-headers", "").lower()
 
 
 async def test_etag_is_readable_by_the_site(client):
