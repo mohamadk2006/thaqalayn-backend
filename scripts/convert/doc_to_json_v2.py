@@ -111,6 +111,19 @@ FONT_HONORIFICS = {
         "‘": "عليهما السلام",
         "#": "عجل الله فرجه الشريف",
     },
+    # The "Basmalla" font (Shahed/Lotus-era Word books, e.g. "خروج الإمام الحسين والفتح المبين"):
+    # the honorifics are the letters N C S X J R L and the basmala is "a", read off the printed
+    # glyphs. S, J are the plural and dual forms ("المعصومين S", "الحسين بن علي J").
+    "basmalla": {
+        "N": "عليه السلام",
+        "C": "صلى الله عليه وآله وسلم",
+        "S": "عليهم السلام",
+        "X": "عليها السلام",
+        "J": "عليهما السلام",
+        "R": "رحمه الله",
+        "L": "عز وجل",
+        "a": "بسم الله الرحمن الرحيم",
+    },
 }
 _FONT_MARK = {font: {ch: chr(0xE140 + 16 * i + k) for k, ch in enumerate(chars)}
               for i, (font, chars) in enumerate(FONT_HONORIFICS.items())}
