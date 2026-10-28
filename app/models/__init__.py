@@ -11,7 +11,7 @@ from app.models.account import (
     VerifyCall,
 )
 from app.models.chat import ChatConversation, ChatMessage, ChatRequest
-from app.models.push import PushBookVersion, PushDevice, PushOutbox, PushPreference
+from app.models.push import PushBookVersion, PushDevice, PushOutbox, PushPreference, PushUserBook
 from app.models.library import (
     Author,
     Book,
@@ -44,6 +44,7 @@ __all__ = [
     "PushDevice",
     "PushOutbox",
     "PushPreference",
+    "PushUserBook",
     "ImportLog",
     "Language",
     "Library",

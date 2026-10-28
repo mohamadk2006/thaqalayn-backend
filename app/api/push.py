@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Response
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.account import signed_in
@@ -22,7 +22,10 @@ class DeviceIn(BaseModel):
     token: str = Field(..., min_length=16, max_length=256, pattern=r"^[0-9a-fA-F]+$")
     environment: Literal["production", "sandbox"] = "production"
     language: Literal["ar", "fa", "en"] = "ar"
-    timezone: str = Field("UTC", max_length=64)  # an IANA name, e.g. "Asia/Beirut"
+    timezone: str = Field(
+        "UTC", max_length=64, validation_alias=AliasChoices("timezone", "timeZone")
+    )  # an IANA name, e.g. "Asia/Beirut"
+    permission: Literal["notDetermined", "denied", "authorized", "provisional"] = "authorized"
     appVersion: str | None = Field(None, max_length=32)
 
 
@@ -58,6 +61,7 @@ async def register_device(
         language=body.language,
         timezone=body.timezone,
         app_version=body.appVersion,
+        permission=body.permission,
     )
     configured = push_service.APNs(settings).configured
     return {"registered": True, "pushEnabled": configured, "preferences": _out(
@@ -98,3 +102,33 @@ async def put_preferences(
             session, who.user.id, {k: v for k, v in changes.items() if v is not None}
         )
     )
+
+
+class BooksIn(BaseModel):
+    ids: list[int] = Field(..., max_length=push_service.MAX_BOOK_IDS)
+
+
+class BooksPatch(BaseModel):
+    add: list[int] = Field(default_factory=list, max_length=push_service.MAX_BOOK_IDS)
+    remove: list[int] = Field(default_factory=list, max_length=push_service.MAX_BOOK_IDS)
+
+
+@router.put("/books")
+async def put_books(
+    body: BooksIn,
+    who: auth.Caller = Depends(signed_in),
+    session: AsyncSession = Depends(get_session),
+):
+    """The books downloaded on the user's devices: this list replaces the earlier one, so an
+    update of any of them can be told to the user."""
+    return {"count": await push_service.set_books(session, who.user.id, body.ids)}
+
+
+@router.patch("/books")
+async def patch_books(
+    body: BooksPatch,
+    who: auth.Caller = Depends(signed_in),
+    session: AsyncSession = Depends(get_session),
+):
+    """Books downloaded (`add`) or removed from the device (`remove`) since the last upload."""
+    return {"count": await push_service.patch_books(session, who.user.id, body.add, body.remove)}

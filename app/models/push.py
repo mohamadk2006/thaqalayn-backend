@@ -45,6 +45,8 @@ class PushDevice(Base):
     language: Mapped[str] = mapped_column(Text, nullable=False, server_default="ar")
     timezone: Mapped[str] = mapped_column(Text, nullable=False, server_default="UTC")
     app_version: Mapped[str | None] = mapped_column(Text)
+    # What iOS says about notifications for the app: notDetermined, denied, authorized, provisional
+    permission: Mapped[str] = mapped_column(Text, nullable=False, server_default="authorized")
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -111,6 +113,20 @@ class PushOutbox(Base):
         ),
         Index("ix_push_outbox_due", "status", "send_after"),
     )
+
+
+class PushUserBook(Base):
+    """A book the user has downloaded on a device (uploaded by the app), so an update of it can be
+    told to them even when it is not in their synced data."""
+
+    __tablename__ = "push_user_books"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    book_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    __table_args__ = (Index("ix_push_user_books_book", "book_id"),)
 
 
 class PushBookVersion(Base):

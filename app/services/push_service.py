@@ -29,12 +29,20 @@ import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, exists, func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
-from app.models.push import DEFAULTS, KINDS, PushDevice, PushOutbox, PushPreference
+from app.models.account import AuthSession
+from app.models.push import (
+    DEFAULTS,
+    KINDS,
+    PushDevice,
+    PushOutbox,
+    PushPreference,
+    PushUserBook,
+)
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +54,10 @@ LANGUAGES = ("ar", "fa", "en")
 MAX_ATTEMPTS = 4
 BACKOFF = (60, 300, 1800)  # seconds before the 2nd, 3rd and 4th try
 BATCH = 100
+QUIET = (22, 8)  # no non-chat push from 22:00 to 08:00 on the user's own clock
+DAILY_CAP = 3  # non-chat pushes a day per user
+MAX_BOOK_IDS = 20000
+PERMISSIONS = ("notDetermined", "denied", "authorized", "provisional")
 IN_FLIGHT = 20
 KEEP_DAYS = 7  # sent and skipped rows of the queue
 
@@ -213,6 +225,7 @@ async def register_device(
     timezone: str = "UTC",
     app_version: str | None = None,
     platform: str = "ios",
+    permission: str = "authorized",
 ) -> None:
     """This login's device can now be pushed at `token`. A token seen under another account
     (the phone changed hands) moves to this one; a login's older token is replaced."""
@@ -230,6 +243,7 @@ async def register_device(
         "language": language if language in LANGUAGES else "ar",
         "timezone": valid_timezone(timezone),
         "app_version": app_version,
+        "permission": permission if permission in PERMISSIONS else "authorized",
         "updated_at": now,
         "disabled_at": None,
     }
@@ -276,13 +290,84 @@ async def set_preferences(
     return await preferences(session, user_id)
 
 
-async def _latest_device(session: AsyncSession, user_id: uuid.UUID) -> PushDevice | None:
-    return await session.scalar(
-        select(PushDevice)
-        .where(PushDevice.user_id == user_id, PushDevice.disabled_at.is_(None))
-        .order_by(PushDevice.updated_at.desc())
-        .limit(1)
+def _eligible(user_id: uuid.UUID):
+    """The conditions for a device that may be pushed to: not disabled, notifications not denied
+    on the phone, and its login still alive (signed in, not revoked or expired)."""
+    return (
+        PushDevice.user_id == user_id,
+        PushDevice.disabled_at.is_(None),
+        PushDevice.permission != "denied",
+        exists().where(
+            AuthSession.user_id == PushDevice.user_id,
+            AuthSession.device_id == PushDevice.device_id,
+            AuthSession.revoked_at.is_(None),
+            AuthSession.refresh_expires_at > func.now(),
+        ),
     )
+
+
+async def _devices(session: AsyncSession, user_id: uuid.UUID) -> list[PushDevice]:
+    rows = await session.scalars(
+        select(PushDevice).where(*_eligible(user_id)).order_by(PushDevice.updated_at.desc())
+    )
+    return list(rows)
+
+
+async def _latest_device(session: AsyncSession, user_id: uuid.UUID) -> PushDevice | None:
+    devices = await _devices(session, user_id)
+    return devices[0] if devices else None
+
+
+async def set_books(session: AsyncSession, user_id: uuid.UUID, ids: list[int]) -> int:
+    """The books the user has downloaded: this list replaces the earlier one."""
+    wanted = set(ids)
+    await session.execute(
+        delete(PushUserBook).where(
+            PushUserBook.user_id == user_id, PushUserBook.book_id.notin_(wanted or {-1})
+        )
+    )
+    if wanted:
+        await session.execute(
+            insert(PushUserBook)
+            .values([{"user_id": user_id, "book_id": b} for b in wanted])
+            .on_conflict_do_nothing()
+        )
+    await session.commit()
+    return len(wanted)
+
+
+async def patch_books(
+    session: AsyncSession, user_id: uuid.UUID, add: list[int], remove: list[int]
+) -> int:
+    if remove:
+        await session.execute(
+            delete(PushUserBook).where(
+                PushUserBook.user_id == user_id, PushUserBook.book_id.in_(set(remove))
+            )
+        )
+    if add:
+        await session.execute(
+            insert(PushUserBook)
+            .values([{"user_id": user_id, "book_id": b} for b in set(add)])
+            .on_conflict_do_nothing()
+        )
+    await session.commit()
+    return await session.scalar(
+        select(func.count()).select_from(PushUserBook).where(PushUserBook.user_id == user_id)
+    )
+
+
+def next_allowed(now: dt.datetime, timezone: str) -> dt.datetime | None:
+    """None when `now` is outside the quiet hours of the time zone; else the next 08:00 there."""
+    zone = zoneinfo.ZoneInfo(valid_timezone(timezone))
+    local = now.astimezone(zone)
+    start, end = QUIET
+    if not (local.hour >= start or local.hour < end):
+        return None
+    morning = local.replace(hour=end, minute=0, second=0, microsecond=0)
+    if local.hour >= start:
+        morning += dt.timedelta(days=1)
+    return morning.astimezone(dt.UTC)
 
 
 # ── the queue ───────────────────────────────────────────────────────────────────────
@@ -373,17 +458,27 @@ async def run_once(sessionmaker: async_sessionmaker[AsyncSession], sender: APNs)
         gate = asyncio.Semaphore(IN_FLIGHT)
 
         async def deliver(row: PushOutbox) -> None:
-            devices = (
-                (
-                    await session.execute(
-                        select(PushDevice).where(
-                            PushDevice.user_id == row.user_id, PushDevice.disabled_at.is_(None)
+            devices = await _devices(session, row.user_id)
+            if devices and row.kind != "chat_answer":  # chat answers are not held back
+                now = dt.datetime.now(dt.UTC)
+                later = next_allowed(now, devices[0].timezone)
+                if later is None and (
+                    await session.scalar(
+                        select(func.count())
+                        .select_from(PushOutbox)
+                        .where(
+                            PushOutbox.user_id == row.user_id,
+                            PushOutbox.kind != "chat_answer",
+                            PushOutbox.status == "sent",
+                            PushOutbox.sent_at > now - dt.timedelta(days=1),
                         )
                     )
-                )
-                .scalars()
-                .all()
-            )
+                    >= DAILY_CAP
+                ):
+                    later = now + dt.timedelta(hours=6)
+                if later is not None:  # quiet hours, or enough for today: try again later
+                    row.send_after = later
+                    return
             note = Notification(row.title, row.body, row.data or {}, row.collapse_id, row.kind)
 
             async def one(device: PushDevice) -> Outcome:
@@ -481,10 +576,10 @@ async def scan_books(session: AsyncSession) -> dict[str, int]:
     for book_id, title in updated:
         owners = await session.execute(
             text(
-                "SELECT DISTINCT user_id FROM sync_records"
-                " WHERE NOT deleted AND data->>'bookId' = :b"
+                "SELECT user_id FROM sync_records WHERE NOT deleted AND data->>'bookId' = :b"
+                " UNION SELECT user_id FROM push_user_books WHERE book_id = :n"
             ),
-            {"b": str(book_id)},
+            {"b": str(book_id), "n": book_id},
         )
         for (user_id,) in owners.all():
             per_user.setdefault(user_id, []).append((book_id, title))

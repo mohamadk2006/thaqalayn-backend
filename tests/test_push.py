@@ -148,6 +148,22 @@ async def _clean():
         await s.commit()
 
 
+async def login(s, user, device_id, *, revoked=False, expired=False):
+    """A login on the device (the push goes only to devices whose login is alive)."""
+    await s.execute(
+        text(
+            "INSERT INTO auth_sessions (id, user_id, device_id, access_hash, refresh_hash,"
+            " access_expires_at, refresh_expires_at, revoked_at) VALUES (gen_random_uuid(), :u, :d,"
+            " :ah, :rh, now() + interval '1 hour',"
+            " now() + (CASE WHEN :exp THEN interval '-1 day' ELSE interval '180 days' END),"
+            " CASE WHEN :rev THEN now() ELSE NULL END)"
+        ),
+        {"u": user, "d": device_id, "ah": uuid.uuid4().hex, "rh": uuid.uuid4().hex,
+         "exp": expired, "rev": revoked},
+    )  # fmt: skip
+    await s.commit()
+
+
 @pytest.fixture
 async def users():
     await _clean()
@@ -228,6 +244,10 @@ async def test_enqueue_needs_a_device_and_the_kind_switched_on_and_speaks_the_de
             s, a, "chat_answer", "chat_answer", data={}
         )  # no device
         await push_service.register_device(s, a, "dev-1", TOKEN_A, language="en")
+        assert not await push_service.enqueue(
+            s, a, "chat_answer", "chat_answer", data={}
+        )  # no login
+        await login(s, a, "dev-1")
         assert await push_service.enqueue(
             s, a, "chat_answer", "chat_answer", data={"type": "chat_answer"}, dedupe_key="k1"
         )
@@ -285,6 +305,7 @@ async def test_the_worker_sends_retries_with_a_backoff_and_drops_dead_tokens(use
     a, _ = users
     async with get_sessionmaker()() as s:
         await push_service.register_device(s, a, "dev-1", TOKEN_A, language="ar")
+        await login(s, a, "dev-1")
     sm = get_sessionmaker()
     await _queue(a, "ok")
     ok = FakeSender(("ok", ""))
@@ -320,6 +341,7 @@ async def test_without_an_apns_key_the_queue_is_marked_skipped(users):
     a, _ = users
     async with get_sessionmaker()() as s:
         await push_service.register_device(s, a, "dev-1", TOKEN_A)
+        await login(s, a, "dev-1")
     await _queue(a, "nokey")
     await push_service.run_once(get_sessionmaker(), push_service.APNs(Settings()))
     assert (await _row("nokey"))[:3] == ("skipped", 0, "push is not configured")
@@ -431,6 +453,8 @@ async def test_books_new_and_updated_the_digest_and_who_is_told(users, imported)
             s, a, "dev-1", TOKEN_A, language="ar", timezone="Etc/GMT-3"
         )
         await push_service.register_device(s, b, "dev-2", TOKEN_B, language="en")
+        await login(s, a, "dev-1")
+        await login(s, b, "dev-2")
         # a has the book in their data, b does not; a also asks for the new-books digest
         await s.execute(
             text(
@@ -492,3 +516,155 @@ async def test_books_new_and_updated_the_digest_and_who_is_told(users, imported)
         )
         await s.execute(text("DELETE FROM sync_records WHERE user_id = :u"), {"u": a})
         await s.commit()
+
+
+async def test_a_device_is_not_pushed_when_notifications_are_denied_or_its_login_ended(users):
+    a, b = users
+    async with get_sessionmaker()() as s:
+        await push_service.register_device(s, a, "dev-1", TOKEN_A, permission="denied")
+        await login(s, a, "dev-1")
+        assert not await push_service.enqueue(s, a, "chat_answer", "chat_answer", data={})
+        await push_service.register_device(s, a, "dev-1", TOKEN_A, permission="authorized")
+        assert await push_service.enqueue(
+            s, a, "chat_answer", "chat_answer", data={}, dedupe_key="p1"
+        )
+        await push_service.register_device(s, b, "dev-2", TOKEN_B)
+        await login(s, b, "dev-2", revoked=True)
+        await login(s, b, "dev-2", expired=True)
+        assert not await push_service.enqueue(s, b, "chat_answer", "chat_answer", data={})
+
+
+def test_quiet_hours_end_at_eight_in_the_users_own_time_zone():
+    at = lambda h: dt.datetime(2026, 10, 28, h, 30, tzinfo=dt.UTC)  # noqa: E731
+    assert push_service.next_allowed(at(10), "Etc/GMT-3") is None  # 13:30 there
+    assert push_service.next_allowed(at(20), "Etc/GMT-3") == dt.datetime(
+        2026, 10, 29, 5, 0, tzinfo=dt.UTC
+    )  # 23:30 -> 08:00
+    assert push_service.next_allowed(at(2), "Etc/GMT-3") == dt.datetime(
+        2026, 10, 28, 5, 0, tzinfo=dt.UTC
+    )  # 05:30 -> 08:00
+    assert push_service.next_allowed(at(7), "UTC") == dt.datetime(2026, 10, 28, 8, 0, tzinfo=dt.UTC)
+    assert push_service.next_allowed(at(8), "UTC") is None  # 08:30 is allowed
+    assert push_service.next_allowed(at(23), "Not/AZone") == dt.datetime(
+        2026, 10, 29, 8, 0, tzinfo=dt.UTC
+    )
+
+
+async def test_other_pushes_wait_for_the_morning_and_stop_at_three_a_day_but_chat_answers_do_not(
+    users,
+):
+    a, _ = users
+    sm = get_sessionmaker()
+    async with sm() as s:
+        await push_service.register_device(s, a, "dev-1", TOKEN_A)
+        await login(s, a, "dev-1")
+        # whatever the hour is, make it quiet by choosing the zone where it is about 03:00
+        hour = dt.datetime.now(dt.UTC).hour
+        offset = (3 - hour) % 24
+        offset = offset - 24 if offset > 12 else offset
+        quiet_zone = f"Etc/GMT{'-' if offset >= 0 else '+'}{abs(offset)}"
+        await s.execute(
+            text("UPDATE push_devices SET timezone = :z WHERE user_id = :u"),
+            {"z": quiet_zone, "u": a},
+        )
+        await push_service.set_preferences(s, a, {"book_updates": True})
+        for kind, key in (("book_updates", "quiet-book"), ("chat_answer", "quiet-chat")):
+            await push_service.enqueue(s, a, kind, "chat_answer", data={}, dedupe_key=key)
+        await s.execute(
+            text(
+                "UPDATE push_outbox SET send_after = now() - interval '1 second' WHERE user_id = :u"
+            ),
+            {"u": a},
+        )
+        await s.commit()
+    sender = FakeSender(("ok", ""), ("ok", ""))
+    await push_service.run_once(sm, sender)
+    assert (await _row("quiet-chat"))[0] == "sent"  # chat answers are never held back
+    book = await _row("quiet-book")
+    assert (
+        book[0] == "pending" and book[3] is True and book[1] == 0
+    )  # waits for 08:00, not an attempt
+    assert len(sender.sent) == 1
+
+    async with sm() as s:  # daytime now, but three non-chat pushes were already sent today
+        await s.execute(
+            text("UPDATE push_devices SET timezone = 'UTC' WHERE user_id = :u"), {"u": a}
+        )
+        for n in range(3):
+            await s.execute(
+                text(
+                    "INSERT INTO push_outbox (user_id, kind, title, body, status, sent_at, dedupe_key) VALUES (:u, 'new_books', 't', 'b', 'sent', now(), :k)"  # noqa: E501
+                ),
+                {"u": a, "k": f"cap-{n}"},
+            )
+        await s.execute(
+            text(
+                "UPDATE push_outbox SET send_after = now() - interval '1 second' WHERE dedupe_key = 'quiet-book'"  # noqa: E501
+            )
+        )
+        await s.commit()
+    if (
+        8 <= dt.datetime.now(dt.UTC).hour < 22
+    ):  # the cap only matters outside the quiet hours of UTC
+        sender = FakeSender(("ok", ""))
+        await push_service.run_once(sm, sender)
+        assert (await _row("quiet-book"))[0] == "pending" and sender.sent == []  # enough for today
+
+
+async def test_downloaded_books_are_told_about_even_without_synced_data_and_the_books_endpoints(
+    users,
+    imported,  # noqa: F811
+    monkeypatch,
+):
+    a, b = users
+
+    async def caller(session, authorization):
+        return SimpleNamespace(user=SimpleNamespace(id=a), login=SimpleNamespace(device_id="dev-1"))
+
+    monkeypatch.setattr(auth_service, "caller", caller)
+    headers = {"Authorization": "Bearer x"}
+    async with AsyncClient(transport=ASGITransport(app=create_app()), base_url="http://test") as c:
+        r = await c.put(
+            "/api/push/device",
+            json={"token": TOKEN_A, "timeZone": "Asia/Beirut", "permission": "provisional"},
+            headers=headers,
+        )
+        assert r.status_code == 200
+        async with get_sessionmaker()() as s:
+            row = (
+                await s.execute(
+                    text("SELECT timezone, permission FROM push_devices WHERE user_id = :u"),
+                    {"u": a},
+                )
+            ).one()
+        assert tuple(row) == ("Asia/Beirut", "provisional")  # `timeZone` is accepted too
+        assert (
+            await c.put("/api/push/books", json={"ids": [int(BOOK_ID), 5, 6]}, headers=headers)
+        ).json() == {"count": 3}
+        assert (
+            await c.patch("/api/push/books", json={"add": [7], "remove": [5, 6]}, headers=headers)
+        ).json() == {"count": 2}
+        assert (
+            await c.put("/api/push/books", json={"ids": [int(BOOK_ID)]}, headers=headers)
+        ).json() == {"count": 1}
+        assert (
+            await c.put("/api/push/books", json={"ids": ["x"]}, headers=headers)
+        ).status_code == 422
+    async with get_sessionmaker()() as s:
+        await login(s, a, "dev-1")
+        await s.execute(text("TRUNCATE push_book_versions"))
+        await s.commit()
+        await push_service.scan_books(s)  # seeded
+        await s.execute(
+            text("UPDATE books SET content_version = content_version + 1 WHERE id = :i"),
+            {"i": int(BOOK_ID)},
+        )
+        await s.commit()
+        assert (await push_service.scan_books(s))["updated"] == 1
+        body = await s.scalar(
+            text("SELECT body FROM push_outbox WHERE user_id = :u AND kind = 'book_updates'"),
+            {"u": a},
+        )
+        assert (
+            body == "تم تحديث كتاب «كتاب اختبار البحث»"
+        )  # a has no synced record of the book, only the download

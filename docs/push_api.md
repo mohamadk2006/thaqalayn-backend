@@ -23,18 +23,29 @@ the token, the language or the time zone changes:
 
 ```json
 {"token": "<APNs device token, hex>", "environment": "production" | "sandbox",
- "language": "ar" | "fa" | "en", "timezone": "Asia/Beirut", "appVersion": "1.4"}
+ "permission": "notDetermined" | "denied" | "authorized" | "provisional",
+ "language": "ar" | "fa" | "en", "timeZone": "Asia/Beirut", "appVersion": "1.4"}
 ```
 
 → `{"registered": true, "pushEnabled": true|false, "preferences": {...}}`. `environment` is `sandbox` for builds
 run from Xcode and `production` for TestFlight and the App Store. `pushEnabled: false` means the server has no
 APNs key yet (nothing is sent). The device is the one the login was made on (the `deviceId` of sign-in);
 a login has one token (a new one replaces the old); a token seen under another account moves to it.
-`DELETE /api/push/device` → 204 stops pushes to this login's device. Signing out, signing a device out and
+`timezone` is accepted as well as `timeZone`. `permission` is what iOS says about notifications for the app
+(default `authorized`): with `denied` the server sends nothing to that device. A device is pushed only while
+its login is alive (signed in, not revoked, not expired). `DELETE /api/push/device` → 204 stops pushes to this login's device. Signing out, signing a device out and
 deleting the account do it too.
 
 `GET /api/push/preferences` → `{"chatAnswer": true, "bookUpdates": true, "newBooks": false}`;
 `PUT /api/push/preferences` with any of those booleans changes them (the others stay).
+
+`PUT /api/push/books` `{"ids": [4407, 4408, ...]}` replaces the list of books downloaded on the user's
+devices (up to 20,000); `PATCH /api/push/books` `{"add": [...], "remove": [...]}` changes it. Ids are the
+catalog's book ids as numbers. A book update is told to the users who have the book in their synced data
+(reading progress, a session, a bookmark, marks) **or** in this list. Both answer `{"count": N}`.
+
+**Limits (kinds other than chat answers):** none from 22:00 to 08:00 on the user's own clock (held until
+08:00), and at most 3 a day per user (the rest wait). Chat answers are never held back.
 
 ## Server settings (Coolify)
 `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, `APNS_KEY` (the text of the `.p8` file). With any of them
