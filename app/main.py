@@ -24,6 +24,7 @@ from app.api import (
     errors,
     health,
     metadata,
+    push,
     search,
     sync,
     toc_search,
@@ -47,8 +48,16 @@ async def lifespan(app: FastAPI):
         settings.covers_root,
     )
     cleaner = asyncio.create_task(_daily_cleanup())
+    pusher = None
+    if settings.push_worker:
+        from app.db import get_sessionmaker
+        from app.services import push_service
+
+        pusher = asyncio.create_task(push_service.worker(settings, get_sessionmaker()))
     yield
     cleaner.cancel()
+    if pusher:
+        pusher.cancel()
     await dispose_engine()
 
 
@@ -135,6 +144,7 @@ def create_app() -> FastAPI:
     app.include_router(toc_search.router, prefix="/api")
     app.include_router(chat.router, prefix="/api")
     app.include_router(conversations.router, prefix="/api")
+    app.include_router(push.router, prefix="/api")
     app.include_router(account.router, prefix="/api")
     app.include_router(sync.router, prefix="/api")
     errors.register(app)

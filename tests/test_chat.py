@@ -13,7 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from app.config import Settings, get_settings
 from app.db import get_session
 from app.main import create_app
-from app.services import chat_history, chat_limits, chat_service
+from app.services import chat_history, chat_limits, chat_service, push_service
 
 PASSAGE = {
     "bookId": "4407",
@@ -127,6 +127,18 @@ def history(monkeypatch):
     monkeypatch.setattr(chat_history, "earlier_turns", earlier_turns)
     monkeypatch.setattr(chat_history, "add_turn", add_turn)
     return state
+
+
+@pytest.fixture(autouse=True)
+def pushes(monkeypatch):
+    """The push queue, faked: the (user, conversation, request) of each answer pushed."""
+    sent = []
+
+    async def chat_answer_ready(session, user_id, conversation_id, request_id):
+        sent.append((user_id, str(conversation_id), request_id))
+
+    monkeypatch.setattr(push_service, "chat_answer_ready", chat_answer_ready)
+    return sent
 
 
 @pytest.fixture(autouse=True)
@@ -983,3 +995,18 @@ async def test_the_rewrite_is_asked_with_temperature_zero(rewriting_app, logged,
     await _ask(rewriting_app, "ما فضل الصبر؟")
     rewrite_call = next(b for u, b in calls if "generateContent" in u and is_rewrite(b))
     assert rewrite_call["generationConfig"]["temperature"] == 0
+
+
+async def test_a_streamed_answer_queues_a_push_but_a_failure_does_not(
+    app, logged, pushes, monkeypatch
+):
+    monkeypatch.setattr(chat_service, "_post", fake_post()[0])
+    monkeypatch.setattr(chat_service, "_stream_lines", fake_stream(ANSWER_STREAM)[0])
+    events = sse_events((await _stream(app, "سؤال")).text)
+    final = events[-1][1]
+    assert pushes == [("user-1", final["conversationId"], final["id"])]
+    pushes.clear()
+    busy = [chat_service.StreamError(429, "RESOURCE_EXHAUSTED")]
+    monkeypatch.setattr(chat_service, "_stream_lines", fake_stream(busy, busy, busy)[0])
+    assert sse_events((await _stream(app, "سؤال")).text)[-1][0] == "error"
+    assert pushes == []

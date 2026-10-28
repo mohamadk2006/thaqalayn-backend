@@ -351,7 +351,10 @@ async def caller(session: AsyncSession, authorization: str | None) -> Caller:
 
 
 async def logout(session: AsyncSession, who: Caller) -> None:
+    from app.services import push_service
+
     who.login.revoked_at = now()
+    await push_service.remove_device(session, who.user.id, who.login.device_id, commit=False)
     await session.commit()
 
 
@@ -400,6 +403,9 @@ async def sign_out_device(session: AsyncSession, who: Caller, device_id: str) ->
     )
     if not done.rowcount:
         raise ApiError(404, "device_not_found")
+    from app.services import push_service
+
+    await push_service.remove_device(session, who.user.id, device_id, commit=False)
     await session.commit()
 
 

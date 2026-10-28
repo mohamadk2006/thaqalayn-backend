@@ -80,6 +80,16 @@ class Settings(BaseSettings):
     chat_max_messages: int = 40  # per conversation, then the user starts a new one
     chat_max_conversations: int = 100  # per user
 
+    # Push notifications (app/services/push_service.py). With the four APNS_* settings empty
+    # the sender does nothing: notifications are marked skipped. APNS_KEY is the text of the
+    # .p8 key file ("\\n" for line breaks is accepted).
+    apns_key_id: str = ""
+    apns_team_id: str = ""
+    apns_bundle_id: str = ""
+    apns_key: str = ""
+    push_worker: bool = True  # the background loop that sends and watches the catalog
+    push_digest_hour: int = 10  # local hour of the daily new-books digest
+
     # Accounts (docs/accounts_sync_spec.md). Sign-in codes are stored as HMAC-SHA256 keyed
     # with this pepper; without it, sign-in is switched off (503).
     auth_code_pepper: str = ""

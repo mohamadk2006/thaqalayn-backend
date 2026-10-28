@@ -20,6 +20,8 @@ dependencies = [
     "python-docx>=1.1",
     "olefile>=0.47",
     "pymupdf>=1.28.2",
+    "httpx[http2]>=0.28",
+    "cryptography>=43",
 ]
 
 [dependency-groups]

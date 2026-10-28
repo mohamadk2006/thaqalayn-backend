@@ -28,7 +28,7 @@ from app.config import Settings, get_settings
 from app.db import get_session, get_sessionmaker
 from app.schemas.chat import ChatIn, ChatOut, ChatQuota, ChatQuotaOut, ChatSource, ChatUsage
 from app.services import auth_service as auth
-from app.services import chat_history, chat_limits, chat_service
+from app.services import chat_history, chat_limits, chat_service, push_service
 
 router = APIRouter(tags=["chat"])
 
@@ -257,9 +257,7 @@ async def chat_stream(
         # Not tied to the connection: an answer already paid for is logged and kept in the
         # chat even if the app went away.
         try:
-            queue.put_nowait(
-                ("conversation", {"id": str(ask.conversation_id), "new": ask.is_new})
-            )
+            queue.put_nowait(("conversation", {"id": str(ask.conversation_id), "new": ask.is_new}))
             result = await chat_service.answer(
                 settings,
                 ask.question,
@@ -270,6 +268,12 @@ async def chat_stream(
             )
             async with get_sessionmaker()() as own_session:
                 _, response = await finish(own_session, ask, result, x_client_id, x_app_version)
+                if not isinstance(response, JSONResponse):
+                    # a user who left the app finds the answer waiting; the app shows nothing
+                    # for it while it is in the foreground
+                    await push_service.chat_answer_ready(
+                        own_session, ask.user_id, ask.conversation_id, response.id
+                    )
             if isinstance(response, JSONResponse):
                 queue.put_nowait(("error", json.loads(response.body)))
             else:
