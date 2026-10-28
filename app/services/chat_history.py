@@ -46,9 +46,9 @@ async def get(session: AsyncSession, user_id: uuid.UUID, conversation_id: uuid.U
 
 async def message_count(session: AsyncSession, conversation_id: uuid.UUID) -> int:
     return await session.scalar(
-        select(func.count()).select_from(ChatMessage).where(
-            ChatMessage.conversation_id == conversation_id
-        )
+        select(func.count())
+        .select_from(ChatMessage)
+        .where(ChatMessage.conversation_id == conversation_id)
     )
 
 
@@ -62,9 +62,9 @@ async def check_room(
             raise ApiError(409, "conversation_full")
         return
     chats = await session.scalar(
-        select(func.count()).select_from(ChatConversation).where(
-            ChatConversation.user_id == user_id, ChatConversation.deleted_at.is_(None)
-        )
+        select(func.count())
+        .select_from(ChatConversation)
+        .where(ChatConversation.user_id == user_id, ChatConversation.deleted_at.is_(None))
     )
     if chats >= settings.chat_max_conversations:
         raise ApiError(409, "too_many_conversations")
@@ -160,7 +160,8 @@ async def delete(session: AsyncSession, user_id: uuid.UUID, conversation_id: uui
 
 async def purge(session: AsyncSession) -> None:
     """Chats deleted more than KEEP_DELETED_DAYS ago are removed, and the text of their
-    questions blanked in the chat log (the tokens and timings stay for analysis)."""
+    questions blanked in the chat log (the tokens and timings stay for analysis). The text of
+    requests that failed (no answer, so no chat holds them) is blanked after the same time."""
     old = select(ChatConversation.id).where(
         ChatConversation.deleted_at < now() - dt.timedelta(days=KEEP_DELETED_DAYS)
     )
@@ -170,6 +171,13 @@ async def purge(session: AsyncSession) -> None:
         .values(message="", answer=None, rewrite=None, word_search=None, rerank=None, sources=None)
     )
     await session.execute(
-        ChatConversation.__table__.delete().where(ChatConversation.id.in_(old))
+        update(ChatRequest)
+        .where(
+            ChatRequest.status.in_(("error", "rate_limited")),
+            ChatRequest.created_at < now() - dt.timedelta(days=KEEP_DELETED_DAYS),
+            ChatRequest.message != "",
+        )
+        .values(message="", answer=None, rewrite=None, word_search=None, rerank=None, sources=None)
     )
+    await session.execute(ChatConversation.__table__.delete().where(ChatConversation.id.in_(old)))
     await session.commit()

@@ -404,8 +404,18 @@ async def sign_out_device(session: AsyncSession, who: Caller, device_id: str) ->
 
 
 async def delete_account(session: AsyncSession, who: Caller) -> None:
-    """The user and everything synced, at once: login sessions and sync records go with the
-    user row (ON DELETE CASCADE); the user's sign-in codes are removed too."""
+    """The user and everything of theirs, at once: login sessions, sync records and chats go
+    with the user row (ON DELETE CASCADE); the sign-in codes and the chatbot's request log
+    (the questions and answers kept for analysis) are removed too."""
+    from sqlalchemy import text
+
+    await session.execute(
+        text(
+            "DELETE FROM chat_requests WHERE who = :who OR conversation_id IN"
+            " (SELECT id FROM chat_conversations WHERE user_id = :user)"
+        ),
+        {"who": f"u:{who.user.id}", "user": who.user.id},
+    )
     await session.execute(delete(EmailCode).where(EmailCode.email == who.user.email))
     await session.execute(delete(User).where(User.id == who.user.id))
     await session.commit()

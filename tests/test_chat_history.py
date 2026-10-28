@@ -218,3 +218,67 @@ async def test_the_endpoints(users, monkeypatch):
             await c.delete(f"/api/chat/conversations/{chat}", headers=headers)
         ).status_code == 204
         assert (await c.get(f"/api/chat/conversations/{chat}", headers=headers)).status_code == 404
+
+
+async def test_deleting_the_account_removes_the_chat_log_and_old_failures_are_blanked(users):
+    a, b = users
+    chat = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        await turn(s, a, chat, "سؤال المستخدم أ")
+        for who, conversation, message in (
+            (f"u:{a}", chat, "history-test a in a chat"),
+            (f"u:{a}", None, "history-test a failed, no chat"),
+            (f"u:{b}", None, "history-test b"),
+        ):
+            s.add(ChatRequest(message=message, status="ok", who=who, conversation_id=conversation))
+        await s.commit()
+        await auth_service.delete_account(
+            s, SimpleNamespace(user=SimpleNamespace(id=a, email=EMAILS[0]))
+        )
+        left = (
+            (
+                await s.execute(
+                    text("SELECT message FROM chat_requests WHERE message LIKE 'history-test%'")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert left == ["history-test b"]  # the other user's log is untouched
+        gone = await s.scalar(
+            text("SELECT count(*) FROM chat_conversations WHERE user_id = :u"), {"u": a}
+        )
+        assert gone == 0
+
+
+async def test_a_failed_request_loses_its_text_after_a_month(users):
+    age_sql = text(
+        "UPDATE chat_requests SET created_at = now() - make_interval(days => :d) WHERE id = :i"
+    )
+    ids = {}
+    async with get_sessionmaker()() as s:
+        for name, status, age in (
+            ("old failure", "error", 40),
+            ("recent failure", "error", 5),
+            ("old answer", "ok", 40),
+        ):
+            row = ChatRequest(message=f"history-test {name}", status=status, answer="a")
+            s.add(row)
+            await s.flush()
+            await s.execute(age_sql, {"d": age, "i": row.id})
+            ids[name] = row.id
+        await s.commit()
+        await chat_history.purge(s)
+        messages = {
+            name: await s.scalar(text("SELECT message FROM chat_requests WHERE id = :i"), {"i": i})
+            for name, i in ids.items()
+        }
+        await s.execute(
+            text("DELETE FROM chat_requests WHERE id = ANY(:ids)"), {"ids": list(ids.values())}
+        )
+        await s.commit()
+    assert messages == {
+        "old failure": "",  # blanked
+        "recent failure": "history-test recent failure",
+        "old answer": "history-test old answer",  # answers are kept until their chat is deleted
+    }

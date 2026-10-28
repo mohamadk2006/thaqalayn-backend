@@ -6,6 +6,7 @@ so the eventual static/file routes never collide with the JSON API.
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -66,7 +67,23 @@ async def _daily_cleanup() -> None:
         await asyncio.sleep(24 * 3600)
 
 
+class _HideSearchText(logging.Filter):
+    """The server's request log must not hold what users search for: the value of `q` in an
+    access-log line (search, meaning search, titles, authors, contents) is replaced."""
+
+    _Q = re.compile(r"([?&]q=)[^&\s]*")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            record.args = (*args[:2], self._Q.sub(r"\1…", args[2]), *args[3:])
+        return True
+
+
 def create_app() -> FastAPI:
+    access_log = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _HideSearchText) for f in access_log.filters):
+        access_log.addFilter(_HideSearchText())
     app = FastAPI(
         title="Thaqalayn Library API",
         version=__version__,
